@@ -58,4 +58,3 @@ func TestRecordKey(t *testing.T) {
 	assert.Equal(t, recordKey(duid1), recordKey(duid1))
 	assert.NotEqual(t, recordKey(duid1), recordKey(duid2))
 }
-
