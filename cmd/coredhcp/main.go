@@ -9,7 +9,10 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/coredhcp/coredhcp/config"
 	"github.com/coredhcp/coredhcp/logger"
@@ -63,23 +66,32 @@ var desiredPlugins = []*plugins.Plugin{
 
 func main() {
 	flag.Parse()
+	if err := run(os.Stdout); err != nil {
+		logger.GetLogger("main").Fatal(err)
+	}
+}
 
+// run executes the server with the parsed flag values, writing informational
+// output to w. Split from main so it can be tested.
+func run(w io.Writer) error {
 	if *flagPlugins {
 		for _, p := range desiredPlugins {
-			fmt.Println(p.Name)
+			if _, err := fmt.Fprintln(w, p.Name); err != nil {
+				return err
+			}
 		}
-		os.Exit(0)
+		return nil
 	}
 
 	log := logger.GetLogger("main")
 	if err := logger.SetLevel(*flagLogLevel); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	log.Infof("Setting log level to '%s'", *flagLogLevel)
 	if *flagLogFile != "" {
 		log.Infof("Logging to file %s", *flagLogFile)
 		if err := logger.WithFile(*flagLogFile); err != nil {
-			log.Fatalf("Failed to open log file: %v", err)
+			return fmt.Errorf("failed to open log file: %w", err)
 		}
 	}
 	if *flagLogNoStdout {
@@ -88,21 +100,33 @@ func main() {
 	}
 	config, err := config.Load(*flagConfig)
 	if err != nil {
-		log.Fatalf("Failed to load configuration: %v", err)
+		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 	// register plugins
 	for _, plugin := range desiredPlugins {
 		if err := plugins.RegisterPlugin(plugin); err != nil {
-			log.Fatalf("Failed to register plugin '%s': %v", plugin.Name, err)
+			return fmt.Errorf("failed to register plugin '%s': %w", plugin.Name, err)
 		}
 	}
 
 	// start server
 	srv, err := server.Start(config)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
+
+	// shut down cleanly on SIGINT/SIGTERM
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sig)
+	go func() {
+		s := <-sig
+		log.Infof("received %s, shutting down", s)
+		srv.Close()
+	}()
+
 	if err := srv.Wait(); err != nil {
 		log.Error(err)
 	}
+	return nil
 }

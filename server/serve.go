@@ -26,17 +26,42 @@ import (
 
 var log = logger.GetLogger("server")
 
+// conn6 is the subset of *ipv6.PacketConn the dispatch path uses, split out
+// so it can be exercised without a real socket.
+type conn6 interface {
+	ReadFrom(b []byte) (int, *ipv6.ControlMessage, net.Addr, error)
+	WriteTo(b []byte, cm *ipv6.ControlMessage, dst net.Addr) (int, error)
+	LocalAddr() net.Addr
+	Close() error
+}
+
+// conn4 is the subset of *ipv4.PacketConn the dispatch path uses, split out
+// so it can be exercised without a real socket.
+type conn4 interface {
+	ReadFrom(b []byte) (int, *ipv4.ControlMessage, net.Addr, error)
+	WriteTo(b []byte, cm *ipv4.ControlMessage, dst net.Addr) (int, error)
+	LocalAddr() net.Addr
+	Close() error
+}
+
 type listener6 struct {
-	*ipv6.PacketConn
+	conn6
 	net.Interface
 	handlers []handler.Handler6
 }
 
 type listener4 struct {
-	*ipv4.PacketConn
+	conn4
 	net.Interface
 	handlers []handler.Handler4
 }
+
+// The socket constructors are swappable so socket-setup error paths can be
+// reached in tests without privileges.
+var (
+	newUDP4 = server4.NewIPv4UDPConn
+	newUDP6 = server6.NewIPv6UDPConn
+)
 
 type listener interface {
 	io.Closer
@@ -51,11 +76,12 @@ type Servers struct {
 func listen4(a *net.UDPAddr) (*listener4, error) {
 	var err error
 	l4 := listener4{}
-	udpConn, err := server4.NewIPv4UDPConn(a.Zone, a)
+	udpConn, err := newUDP4(a.Zone, a)
 	if err != nil {
 		return nil, err
 	}
-	l4.PacketConn = ipv4.NewPacketConn(udpConn)
+	pc := ipv4.NewPacketConn(udpConn)
+	l4.conn4 = pc
 	var ifi *net.Interface
 	if a.Zone != "" {
 		ifi, err = net.InterfaceByName(a.Zone)
@@ -64,17 +90,16 @@ func listen4(a *net.UDPAddr) (*listener4, error) {
 		}
 		l4.Interface = *ifi
 	} else {
-
 		// When not bound to an interface, we need the information in each
 		// packet to know which interface it came on
-		err = l4.SetControlMessage(ipv4.FlagInterface, true)
+		err = pc.SetControlMessage(ipv4.FlagInterface, true)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	if a.IP.IsMulticast() {
-		err = l4.JoinGroup(ifi, a)
+		err = pc.JoinGroup(ifi, a)
 		if err != nil {
 			return nil, err
 		}
@@ -84,11 +109,12 @@ func listen4(a *net.UDPAddr) (*listener4, error) {
 
 func listen6(a *net.UDPAddr) (*listener6, error) {
 	l6 := listener6{}
-	udpconn, err := server6.NewIPv6UDPConn(a.Zone, a)
+	udpconn, err := newUDP6(a.Zone, a)
 	if err != nil {
 		return nil, err
 	}
-	l6.PacketConn = ipv6.NewPacketConn(udpconn)
+	pc := ipv6.NewPacketConn(udpconn)
+	l6.conn6 = pc
 	var ifi *net.Interface
 	if a.Zone != "" {
 		ifi, err = net.InterfaceByName(a.Zone)
@@ -99,14 +125,14 @@ func listen6(a *net.UDPAddr) (*listener6, error) {
 	} else {
 		// When not bound to an interface, we need the information in each
 		// packet to know which interface it came on
-		err = l6.SetControlMessage(ipv6.FlagInterface, true)
+		err = pc.SetControlMessage(ipv6.FlagInterface, true)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	if a.IP.IsMulticast() {
-		err = l6.JoinGroup(ifi, a)
+		err = pc.JoinGroup(ifi, a)
 		if err != nil {
 			return nil, err
 		}

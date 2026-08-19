@@ -18,16 +18,24 @@ import (
 
 var log = logger.GetLogger("main")
 
+var flagInterface = flag.String("interface", "lo", "Interface to run the exchange on")
+
 func main() {
 	flag.Parse()
 
-	var macString string
+	macString := "00:11:22:33:44:55"
 	if len(flag.Args()) > 0 {
 		macString = flag.Arg(0)
-	} else {
-		macString = "00:11:22:33:44:55"
 	}
 
+	if err := run(macString, *flagInterface); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// run performs one solicit/advertise exchange as macString on the given
+// interface. Split from main so it can be tested.
+func run(macString, ifname string) error {
 	c := client6.NewClient()
 	c.LocalAddr = &net.UDPAddr{
 		IP:   net.ParseIP("::1"),
@@ -41,7 +49,7 @@ func main() {
 
 	mac, err := net.ParseMAC(macString)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	duid := dhcpv6.DUIDLLT{
 		HWType:        iana.HWTypeEthernet,
@@ -49,11 +57,14 @@ func main() {
 		LinkLayerAddr: mac,
 	}
 
-	conv, err := c.Exchange("lo", dhcpv6.WithClientID(&duid))
+	conv, err := c.Exchange(ifname, dhcpv6.WithClientID(&duid))
+	printConversation(conv)
+	return err
+}
+
+// printConversation logs a summary of every message in the exchange.
+func printConversation(conv []dhcpv6.DHCPv6) {
 	for _, p := range conv {
 		log.Print(p.Summary())
-	}
-	if err != nil {
-		log.Fatal(err)
 	}
 }
