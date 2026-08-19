@@ -85,7 +85,7 @@ func TestWriteRecords(t *testing.T) {
 			// bug in testdata
 			panic(err)
 		}
-		if err := pl.saveIPAddress(hwaddr, rec.ip); err != nil {
+		if err := pl.saveIPAddress(hwaddr.String(), rec.ip); err != nil {
 			t.Errorf("Failed to save ip for %s: %v", hwaddr, err)
 		}
 		mapRec[hwaddr.String()] = &Record{IP: rec.ip.IP, expires: rec.ip.expires, hostname: rec.ip.hostname}
@@ -122,7 +122,7 @@ func TestFreeIPAddress(t *testing.T) {
 	assert.True(t, exists, "Record should exist before deletion")
 
 	// Now free the IP address
-	if err := pl.freeIPAddress(hwaddr, record); err != nil {
+	if err := pl.freeIPAddress(hwaddr.String(), record); err != nil {
 		t.Errorf("Failed to free IP address: %v", err)
 	}
 
@@ -151,7 +151,7 @@ func TestFreeIPAddressNonExistent(t *testing.T) {
 		hostname: "non-existent",
 	}
 
-	err = pl.freeIPAddress(hwaddr, record)
+	err = pl.freeIPAddress(hwaddr.String(), record)
 	assert.NoError(t, err, "Freeing a non-existent IP address should not return an error")
 
 	parsedRecords, err := loadRecords(pl.leasedb)
@@ -179,7 +179,7 @@ func TestFreeIPAddressVerifyDeletion(t *testing.T) {
 	hwaddrToDelete, _ := net.ParseMAC(records[2].mac)
 	recordToDelete := records[2].ip
 
-	if err := pl.freeIPAddress(hwaddrToDelete, recordToDelete); err != nil {
+	if err := pl.freeIPAddress(hwaddrToDelete.String(), recordToDelete); err != nil {
 		t.Errorf("Failed to free IP address: %v", err)
 	}
 
@@ -234,7 +234,7 @@ func TestFreeIPAddressExecutionError(t *testing.T) {
 
 	record := records[0].ip
 
-	err = pl.freeIPAddress(hwaddr, record)
+	err = pl.freeIPAddress(hwaddr.String(), record)
 
 	assert.Error(t, err, "Should return error due to trigger preventing deletion")
 	assert.Contains(t, err.Error(), "record delete failed", "Error should indicate record delete failure")

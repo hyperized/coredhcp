@@ -153,3 +153,33 @@ func TestPluginSetupReallocationMismatch(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "did not re-allocate requested leased ip")
 }
+
+// TestPluginSetupSweepArgument covers the optional fifth argument end to end.
+// Anything that is not a sweep argument is rejected rather than silently
+// ignored, so a typo in the config surfaces at startup.
+func TestPluginSetupSweepArgument(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		extra   []string
+		wantErr bool
+	}{
+		{name: "omitted", extra: nil},
+		{name: "explicit interval", extra: []string{"sweep:90s"}},
+		{name: "bare duration", extra: []string{"90s"}, wantErr: true},
+		{name: "malformed duration", extra: []string{"sweep:soon"}, wantErr: true},
+		{name: "zero interval", extra: []string{"sweep:0s"}, wantErr: true},
+		{name: "negative interval", extra: []string{"sweep:-1m"}, wantErr: true},
+		{name: "two sweep arguments", extra: []string{"sweep:90s", "sweep:2m"}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{filepath.Join(t.TempDir(), "leases.db"), "10.0.0.1", "10.0.0.5", "1h"}, tc.extra...)
+			h4, err := rangeplugin.Plugin.Setup4(args...)
+			if tc.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.NotNil(t, h4)
+		})
+	}
+}

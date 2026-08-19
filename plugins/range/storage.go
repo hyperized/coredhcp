@@ -67,11 +67,14 @@ func loadRecords(db *sql.DB) (map[string]*Record, error) {
 	return records, nil
 }
 
-// saveIPAddress writes out a lease to storage
-func (p *pluginState) saveIPAddress(mac net.HardwareAddr, record *Record) error {
+// saveIPAddress writes out a lease to storage. mac is the canonical
+// net.HardwareAddr.String() form, which is also the Recordsv4 key: the sweeper
+// walks that map and would otherwise have to parse every key back into a
+// net.HardwareAddr only to format it again.
+func (p *pluginState) saveIPAddress(mac string, record *Record) error {
 	if _, err := p.leasedb.Exec(
 		`insert or replace into leases4(mac, ip, expiry, hostname) values (?, ?, ?, ?)`,
-		mac.String(),
+		mac,
 		record.IP.String(),
 		record.expires,
 		record.hostname,
@@ -81,11 +84,12 @@ func (p *pluginState) saveIPAddress(mac net.HardwareAddr, record *Record) error 
 	return nil
 }
 
-// freeIPAddress removes a lease from storage
-func (p *pluginState) freeIPAddress(mac net.HardwareAddr, record *Record) error {
+// freeIPAddress removes a lease from storage. mac is the canonical
+// net.HardwareAddr.String() form, as for saveIPAddress.
+func (p *pluginState) freeIPAddress(mac string, record *Record) error {
 	if _, err := p.leasedb.Exec(
 		`delete from leases4 where mac = ? and ip = ?`,
-		mac.String(),
+		mac,
 		record.IP.String(),
 	); err != nil {
 		return fmt.Errorf("record delete failed: %w", err)
