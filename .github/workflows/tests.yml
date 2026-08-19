@@ -83,6 +83,13 @@ jobs:
       - uses: actions/checkout@v7
       - name: DHCPv4 end-to-end over a bridge network
         run: make test-compose
+  redis-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: redis plugin against a real Redis server
+        run: make test-redis
   bench-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 15

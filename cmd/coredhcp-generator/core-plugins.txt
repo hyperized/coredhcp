@@ -7,11 +7,13 @@ github.com/coredhcp/coredhcp/plugins/macfilter
 github.com/coredhcp/coredhcp/plugins/metrics
 github.com/coredhcp/coredhcp/plugins/mtu
 github.com/coredhcp/coredhcp/plugins/nbp
+github.com/coredhcp/coredhcp/plugins/netbox
 github.com/coredhcp/coredhcp/plugins/netmask
 github.com/coredhcp/coredhcp/plugins/ntp
 github.com/coredhcp/coredhcp/plugins/options
 github.com/coredhcp/coredhcp/plugins/prefix
 github.com/coredhcp/coredhcp/plugins/range
+github.com/coredhcp/coredhcp/plugins/redis
 github.com/coredhcp/coredhcp/plugins/router
 github.com/coredhcp/coredhcp/plugins/searchdomains
 github.com/coredhcp/coredhcp/plugins/serverid

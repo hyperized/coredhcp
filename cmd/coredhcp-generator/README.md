@@ -28,7 +28,7 @@ chosen path instead of a temporary directory:
 
 ```
 $ ./coredhcp-generator --from core-plugins.txt \
-    github.com/coredhcp/plugins/redis
+    github.com/example/coredhcp-plugin-foo
 ```
 
 ## Building the generated file
