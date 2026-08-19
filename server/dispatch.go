@@ -102,14 +102,20 @@ func encapsulateRelay6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, error) {
 	return dhcpv6.NewRelayReplFromRelayForw(req.(*dhcpv6.RelayMessage), rmsg)
 }
 
-// replyDestination4 decides where a DHCPv4 response goes. useEthernet is set
-// when the client has no usable IP yet and the reply must leave as a raw
-// layer-2 unicast.
-func replyDestination4(req, resp *dhcpv4.DHCPv4) (peer *net.UDPAddr, useEthernet bool) {
+// replyDestination4 decides where a DHCPv4 response goes. src is the address
+// the request arrived from (may be nil when unknown). useEthernet is set when
+// the client has no usable IP yet and the reply must leave as a raw layer-2
+// unicast.
+func replyDestination4(req, resp *dhcpv4.DHCPv4, src *net.UDPAddr) (peer *net.UDPAddr, useEthernet bool) {
 	switch {
 	case !req.GatewayIPAddr.IsUnspecified():
-		// TODO: make RFC8357 compliant
-		return &net.UDPAddr{IP: req.GatewayIPAddr, Port: dhcpv4.ServerPort}, false
+		// RFC 8357: a relay may send from a port other than 67, and the
+		// reply must go back to the port the request came from.
+		port := dhcpv4.ServerPort
+		if src != nil && src.Port != 0 {
+			port = src.Port
+		}
+		return &net.UDPAddr{IP: req.GatewayIPAddr, Port: port}, false
 	case resp.MessageType() == dhcpv4.MessageTypeNak:
 		return &net.UDPAddr{IP: net.IPv4bcast, Port: dhcpv4.ClientPort}, false
 	case !req.ClientIPAddr.IsUnspecified():

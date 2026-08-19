@@ -127,6 +127,6 @@ func BenchmarkReplyDestination4(b *testing.B) {
 	}
 
 	for b.Loop() {
-		replyDestination4(req, resp)
+		replyDestination4(req, resp, nil)
 	}
 }

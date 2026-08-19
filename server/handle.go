@@ -67,7 +67,7 @@ func (l *listener6) HandleMsg6(buf []byte, oob *ipv6.ControlMessage, peer *net.U
 // HandleMsg4 runs for every received DHCPv4 packet. It will run every
 // registered handler in sequence, and reply with the resulting response.
 // It will not reply if the resulting response is `nil`.
-func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, _ *net.UDPAddr) {
+func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, src *net.UDPAddr) {
 	req, err := dhcpv4.FromBytes(buf)
 	bufpool.Put(&buf)
 	if err != nil {
@@ -87,7 +87,7 @@ func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, _ *net.UDPA
 		return
 	}
 
-	peer, useEthernet := replyDestination4(req, resp)
+	peer, useEthernet := replyDestination4(req, resp, src)
 
 	var woob *ipv4.ControlMessage
 	if peer.IP.Equal(net.IPv4bcast) || peer.IP.IsLinkLocalUnicast() || useEthernet {

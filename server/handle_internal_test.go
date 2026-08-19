@@ -329,6 +329,7 @@ func TestReplyDestination4(t *testing.T) {
 		name            string
 		req             *dhcpv4.DHCPv4
 		resp            *dhcpv4.DHCPv4
+		src             *net.UDPAddr
 		wantIP          net.IP
 		wantPort        int
 		wantUseEthernet bool
@@ -337,6 +338,24 @@ func TestReplyDestination4(t *testing.T) {
 			name:     "gateway set takes priority",
 			req:      mustRequest4(t, dhcpv4.WithGatewayIP(net.ParseIP("10.0.0.1"))),
 			resp:     ack,
+			wantIP:   net.ParseIP("10.0.0.1"),
+			wantPort: dhcpv4.ServerPort,
+		},
+		{
+			// RFC 8357: the relay may send from any port, and the reply
+			// must go back to that port.
+			name:     "relayed request replies to observed source port",
+			req:      mustRequest4(t, dhcpv4.WithGatewayIP(net.ParseIP("10.0.0.1"))),
+			resp:     ack,
+			src:      &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 6767},
+			wantIP:   net.ParseIP("10.0.0.1"),
+			wantPort: 6767,
+		},
+		{
+			name:     "relayed request with zero source port keeps the server port",
+			req:      mustRequest4(t, dhcpv4.WithGatewayIP(net.ParseIP("10.0.0.1"))),
+			resp:     ack,
+			src:      &net.UDPAddr{IP: net.ParseIP("10.0.0.1")},
 			wantIP:   net.ParseIP("10.0.0.1"),
 			wantPort: dhcpv4.ServerPort,
 		},
@@ -377,7 +396,7 @@ func TestReplyDestination4(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			peer, useEthernet := replyDestination4(tc.req, tc.resp)
+			peer, useEthernet := replyDestination4(tc.req, tc.resp, tc.src)
 			require.NotNil(t, peer)
 			assert.True(t, tc.wantIP.Equal(peer.IP), "IP: got %v want %v", peer.IP, tc.wantIP)
 			assert.Equal(t, tc.wantPort, peer.Port)
