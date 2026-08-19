@@ -66,7 +66,7 @@ func setupPrefix(args ...string) (handler.Handler6, error) {
 		return nil, fmt.Errorf("could not initialize prefix allocator: %w", err)
 	}
 
-	return (&Handler{
+	return (&pluginState{
 		Records:   make(map[string][]lease),
 		allocator: alloc,
 	}).Handle, nil
@@ -77,8 +77,10 @@ type lease struct {
 	Expire time.Time
 }
 
-// Handler holds state of allocations for the plugin
-type Handler struct {
+// pluginState holds the pool and the lease set of a single setup6 instance of
+// the plugin. Two prefix plugins in the same config carve from their own pool
+// and keep their own leases.
+type pluginState struct {
 	// Mutex here is the simplest implementation fit for purpose.
 	// We can revisit for perf when we move lease management to separate plugins
 	sync.Mutex
@@ -103,7 +105,7 @@ func recordKey(d dhcpv6.DUID) string {
 }
 
 // Handle processes DHCPv6 packets for the prefix plugin for a given allocator/leaseset
-func (h *Handler) Handle(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
+func (h *pluginState) Handle(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	msg, err := req.GetInnerMessage()
 	if err != nil {
 		log.Error(err)
@@ -118,130 +120,233 @@ func (h *Handler) Handle(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 
 	// Each request IA_PD requires an IA_PD response
 	for _, iapd := range msg.Options.IAPD() {
-		iapdResp := &dhcpv6.OptIAPD{
-			IaId: iapd.IaId,
-		}
-
-		// First figure out what prefixes the client wants
-		hints := iapd.Options.Prefixes()
-		if len(hints) == 0 {
-			// If there are no IAPrefix hints, this is still a valid IA_PD request (just
-			// unspecified) and we must attempt to allocate a prefix; so we include an empty hint
-			// which is equivalent to no hint
-			hints = []*dhcpv6.OptIAPrefix{{Prefix: &net.IPNet{}}}
-		}
-
-		// Bitmap to track which requests are already satisfied or not
-		satisfied := bitset.New(uint(len(hints)))
-
-		// A possible simple optimization here would be to be able to lock single map values
-		// individually instead of the whole map, since we lock for some amount of time
-		h.Lock()
-		knownLeases := h.Records[recordKey(client)]
-		// Bitmap to track which leases are already given in this exchange
-		givenOut := bitset.New(uint(len(knownLeases)))
-
-		// This is, for now, a set of heuristics, to reconcile the requests (prefix hints asked
-		// by the clients) with what's on offer (existing leases for this client, plus new blocks)
-
-		// Try to find leases that exactly match a hint, and extend them to satisfy the request
-		// This is the safest heuristic, if the lease matches exactly we know we aren't missing
-		// assigning it to a better candidate request
-		for hintIdx, h := range hints {
-			for leaseIdx := range knownLeases {
-				if samePrefix(h.Prefix, &knownLeases[leaseIdx].Prefix) {
-					expire := time.Now().Add(leaseDuration)
-					if knownLeases[leaseIdx].Expire.Before(expire) {
-						knownLeases[leaseIdx].Expire = expire
-					}
-					satisfied.Set(uint(hintIdx))
-					givenOut.Set(uint(leaseIdx))
-					addPrefix(iapdResp, knownLeases[leaseIdx])
-				}
-			}
-		}
-
-		// Then handle the empty hints, by giving out any remaining lease we
-		// have already assigned to this client
-		for hintIdx, h := range hints {
-			if satisfied.Test(uint(hintIdx)) ||
-				(h.Prefix != nil && !h.Prefix.IP.Equal(net.IPv6zero)) {
-				continue
-			}
-			for leaseIdx, l := range knownLeases {
-				if givenOut.Test(uint(leaseIdx)) {
-					continue
-				}
-
-				// If a length was requested, only give out prefixes of that length
-				// This is a bad heuristic depending on the allocator behavior, to be improved
-				if hintPrefixLen, _ := h.Prefix.Mask.Size(); hintPrefixLen != 0 {
-					leasePrefixLen, _ := l.Prefix.Mask.Size()
-					if hintPrefixLen != leasePrefixLen {
-						continue
-					}
-				}
-				expire := time.Now().Add(leaseDuration)
-				if knownLeases[leaseIdx].Expire.Before(expire) {
-					knownLeases[leaseIdx].Expire = expire
-				}
-				satisfied.Set(uint(hintIdx))
-				givenOut.Set(uint(leaseIdx))
-				addPrefix(iapdResp, knownLeases[leaseIdx])
-			}
-		}
-
-		// Now remains requests with a hint that we can't trivially satisfy, and possibly expired
-		// leases that haven't been explicitly requested again.
-		// A possible improvement here would be to try to widen existing leases, to satisfy wider
-		// requests that contain an existing leases; and to try to break down existing leases into
-		// smaller allocations, to satisfy requests for a subnet of an existing lease
-		// We probably don't need such complex behavior (the vast majority of requests will come
-		// with an empty, or length-only hint)
-
-		// Assign a new lease to satisfy the request
-		newLeases := knownLeases
-		for i, prefix := range hints {
-			if satisfied.Test(uint(i)) {
-				continue
-			}
-
-			if prefix.Prefix == nil {
-				// XXX: replace usage of dhcp.OptIAPrefix with a better struct in this inner
-				// function to avoid repeated nullpointer checks
-				prefix.Prefix = &net.IPNet{}
-			}
-			allocated, err := h.allocator.Allocate(*prefix.Prefix)
-			if err != nil {
-				log.Debugf("Nothing allocated for hinted prefix %s", prefix)
-				continue
-			}
-			l := lease{
-				Expire: time.Now().Add(leaseDuration),
-				Prefix: allocated,
-			}
-
-			addPrefix(iapdResp, l)
-			newLeases = append(newLeases, l)
-			log.Debugf("Allocated %s to %s (IAID: %x)", &allocated, client, iapd.IaId)
-		}
-
-		if len(newLeases) != len(knownLeases) {
-			h.Records[recordKey(client)] = newLeases
-		}
-		h.Unlock()
-
-		if len(iapdResp.Options.Options) == 0 {
-			log.Debugf("No valid prefix to return for IAID %x", iapd.IaId)
-			iapdResp.Options.Add(&dhcpv6.OptStatusCode{
-				StatusCode: dhcpIana.StatusNoPrefixAvail,
-			})
-		}
-
-		resp.AddOption(iapdResp)
+		resp.AddOption(h.respondToIAPD(client, iapd))
 	}
 
 	return resp, false
+}
+
+// respondToIAPD builds the IA_PD option answering one requested IA_PD. A request
+// we could not satisfy at all still gets an IA_PD back, carrying a status code
+// instead of prefixes.
+func (h *pluginState) respondToIAPD(client dhcpv6.DUID, iapd *dhcpv6.OptIAPD) *dhcpv6.OptIAPD {
+	iapdResp := &dhcpv6.OptIAPD{
+		IaId: iapd.IaId,
+	}
+
+	h.reconcile(client, iapd, iapdResp)
+
+	if len(iapdResp.Options.Options) == 0 {
+		log.Debugf("No valid prefix to return for IAID %x", iapd.IaId)
+		iapdResp.Options.Add(&dhcpv6.OptStatusCode{
+			StatusCode: dhcpIana.StatusNoPrefixAvail,
+		})
+	}
+
+	return iapdResp
+}
+
+// requestedPrefixes returns the prefixes the client hints at in one IA_PD.
+// An IA_PD without any IAPrefix is still a valid request (just unspecified) and
+// we must attempt to allocate a prefix for it, so it gets a single empty hint,
+// which is equivalent to no hint.
+func requestedPrefixes(iapd *dhcpv6.OptIAPD) []*dhcpv6.OptIAPrefix {
+	hints := iapd.Options.Prefixes()
+	if len(hints) == 0 {
+		return []*dhcpv6.OptIAPrefix{{Prefix: &net.IPNet{}}}
+	}
+	return hints
+}
+
+// pdExchange is the working state of one IA_PD reconciliation: the requests
+// (prefix hints asked by the client), what is on offer (the leases we already
+// hold for it), the bookkeeping of what has been matched to what, and the
+// response being filled in.
+//
+// satisfied is indexed by position in hints, givenOut by position in
+// knownLeases. knownLeases aliases the slice held in pluginState.Records, so
+// pushing out an expiry in place is what renews a lease.
+type pdExchange struct {
+	client      dhcpv6.DUID
+	iaid        [4]byte
+	hints       []*dhcpv6.OptIAPrefix
+	knownLeases []lease
+	satisfied   *bitset.BitSet
+	givenOut    *bitset.BitSet
+	resp        *dhcpv6.OptIAPD
+}
+
+// reconcile matches the hints of one IA_PD against the leases we already hold
+// for this client, plus new blocks from the pool, and adds every prefix the
+// client ends up with to iapdResp.
+//
+// The matching is, for now, a set of heuristics, run as three passes in order of
+// decreasing confidence. The whole thing runs under the lock: the passes renew
+// leases in place and may append to the client's record.
+func (h *pluginState) reconcile(client dhcpv6.DUID, iapd, iapdResp *dhcpv6.OptIAPD) {
+	hints := requestedPrefixes(iapd)
+
+	// A possible simple optimization here would be to be able to lock single map values
+	// individually instead of the whole map, since we lock for some amount of time
+	h.Lock()
+	defer h.Unlock()
+
+	knownLeases := h.Records[recordKey(client)]
+	e := &pdExchange{
+		client:      client,
+		iaid:        iapd.IaId,
+		hints:       hints,
+		knownLeases: knownLeases,
+		satisfied:   bitset.New(uint(len(hints))),
+		givenOut:    bitset.New(uint(len(knownLeases))),
+		resp:        iapdResp,
+	}
+
+	e.renewExactMatches()
+	e.giveOutRemaining()
+	newLeases := h.allocateForUnsatisfied(e)
+
+	if len(newLeases) != len(knownLeases) {
+		h.Records[recordKey(client)] = newLeases
+	}
+}
+
+// renewExactMatches extends the leases that exactly match a hint and hands them
+// straight back.
+//
+// This is the safest heuristic, if the lease matches exactly we know we aren't
+// missing assigning it to a better candidate request.
+func (e *pdExchange) renewExactMatches() {
+	for hintIdx, hint := range e.hints {
+		for leaseIdx := range e.knownLeases {
+			if samePrefix(hint.Prefix, &e.knownLeases[leaseIdx].Prefix) {
+				e.grant(hintIdx, leaseIdx)
+			}
+		}
+	}
+}
+
+// giveOutRemaining satisfies the hints that named no particular prefix with the
+// leases this client already holds and that no hint has claimed yet.
+//
+// A hint is never taken out of the running once it has been served, so one
+// unqualified hint can absorb every remaining lease. That is the historical
+// behaviour, pinned by TestHandleZeroIPHintLengthMismatchAllocatesNew.
+func (e *pdExchange) giveOutRemaining() {
+	for hintIdx, hint := range e.hints {
+		if !e.wantsAnyPrefix(hintIdx, hint) {
+			continue
+		}
+		for leaseIdx, l := range e.knownLeases {
+			if e.givenOut.Test(uint(leaseIdx)) || !lengthMatches(hint, l) {
+				continue
+			}
+			e.grant(hintIdx, leaseIdx)
+		}
+	}
+}
+
+// wantsAnyPrefix reports whether a hint still needs a prefix and takes whichever
+// one we care to give it, which a client says by hinting at the all-zeroes
+// address.
+//
+// The empty hint we synthesise for an IA_PD that carried no IAPrefix at all has
+// no address rather than the zero address, so it does not qualify here and falls
+// through to a fresh allocation.
+func (e *pdExchange) wantsAnyPrefix(hintIdx int, hint *dhcpv6.OptIAPrefix) bool {
+	if e.satisfied.Test(uint(hintIdx)) {
+		return false
+	}
+	return hint.Prefix == nil || hint.Prefix.IP.Equal(net.IPv6zero)
+}
+
+// lengthMatches reports whether lease l has the prefix length hint asked for.
+// A hint that named no length takes any lease.
+//
+// This is a bad heuristic depending on the allocator behavior, to be improved.
+//
+// hint.Prefix is read without a nil check, which is the behaviour that was here
+// before: a hint with no prefix at all (which the wire decoder produces for a
+// prefix-length of 0) panics here as soon as the client holds a lease we have
+// not given out yet. Left as-is to keep this refactor behaviour-preserving; it
+// wants a fix of its own.
+func lengthMatches(hint *dhcpv6.OptIAPrefix, l lease) bool {
+	hintPrefixLen, _ := hint.Prefix.Mask.Size()
+	if hintPrefixLen == 0 {
+		return true
+	}
+	leasePrefixLen, _ := l.Prefix.Mask.Size()
+	return hintPrefixLen == leasePrefixLen
+}
+
+// grant hands the lease at leaseIdx to the hint at hintIdx: it pushes the expiry
+// out to a full lease duration, never shortening a lease that already runs
+// longer, marks both sides as accounted for, and adds the prefix to the response.
+func (e *pdExchange) grant(hintIdx, leaseIdx int) {
+	expire := time.Now().Add(leaseDuration)
+	if e.knownLeases[leaseIdx].Expire.Before(expire) {
+		e.knownLeases[leaseIdx].Expire = expire
+	}
+	e.satisfied.Set(uint(hintIdx))
+	e.givenOut.Set(uint(leaseIdx))
+	addPrefix(e.resp, e.knownLeases[leaseIdx])
+}
+
+// allocateForUnsatisfied carves a new prefix out of the pool for every hint no
+// existing lease could satisfy, and returns the client's full lease set.
+//
+// What is left at this point are requests with a hint we can't trivially satisfy,
+// and possibly expired leases that haven't been explicitly requested again.
+// A possible improvement here would be to try to widen existing leases, to
+// satisfy wider requests that contain an existing lease; and to try to break down
+// existing leases into smaller allocations, to satisfy requests for a subnet of an
+// existing lease. We probably don't need such complex behavior (the vast majority
+// of requests will come with an empty, or length-only hint)
+//
+// The accumulator starts from the known leases so that a lease allocated for an
+// earlier hint of the same request survives (7f79c14).
+func (h *pluginState) allocateForUnsatisfied(e *pdExchange) []lease {
+	newLeases := e.knownLeases
+
+	for hintIdx, hint := range e.hints {
+		if e.satisfied.Test(uint(hintIdx)) {
+			continue
+		}
+
+		l, ok := h.newLease(hint)
+		if !ok {
+			continue
+		}
+
+		addPrefix(e.resp, l)
+		newLeases = append(newLeases, l)
+		log.Debugf("Allocated %s to %s (IAID: %x)", &l.Prefix, e.client, e.iaid)
+	}
+
+	return newLeases
+}
+
+// newLease carves a prefix out of the pool for a single hint. It reports false
+// when the allocator has nothing to offer, which is not fatal to the request as
+// a whole: the other hints may still be satisfiable.
+//
+// A hint with no prefix at all is normalised to the empty prefix in place, which
+// the allocator reads as "anything will do".
+func (h *pluginState) newLease(hint *dhcpv6.OptIAPrefix) (lease, bool) {
+	if hint.Prefix == nil {
+		hint.Prefix = &net.IPNet{}
+	}
+
+	allocated, err := h.allocator.Allocate(*hint.Prefix)
+	if err != nil {
+		log.Debugf("Nothing allocated for hinted prefix %s", hint)
+		return lease{}, false
+	}
+
+	return lease{
+		Expire: time.Now().Add(leaseDuration),
+		Prefix: allocated,
+	}, true
 }
 
 func addPrefix(resp *dhcpv6.OptIAPD, l lease) {
