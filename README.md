@@ -9,7 +9,13 @@ globals, a strict golangci-lint config at zero issues, and near-total test
 coverage. Commits stay small and per-concern so changes can flow back
 upstream.
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/hyperized/coredhcp)](https://goreportcard.com/report/github.com/hyperized/coredhcp)
+[![Build](https://github.com/hyperized/coredhcp/actions/workflows/build.yml/badge.svg)](https://github.com/hyperized/coredhcp/actions/workflows/build.yml)
+[![Tests](https://github.com/hyperized/coredhcp/actions/workflows/tests.yml/badge.svg)](https://github.com/hyperized/coredhcp/actions/workflows/tests.yml)
+[![Lint](https://github.com/hyperized/coredhcp/actions/workflows/lint.yml/badge.svg)](https://github.com/hyperized/coredhcp/actions/workflows/lint.yml)
+[![Fuzz](https://github.com/hyperized/coredhcp/actions/workflows/fuzz.yml/badge.svg)](https://github.com/hyperized/coredhcp/actions/workflows/fuzz.yml)
+[![Coverage](https://img.shields.io/badge/coverage-98.6%25-brightgreen)](https://github.com/hyperized/coredhcp/actions/workflows/tests.yml)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/hyperized/coredhcp)](go.mod)
+[![License](https://img.shields.io/github/license/hyperized/coredhcp)](LICENSE)
 
 ## Example configuration
 
@@ -136,6 +142,21 @@ new features to CoreDHCP.
 Core plugins can be found under the [plugins](/plugins/) directory. Additional
 plugins can also be found in the
 [coredhcp/plugins](https://github.com/coredhcp/plugins) repository.
+
+This fork adds four plugins upstream does not have:
+
+* [options](plugins/options/) sets any DHCP option from config
+  (`15:string:home.lan`), typed and validated, instead of one plugin per
+  option
+* [metrics](plugins/metrics/) serves request counters in Prometheus text
+  format, with no new dependencies
+* [macfilter](plugins/macfilter/) allows or denies clients by MAC, inline or
+  from a file
+* [ntp](plugins/ntp/) announces NTP servers, option 42 on DHCPv4 and the
+  RFC 5908 option on DHCPv6
+
+The `range` plugin also releases expired leases here (a pool on upstream
+fills up forever: coredhcp/coredhcp#148).
 
 ## Server with custom plugins
 

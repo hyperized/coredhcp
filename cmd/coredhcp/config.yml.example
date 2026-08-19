@@ -129,6 +129,24 @@ server4:
     # External plugins should document their arguments in their own
     # documentations or readmes
     plugins:
+        # metrics serves Prometheus counters over plain HTTP. Put it first so
+        # every request is counted. When server4 and server6 configure the
+        # same address they share one listener.
+        # - metrics: 127.0.0.1:9754
+
+        # macfilter drops requests by client hardware address, before they
+        # reach any allocation plugin. Mode first (allow or deny), then MACs
+        # and/or file:/path entries with one MAC per line.
+        # - macfilter: deny de:ad:be:ef:00:01 file:/etc/coredhcp/blocked-macs
+
+        # ntp advertises NTP servers: option 42 here, the RFC 5908 option in
+        # a server6 section
+        # - ntp: 192.0.2.123
+
+        # options sets arbitrary options as code:type:value specs, where the
+        # type is one of string, ip, iplist, uint8, uint16, uint32, hex, bool
+        # - options: 15:string:home.lan 42:ip:192.0.2.10
+
         # lease_time sets the default lease time for advertised leases
         # - lease_time: <duration>
         # The duration can be given in any format understood by go's
@@ -156,7 +174,9 @@ server4:
         - netmask: 255.255.255.0
 
         # range allocates leases within a range of IPs
-        # - range: <lease file> <start IP> <end IP> <lease duration>
+        # - range: <lease file> <start IP> <end IP> <lease duration> [sweep:<interval>]
+        # Expired leases are reclaimed by a background sweep, by default every
+        # max(30s, half the lease duration); sweep: overrides the interval.
         # * the lease file is an initially empty file where the leases that are
         # allocated to clients will be stored across server restarts
         # * lease duration can be given in any format understood by go's

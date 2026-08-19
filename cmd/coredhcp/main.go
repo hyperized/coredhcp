@@ -4,6 +4,7 @@
 
 // This is a generated file, edits should be made in the corresponding source file
 // And this file regenerated using `coredhcp-generator --from core-plugins.txt`
+
 // The coredhcp command runs the DHCP server with the built-in plugin set.
 package main
 
@@ -14,19 +15,25 @@ import (
 	"os/signal"
 	"syscall"
 
+	flag "github.com/spf13/pflag"
+
 	"github.com/coredhcp/coredhcp/config"
 	"github.com/coredhcp/coredhcp/logger"
+	"github.com/coredhcp/coredhcp/plugins"
 	"github.com/coredhcp/coredhcp/server"
 
-	"github.com/coredhcp/coredhcp/plugins"
 	pl_autoconfigure "github.com/coredhcp/coredhcp/plugins/autoconfigure"
 	pl_dns "github.com/coredhcp/coredhcp/plugins/dns"
 	pl_file "github.com/coredhcp/coredhcp/plugins/file"
 	pl_ipv6only "github.com/coredhcp/coredhcp/plugins/ipv6only"
 	pl_leasetime "github.com/coredhcp/coredhcp/plugins/leasetime"
+	pl_macfilter "github.com/coredhcp/coredhcp/plugins/macfilter"
+	pl_metrics "github.com/coredhcp/coredhcp/plugins/metrics"
 	pl_mtu "github.com/coredhcp/coredhcp/plugins/mtu"
 	pl_nbp "github.com/coredhcp/coredhcp/plugins/nbp"
 	pl_netmask "github.com/coredhcp/coredhcp/plugins/netmask"
+	pl_ntp "github.com/coredhcp/coredhcp/plugins/ntp"
+	pl_options "github.com/coredhcp/coredhcp/plugins/options"
 	pl_prefix "github.com/coredhcp/coredhcp/plugins/prefix"
 	pl_range "github.com/coredhcp/coredhcp/plugins/range"
 	pl_router "github.com/coredhcp/coredhcp/plugins/router"
@@ -34,8 +41,6 @@ import (
 	pl_serverid "github.com/coredhcp/coredhcp/plugins/serverid"
 	pl_sleep "github.com/coredhcp/coredhcp/plugins/sleep"
 	pl_staticroute "github.com/coredhcp/coredhcp/plugins/staticroute"
-
-	flag "github.com/spf13/pflag"
 )
 
 var (
@@ -52,9 +57,13 @@ var desiredPlugins = []*plugins.Plugin{
 	&pl_file.Plugin,
 	&pl_ipv6only.Plugin,
 	&pl_leasetime.Plugin,
+	&pl_macfilter.Plugin,
+	&pl_metrics.Plugin,
 	&pl_mtu.Plugin,
 	&pl_nbp.Plugin,
 	&pl_netmask.Plugin,
+	&pl_ntp.Plugin,
+	&pl_options.Plugin,
 	&pl_prefix.Plugin,
 	&pl_range.Plugin,
 	&pl_router.Plugin,
