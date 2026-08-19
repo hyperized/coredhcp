@@ -76,7 +76,9 @@ func main() {
 func run(w io.Writer) error {
 	if *flagPlugins {
 		for _, p := range desiredPlugins {
-			fmt.Fprintln(w, p.Name)
+			if _, err := fmt.Fprintln(w, p.Name); err != nil {
+				return err
+			}
 		}
 		return nil
 	}

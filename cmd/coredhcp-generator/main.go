@@ -32,12 +32,9 @@ var (
 )
 
 var funcMap = template.FuncMap{
-	"importname": func(importPath string) (string, error) {
+	"importname": func(importPath string) string {
 		parts := strings.Split(importPath, "/")
-		if len(parts) < 1 {
-			return "", fmt.Errorf("no components found in import path '%s'", importPath)
-		}
-		return "pl_" + parts[len(parts)-1], nil
+		return "pl_" + parts[len(parts)-1]
 	},
 }
 
@@ -83,7 +80,7 @@ func run() error {
 			// which always requires (and uses) exact paths
 
 			// XXX: we could also look into github.com/coredhcp/plugins
-			pl = importBase + pl
+			pl = importBase + "plugins/" + pl
 		}
 		plugins[pl] = true
 	}
