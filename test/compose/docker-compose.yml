@@ -56,7 +56,10 @@ services:
     # No network at all: it only writes files, and leaving it off the bridge
     # keeps compose from creating a default network for this one service.
     network_mode: none
-    command: ["/bin/sh", "-c", "/src/scripts/render-config.sh; exec sleep ${SERVICE_LINGER:-3600}"]
+    # The trailing idle exits 0 on the teardown signal; `;` not `&&` so a
+    # failed render also idles (unhealthy) instead of exiting and disarming
+    # --exit-code-from for the whole run.
+    command: ["/bin/sh", "-c", "/src/scripts/render-config.sh; trap 'exit 0' TERM INT; sleep ${SERVICE_LINGER:-3600} & wait $$!"]
     healthcheck:
       test: ["CMD", "test", "-f", "/etc/coredhcp/config.yaml"]
       interval: 1s

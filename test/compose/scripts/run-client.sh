@@ -34,5 +34,9 @@ fi
 
 # Idle rather than exit: compose stops honouring `up --exit-code-from checker`
 # once any other container has exited first, and the run then never ends. The
-# checker must be the only service that exits; teardown kills this sleep.
-exec sleep "${SERVICE_LINGER:-3600}"
+# checker must be the only service that exits. Leave by the teardown signal
+# with status 0, so the shutdown doesn't print a wall of "exited with code
+# 143" that reads like a failure.
+trap 'exit 0' TERM INT
+sleep "${SERVICE_LINGER:-3600}" &
+wait $!
