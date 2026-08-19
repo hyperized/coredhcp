@@ -13,7 +13,7 @@ upstream.
 [![Tests](https://github.com/hyperized/coredhcp/actions/workflows/tests.yml/badge.svg)](https://github.com/hyperized/coredhcp/actions/workflows/tests.yml)
 [![Lint](https://github.com/hyperized/coredhcp/actions/workflows/lint.yml/badge.svg)](https://github.com/hyperized/coredhcp/actions/workflows/lint.yml)
 [![Fuzz](https://github.com/hyperized/coredhcp/actions/workflows/fuzz.yml/badge.svg)](https://github.com/hyperized/coredhcp/actions/workflows/fuzz.yml)
-[![Coverage](https://img.shields.io/badge/coverage-98.6%25-brightgreen)](https://github.com/hyperized/coredhcp/actions/workflows/tests.yml)
+[![Coverage](https://img.shields.io/badge/coverage-99.1%25-brightgreen)](https://github.com/hyperized/coredhcp/actions/workflows/tests.yml)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/hyperized/coredhcp)](go.mod)
 [![License](https://img.shields.io/github/license/hyperized/coredhcp)](LICENSE)
 
