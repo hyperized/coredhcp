@@ -13,7 +13,7 @@
 //	    - options: 15:string:home.lan 42:ip:192.0.2.10
 //
 // The specification is split on the first two colons only, so a value may
-// itself contain colons — which IPv6 addresses and URLs invariably do.
+// itself contain colons, as IPv6 addresses and URLs do.
 //
 // The type names an encoder from a fixed allow-list (string, ip, iplist,
 // uint8, uint16, uint32, hex, bool); everything is validated at setup time so

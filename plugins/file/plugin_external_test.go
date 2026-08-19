@@ -293,8 +293,8 @@ func TestHandler6(t *testing.T) {
 // picking up a valid update, surviving a malformed update without losing the
 // previously loaded leases, and recovering once a valid file is written
 // again. All waits use require.Eventually against directly observable state
-// (handler responses, and — for the otherwise invisible failed-reload case —
-// the logged warning) rather than fixed sleeps.
+// rather than fixed sleeps: handler responses, and the logged warning for
+// the otherwise invisible failed-reload case.
 func TestAutorefresh(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "leases.txt")

@@ -706,7 +706,8 @@ func TestSweeperReclaimsInBackground(t *testing.T) {
 		return len(pl.Recordsv4) == 0 && leaseRowCount(pl.leasedb, mac) == 0
 	}, 5*time.Second, 2*time.Millisecond, "the background sweeper must reclaim the expired lease")
 
-	// The address really went back to the pool, not just out of the map.
+	// Removal from the map alone would not prove reclamation; the address
+	// must be allocatable again.
 	assert.NotNil(t, request(t, pl, "02:00:00:00:10:01"))
 }
 

@@ -43,12 +43,12 @@ want_lease=$(plugin_args lease_time | tr -d 's')
 pool_start=$(plugin_args range | awk '{print $2}')
 pool_end=$(plugin_args range | awk '{print $3}')
 
-# value <file> <key> — reads one key from a captured result file.
+# value <file> <key>: reads one key from a captured result file.
 value() {
     sed -n "s/^$2=//p" "$1" | head -n 1
 }
 
-# lease_for_mac <mac> — the statically configured address for a MAC, empty if
+# lease_for_mac <mac>: the statically configured address for a MAC, empty if
 # the MAC has no static lease.
 lease_for_mac() {
     awk -v mac="$1" '

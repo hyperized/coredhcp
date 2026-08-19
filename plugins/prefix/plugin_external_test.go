@@ -167,7 +167,7 @@ func TestHandlePrefixNilOptionDefaultsToEmptyHint(t *testing.T) {
 func TestHandleMultiHintRegression(t *testing.T) {
 	// Regression test for 7f79c14: a single SOLICIT carrying two hints that
 	// both require a fresh allocation must record (and return) two distinct
-	// leases, not just the last one allocated.
+	// leases. The bug kept only the last one allocated.
 	h, err := prefix.Plugin.Setup6("2001:db8::/48", "64")
 	require.NoError(t, err)
 
