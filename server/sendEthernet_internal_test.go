@@ -8,6 +8,7 @@ package server
 
 import (
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -74,6 +75,11 @@ func TestSendEthernetBogusInterfaceIndex(t *testing.T) {
 	err := sendEthernet(ifi, validEthResp(t))
 	if err == nil {
 		t.Skip("kernel accepted a bogus interface index")
+	}
+	if strings.Contains(err.Error(), "cannot open socket") {
+		// No CAP_NET_RAW (as on shared CI runners): the failure happens
+		// before the frame send this test is about.
+		t.Skipf("no raw socket privileges: %v", err)
 	}
 	require.ErrorContains(t, err, "cannot send frame via socket")
 }
