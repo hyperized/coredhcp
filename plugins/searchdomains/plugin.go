@@ -2,17 +2,20 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+// Package searchdomains implements a plugin that hands out the DNS search
+// list to DHCPv4 and DHCPv6 clients.
 package searchdomains
 
 // This is an searchdomains plugin that adds default DNS search domains.
 
 import (
-	"github.com/coredhcp/coredhcp/handler"
-	"github.com/coredhcp/coredhcp/logger"
-	"github.com/coredhcp/coredhcp/plugins"
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/insomniacslk/dhcp/rfc1035label"
+
+	"github.com/coredhcp/coredhcp/handler"
+	"github.com/coredhcp/coredhcp/logger"
+	"github.com/coredhcp/coredhcp/plugins"
 )
 
 var log = logger.GetLogger("plugins/searchdomains")
@@ -23,11 +26,11 @@ var log = logger.GetLogger("plugins/searchdomains")
 // plugins section. For searchdomains:
 //
 // server6:
-//   listen: '[::]547'
-//   - searchdomains: domain.a domain.b
-//   - server_id: LL aa:bb:cc:dd:ee:ff
-//   - file: "leases.txt"
 //
+//	listen: '[::]547'
+//	- searchdomains: domain.a domain.b
+//	- server_id: LL aa:bb:cc:dd:ee:ff
+//	- file: "leases.txt"
 var Plugin = plugins.Plugin{
 	Name:   "searchdomains",
 	Setup6: setup6,
@@ -62,14 +65,14 @@ func setup4(args ...string) (handler.Handler4, error) {
 	return domainSearchListHandler4, nil
 }
 
-func domainSearchListHandler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
+func domainSearchListHandler6(_, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	resp.UpdateOption(dhcpv6.OptDomainSearchList(&rfc1035label.Labels{
 		Labels: copySlice(v6SearchList),
 	}))
 	return resp, false
 }
 
-func domainSearchListHandler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+func domainSearchListHandler4(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	resp.UpdateOption(dhcpv4.OptDomainSearch(&rfc1035label.Labels{
 		Labels: copySlice(v4SearchList),
 	}))

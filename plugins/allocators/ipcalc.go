@@ -17,7 +17,7 @@ import (
 
 // ErrOverflow is returned when arithmetic operations on IPs carry bits
 // over/under the 0th or 128th bit respectively
-var ErrOverflow = errors.New("Operation overflows")
+var ErrOverflow = errors.New("operation overflows")
 
 // Offset returns the absolute distance between addresses `a` and `b` in units
 // of /`prefixLength` subnets.

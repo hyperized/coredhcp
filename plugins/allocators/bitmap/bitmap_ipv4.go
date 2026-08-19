@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/bits-and-blooms/bitset"
+
 	"github.com/coredhcp/coredhcp/plugins/allocators"
 )
 
@@ -34,13 +35,14 @@ type IPv4Allocator struct {
 	l      sync.Mutex
 }
 
-func (a *IPv4Allocator) toIP(offset uint32) net.IP {
-	if offset > a.end-a.start {
+func (a *IPv4Allocator) toIP(offset uint) net.IP {
+	if offset > uint(a.end-a.start) {
 		panic("BUG: offset out of bounds")
 	}
 
 	r := make(net.IP, net.IPv4len)
-	binary.BigEndian.PutUint32(r, a.start+offset)
+	// offset was bounds-checked against end-start just above.
+	binary.BigEndian.PutUint32(r, a.start+uint32(offset)) //nolint:gosec // see above
 	return r
 }
 
@@ -81,7 +83,7 @@ func (a *IPv4Allocator) Allocate(hint net.IPNet) (n net.IPNet, err error) {
 	}
 
 	a.bitmap.Set(next)
-	n.IP = a.toIP(uint32(next))
+	n.IP = a.toIP(next)
 	return
 }
 
@@ -95,7 +97,7 @@ func (a *IPv4Allocator) Free(n net.IPNet) error {
 	a.l.Lock()
 	defer a.l.Unlock()
 
-	if !a.bitmap.Test(uint(offset)) {
+	if !a.bitmap.Test(offset) {
 		return &allocators.ErrDoubleFree{Loc: n}
 	}
 	a.bitmap.Clear(offset)

@@ -8,6 +8,8 @@
 // range is much larger than the expected number of clients. Also is what KEA
 // does so at least it's not worse than that
 
+// Package bitmap provides bitmap-backed allocators for IPv4 addresses and
+// IPv6 prefixes.
 package bitmap
 
 import (
@@ -39,14 +41,15 @@ type Allocator struct {
 func (a *Allocator) toIndex(base net.IP) (uint, error) {
 	value, err := allocators.Offset(base, a.containing.IP, a.page)
 	if err != nil {
-		return 0, fmt.Errorf("Cannot compute prefix index: %w", err)
+		return 0, fmt.Errorf("cannot compute prefix index: %w", err)
 	}
 
 	return uint(value), nil
 }
 
 func (a *Allocator) toPrefix(idx uint) (net.IP, error) {
-	return allocators.AddPrefixes(a.containing.IP, uint64(idx), uint64(a.page))
+	// page is a prefix length: non-negative and at most 128, set at construction.
+	return allocators.AddPrefixes(a.containing.IP, uint64(idx), uint64(a.page)) //nolint:gosec // see above
 }
 
 // Allocate reserves a maxsize-sized block and returns a block of size
@@ -92,7 +95,7 @@ func (a *Allocator) Allocate(hint net.IPNet) (ret net.IPNet, err error) {
 func (a *Allocator) Free(prefix net.IPNet) error {
 	idx, err := a.toIndex(prefix.IP.Mask(prefix.Mask))
 	if err != nil {
-		return fmt.Errorf("Could not find prefix in pool: %w", err)
+		return fmt.Errorf("could not find prefix in pool: %w", err)
 	}
 
 	a.l.Lock()
@@ -112,16 +115,17 @@ func NewBitmapAllocator(pool net.IPNet, size int) (*Allocator, error) {
 	poolSize, _ := pool.Mask.Size()
 	allocOrder := size - poolSize
 
-	if allocOrder < 0 {
-		return nil, errors.New("The size of allocated prefixes cannot be larger than the pool they're allocated from")
-	} else if allocOrder >= strconv.IntSize {
-		return nil, fmt.Errorf("A pool with more than 2^%d items is not representable", size-poolSize)
-	} else if allocOrder >= 32 {
+	switch {
+	case allocOrder < 0:
+		return nil, errors.New("the size of allocated prefixes cannot be larger than the pool they're allocated from")
+	case allocOrder >= strconv.IntSize:
+		return nil, fmt.Errorf("a pool with more than 2^%d items is not representable", size-poolSize)
+	case allocOrder >= 32:
 		log.Warningln("Using a pool of more than 2^32 elements may result in large memory consumption")
 	}
 
-	if !(1<<uint(allocOrder) <= bitset.Cap()) {
-		return nil, errors.New("Can't fit this pool using the bitmap allocator")
+	if 1<<uint(allocOrder) > bitset.Cap() {
+		return nil, errors.New("can't fit this pool using the bitmap allocator")
 	}
 
 	alloc := Allocator{

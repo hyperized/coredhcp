@@ -86,8 +86,8 @@ func (l *listener6) HandleMsg6(buf []byte, oob *ipv6.ControlMessage, peer *net.U
 		// LL need to be directed to the correct interface. Globally reachable
 		// addresses should use the default route, in case of asymetric routing.
 		switch {
-		case l.Interface.Index != 0:
-			woob = &ipv6.ControlMessage{IfIndex: l.Interface.Index}
+		case l.Index != 0:
+			woob = &ipv6.ControlMessage{IfIndex: l.Index}
 		case oob != nil && oob.IfIndex != 0:
 			woob = &ipv6.ControlMessage{IfIndex: oob.IfIndex}
 		default:
@@ -99,7 +99,7 @@ func (l *listener6) HandleMsg6(buf []byte, oob *ipv6.ControlMessage, peer *net.U
 	}
 }
 
-func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, _peer net.Addr) {
+func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, _ net.Addr) {
 	var (
 		resp, tmp *dhcpv4.DHCPv4
 		err       error
@@ -146,17 +146,18 @@ func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, _peer net.A
 	if resp != nil {
 		useEthernet := false
 		var peer *net.UDPAddr
-		if !req.GatewayIPAddr.IsUnspecified() {
+		switch {
+		case !req.GatewayIPAddr.IsUnspecified():
 			// TODO: make RFC8357 compliant
 			peer = &net.UDPAddr{IP: req.GatewayIPAddr, Port: dhcpv4.ServerPort}
-		} else if resp.MessageType() == dhcpv4.MessageTypeNak {
+		case resp.MessageType() == dhcpv4.MessageTypeNak:
 			peer = &net.UDPAddr{IP: net.IPv4bcast, Port: dhcpv4.ClientPort}
-		} else if !req.ClientIPAddr.IsUnspecified() {
+		case !req.ClientIPAddr.IsUnspecified():
 			peer = &net.UDPAddr{IP: req.ClientIPAddr, Port: dhcpv4.ClientPort}
-		} else if req.IsBroadcast() {
+		case req.IsBroadcast():
 			peer = &net.UDPAddr{IP: net.IPv4bcast, Port: dhcpv4.ClientPort}
-		} else {
-			//sends a layer2 frame so that we can define the destination MAC address
+		default:
+			// send a layer2 frame so that we can define the destination MAC address
 			peer = &net.UDPAddr{IP: resp.YourIPAddr, Port: dhcpv4.ClientPort}
 			useEthernet = true
 		}
@@ -167,8 +168,8 @@ func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, _peer net.A
 			// received on. Other packets should use the normal routing table in
 			// case of asymetric routing
 			switch {
-			case l.Interface.Index != 0:
-				woob = &ipv4.ControlMessage{IfIndex: l.Interface.Index}
+			case l.Index != 0:
+				woob = &ipv4.ControlMessage{IfIndex: l.Index}
 			case oob != nil && oob.IfIndex != 0:
 				woob = &ipv4.ControlMessage{IfIndex: oob.IfIndex}
 			default:
@@ -210,7 +211,7 @@ func (l *listener6) Serve() error {
 	log.Printf("Listen %s", l.LocalAddr())
 	for {
 		b := *bufpool.Get().(*[]byte)
-		b = b[:MaxDatagram] //Reslice to max capacity in case the buffer in pool was resliced smaller
+		b = b[:MaxDatagram] // Reslice to max capacity in case the buffer in pool was resliced smaller
 
 		n, oob, peer, err := l.ReadFrom(b)
 		if errors.Is(err, net.ErrClosed) {
@@ -229,7 +230,7 @@ func (l *listener4) Serve() error {
 	log.Printf("Listen %s", l.LocalAddr())
 	for {
 		b := *bufpool.Get().(*[]byte)
-		b = b[:MaxDatagram] //Reslice to max capacity in case the buffer in pool was resliced smaller
+		b = b[:MaxDatagram] // Reslice to max capacity in case the buffer in pool was resliced smaller
 
 		n, oob, peer, err := l.ReadFrom(b)
 		if errors.Is(err, net.ErrClosed) {

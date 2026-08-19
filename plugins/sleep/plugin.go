@@ -2,6 +2,8 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+// Package sleep implements a plugin that delays responses by a fixed
+// duration, useful for testing timeout behaviour.
 package sleep
 
 // This plugin introduces a delay in the DHCP response.
@@ -10,11 +12,12 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/insomniacslk/dhcp/dhcpv4"
+	"github.com/insomniacslk/dhcp/dhcpv6"
+
 	"github.com/coredhcp/coredhcp/handler"
 	"github.com/coredhcp/coredhcp/logger"
 	"github.com/coredhcp/coredhcp/plugins"
-	"github.com/insomniacslk/dhcp/dhcpv4"
-	"github.com/insomniacslk/dhcp/dhcpv6"
 )
 
 var (
@@ -69,7 +72,7 @@ func setup4(args ...string) (handler.Handler4, error) {
 }
 
 func makeSleepHandler6(delay time.Duration) handler.Handler6 {
-	return func(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
+	return func(_, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 		log.Printf("introducing delay of %s in response", delay)
 		// return the unmodified response, and instruct coredhcp to continue to
 		// the next plugin.
@@ -79,7 +82,7 @@ func makeSleepHandler6(delay time.Duration) handler.Handler6 {
 }
 
 func makeSleepHandler4(delay time.Duration) handler.Handler4 {
-	return func(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+	return func(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 		log.Printf("introducing delay of %s in response", delay)
 		// return the unmodified response, and instruct coredhcp to continue to
 		// the next plugin.

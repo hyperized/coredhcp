@@ -35,7 +35,7 @@ func TestAddServer4(t *testing.T) {
 		t.Errorf("Failed to retrieve mtu from response")
 	}
 
-	if mtu != int(rMTU) {
+	if int(mtu) != int(rMTU) {
 		t.Errorf("Found %d mtu, expected %d", rMTU, mtu)
 	}
 }

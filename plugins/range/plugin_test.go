@@ -12,6 +12,7 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // mockAllocator is a simple mock for testing
@@ -181,7 +182,7 @@ func TestHandler4ReleaseStorageError(t *testing.T) {
 	resp := &dhcpv4.DHCPv4{}
 
 	// Close the database to simulate storage failure
-	db.Close()
+	require.NoError(t, db.Close())
 
 	result, stop := pl.Handler4(req, resp)
 

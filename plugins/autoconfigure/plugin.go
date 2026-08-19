@@ -2,6 +2,8 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+// Package autoconfigure implements a plugin that answers the DHCPv4
+// autoconfigure option (RFC 2563) for clients that get no address.
 package autoconfigure
 
 // This plugin implements RFC2563:
@@ -23,17 +25,19 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/insomniacslk/dhcp/dhcpv4"
+	"github.com/sirupsen/logrus"
+
 	"github.com/coredhcp/coredhcp/handler"
 	"github.com/coredhcp/coredhcp/logger"
 	"github.com/coredhcp/coredhcp/plugins"
-	"github.com/insomniacslk/dhcp/dhcpv4"
-	"github.com/sirupsen/logrus"
 )
 
 var log = logger.GetLogger("plugins/autoconfigure")
 
 var autoconfigure dhcpv4.AutoConfiguration
 
+// Plugin wraps the autoconfigure plugin information.
 var Plugin = plugins.Plugin{
 	Name:   "autoconfigure",
 	Setup4: setup4,
@@ -60,6 +64,7 @@ func setup4(args ...string) (handler.Handler4, error) {
 	return Handler4, nil
 }
 
+// Handler4 handles DHCPv4 packets for the autoconfigure plugin.
 func Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	if resp.MessageType() != dhcpv4.MessageTypeOffer || !resp.YourIPAddr.IsUnspecified() {
 		return resp, false

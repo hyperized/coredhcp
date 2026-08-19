@@ -2,16 +2,19 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+// Package leasetime implements a plugin that sets the lease duration on
+// DHCPv4 responses.
 package leasetime
 
 import (
 	"errors"
 	"time"
 
+	"github.com/insomniacslk/dhcp/dhcpv4"
+
 	"github.com/coredhcp/coredhcp/handler"
 	"github.com/coredhcp/coredhcp/logger"
 	"github.com/coredhcp/coredhcp/plugins"
-	"github.com/insomniacslk/dhcp/dhcpv4"
 )
 
 // Plugin wraps plugin registration information

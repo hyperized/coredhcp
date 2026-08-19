@@ -2,6 +2,8 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+// Package netmask implements a plugin that serves the subnet mask option
+// to DHCPv4 clients.
 package netmask
 
 import (
@@ -9,10 +11,11 @@ import (
 	"errors"
 	"net"
 
+	"github.com/insomniacslk/dhcp/dhcpv4"
+
 	"github.com/coredhcp/coredhcp/handler"
 	"github.com/coredhcp/coredhcp/logger"
 	"github.com/coredhcp/coredhcp/plugins"
-	"github.com/insomniacslk/dhcp/dhcpv4"
 )
 
 var log = logger.GetLogger("plugins/netmask")
@@ -48,8 +51,8 @@ func setup4(args ...string) (handler.Handler4, error) {
 	return Handler4, nil
 }
 
-//Handler4 handles DHCPv4 packets for the netmask plugin
-func Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+// Handler4 handles DHCPv4 packets for the netmask plugin
+func Handler4(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	resp.Options.Update(dhcpv4.OptSubnetMask(netmask))
 	return resp, false
 }

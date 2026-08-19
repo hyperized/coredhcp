@@ -2,6 +2,7 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+// Package config parses and validates the coredhcp server configuration.
 package config
 
 import (
@@ -11,11 +12,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/coredhcp/coredhcp/logger"
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/spf13/cast"
 	"github.com/spf13/viper"
+
+	"github.com/coredhcp/coredhcp/logger"
 )
 
 var log = logger.GetLogger("config")
@@ -78,7 +80,7 @@ func Load(pathOverride string) (*Config, error) {
 		return nil, err
 	}
 	if c.Server6 == nil && c.Server4 == nil {
-		return nil, ConfigErrorFromString("need at least one valid config for DHCPv6 or DHCPv4")
+		return nil, ErrorFromString("need at least one valid config for DHCPv6 or DHCPv4")
 	}
 	return c, nil
 }
@@ -95,12 +97,12 @@ func parsePlugins(pluginList []interface{}) ([]PluginConfig, error) {
 	for idx, val := range pluginList {
 		conf := cast.ToStringMap(val)
 		if conf == nil {
-			return nil, ConfigErrorFromString("dhcpv6: plugin #%d is not a string map", idx)
+			return nil, ErrorFromString("dhcpv6: plugin #%d is not a string map", idx)
 		}
 		// make sure that only one item is specified, since it's a
 		// map name -> args
 		if len(conf) != 1 {
-			return nil, ConfigErrorFromString("dhcpv6: exactly one plugin per item can be specified")
+			return nil, ErrorFromString("dhcpv6: exactly one plugin per item can be specified")
 		}
 		var (
 			name string
@@ -149,7 +151,7 @@ func (c *Config) getListenAddress(addr string, ver protocolVersion) (*net.UDPAdd
 
 	ipStr, ifname, portStr, err := splitHostPort(addr)
 	if err != nil {
-		return nil, ConfigErrorFromString("dhcpv%d: %v", ver, err)
+		return nil, ErrorFromString("dhcpv%d: %v", ver, err)
 	}
 
 	ip := net.ParseIP(ipStr)
@@ -164,10 +166,10 @@ func (c *Config) getListenAddress(addr string, ver protocolVersion) (*net.UDPAdd
 		}
 	}
 	if ip == nil {
-		return nil, ConfigErrorFromString("dhcpv%d: invalid IP address in `listen` directive: %s", ver, ipStr)
+		return nil, ErrorFromString("dhcpv%d: invalid IP address in `listen` directive: %s", ver, ipStr)
 	}
 	if ip4 := ip.To4(); (ver == protocolV6 && ip4 != nil) || (ver == protocolV4 && ip4 == nil) {
-		return nil, ConfigErrorFromString("dhcpv%d: not a valid IPv%d address in `listen` directive: '%s'", ver, ver, ipStr)
+		return nil, ErrorFromString("dhcpv%d: not a valid IPv%d address in `listen` directive: '%s'", ver, ver, ipStr)
 	}
 
 	var port int
@@ -183,7 +185,7 @@ func (c *Config) getListenAddress(addr string, ver protocolVersion) (*net.UDPAdd
 	} else {
 		port, err = strconv.Atoi(portStr)
 		if err != nil {
-			return nil, ConfigErrorFromString("dhcpv%d: invalid `listen` port '%s'", ver, portStr)
+			return nil, ErrorFromString("dhcpv%d: invalid `listen` port '%s'", ver, portStr)
 		}
 	}
 
@@ -201,7 +203,7 @@ func (c *Config) getPlugins(ver protocolVersion) ([]PluginConfig, error) {
 	}
 	pluginList := cast.ToSlice(c.v.Get(fmt.Sprintf("server%d.plugins", ver)))
 	if pluginList == nil {
-		return nil, ConfigErrorFromString("dhcpv%d: invalid plugins section, not a list or no plugin specified", ver)
+		return nil, ErrorFromString("dhcpv%d: invalid plugins section, not a list or no plugin specified", ver)
 	}
 	return parsePlugins(pluginList)
 }
@@ -232,9 +234,10 @@ func (c *Config) parseConfig(ver protocolVersion) error {
 		Addresses: listeners,
 		Plugins:   plugins,
 	}
-	if ver == protocolV6 {
+	switch ver {
+	case protocolV6:
 		c.Server6 = &sc
-	} else if ver == protocolV4 {
+	case protocolV4:
 		c.Server4 = &sc
 	}
 	return nil
@@ -246,10 +249,10 @@ func (c *Config) parseConfig(ver protocolVersion) error {
 
 func expandLLMulticast(addr *net.UDPAddr) ([]net.UDPAddr, error) {
 	if !addr.IP.IsLinkLocalMulticast() && !addr.IP.IsInterfaceLocalMulticast() {
-		return nil, errors.New("Address is not multicast")
+		return nil, errors.New("address is not multicast")
 	}
 	if addr.Zone != "" {
-		return nil, errors.New("Address is already zoned")
+		return nil, errors.New("address is already zoned")
 	}
 	var needFlags = net.FlagMulticast
 	if addr.IP.To4() != nil {
@@ -260,7 +263,7 @@ func expandLLMulticast(addr *net.UDPAddr) ([]net.UDPAddr, error) {
 	ifs, err := net.Interfaces()
 	ret := make([]net.UDPAddr, 0, len(ifs))
 	if err != nil {
-		return nil, fmt.Errorf("Could not list network interfaces: %v", err)
+		return nil, fmt.Errorf("could not list network interfaces: %w", err)
 	}
 	for _, iface := range ifs {
 		if (iface.Flags & needFlags) != needFlags {
@@ -271,7 +274,7 @@ func expandLLMulticast(addr *net.UDPAddr) ([]net.UDPAddr, error) {
 		ret = append(ret, caddr)
 	}
 	if len(ret) == 0 {
-		return nil, errors.New("No suitable interface found for multicast listener")
+		return nil, errors.New("no suitable interface found for multicast listener")
 	}
 	return ret, nil
 }
@@ -303,7 +306,7 @@ func (c *Config) parseListen(ver protocolVersion) ([]net.UDPAddr, error) {
 
 	// Provide an emulation of the old keyword "interface" to avoid breaking config files
 	if iface := c.v.Get(fmt.Sprintf("server%d.interface", ver)); iface != nil && listen != nil {
-		return nil, ConfigErrorFromString("interface is a deprecated alias for listen, " +
+		return nil, ErrorFromString("interface is a deprecated alias for listen, " +
 			"both cannot be used at the same time. Choose one and remove the other.")
 	} else if iface != nil {
 		listen = "%" + cast.ToString(iface)

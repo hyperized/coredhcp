@@ -2,6 +2,8 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+// Package mtu implements a plugin that serves the interface MTU option to
+// DHCPv4 clients.
 package mtu
 
 import (
@@ -25,18 +27,27 @@ var Plugin = plugins.Plugin{
 	// No Setup6 since DHCPv6 does not have MTU-related options
 }
 
-var (
-	mtu int
+// Bounds for a sane interface MTU: RFC 2132 requires at least 68, and the
+// option carries an unsigned 16-bit value.
+const (
+	minMTU = 68
+	maxMTU = 65535
 )
+
+var mtu uint16
 
 func setup4(args ...string) (handler.Handler4, error) {
 	if len(args) != 1 {
 		return nil, errors.New("need one mtu value")
 	}
-	var err error
-	if mtu, err = strconv.Atoi(args[0]); err != nil {
+	v, err := strconv.Atoi(args[0])
+	if err != nil {
 		return nil, fmt.Errorf("invalid mtu: %v", args[0])
 	}
+	if v < minMTU || v > maxMTU {
+		return nil, fmt.Errorf("mtu must be between %d and %d, got %d", minMTU, maxMTU, v)
+	}
+	mtu = uint16(v)
 	log.Infof("loaded mtu %d.", mtu)
 	return Handler4, nil
 }

@@ -2,17 +2,20 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+// Package dns implements a plugin that serves DNS server addresses to
+// DHCPv4 and DHCPv6 clients.
 package dns
 
 import (
 	"errors"
 	"net"
 
+	"github.com/insomniacslk/dhcp/dhcpv4"
+	"github.com/insomniacslk/dhcp/dhcpv6"
+
 	"github.com/coredhcp/coredhcp/handler"
 	"github.com/coredhcp/coredhcp/logger"
 	"github.com/coredhcp/coredhcp/plugins"
-	"github.com/insomniacslk/dhcp/dhcpv4"
-	"github.com/insomniacslk/dhcp/dhcpv6"
 )
 
 var log = logger.GetLogger("plugins/dns")
@@ -74,7 +77,7 @@ func Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	return resp, false
 }
 
-//Handler4 handles DHCPv4 packets for the dns plugin
+// Handler4 handles DHCPv4 packets for the dns plugin
 func Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	if req.IsOptionRequested(dhcpv4.OptionDomainNameServer) {
 		resp.Options.Update(dhcpv4.OptDNS(dnsServers4...))

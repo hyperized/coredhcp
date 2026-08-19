@@ -2,6 +2,8 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+// Package serverid implements a plugin that enforces the server identifier
+// on DHCPv4 and DHCPv6 messages.
 package serverid
 
 import (
@@ -9,12 +11,13 @@ import (
 	"net"
 	"strings"
 
-	"github.com/coredhcp/coredhcp/handler"
-	"github.com/coredhcp/coredhcp/logger"
-	"github.com/coredhcp/coredhcp/plugins"
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/insomniacslk/dhcp/iana"
+
+	"github.com/coredhcp/coredhcp/handler"
+	"github.com/coredhcp/coredhcp/logger"
+	"github.com/coredhcp/coredhcp/plugins"
 )
 
 var log = logger.GetLogger("plugins/server_id")
@@ -147,7 +150,7 @@ func setup6(args ...string) (handler.Handler6, error) {
 	case "en", "uuid":
 		return nil, errors.New("EN/UUID DUID type not supported yet")
 	default:
-		return nil, errors.New("Opaque DUID type not supported yet")
+		return nil, errors.New("opaque DUID type not supported yet")
 	}
 	log.Printf("using %s %s", duidType, duidValue)
 

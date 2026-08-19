@@ -2,6 +2,8 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+// Package ipv6only implements a plugin that announces the IPv6-only
+// preferred option (RFC 8925) to DHCPv4 clients.
 package ipv6only
 
 // This plugin implements RFC8925: if the client has requested the
@@ -19,17 +21,19 @@ import (
 	"errors"
 	"time"
 
+	"github.com/insomniacslk/dhcp/dhcpv4"
+	"github.com/sirupsen/logrus"
+
 	"github.com/coredhcp/coredhcp/handler"
 	"github.com/coredhcp/coredhcp/logger"
 	"github.com/coredhcp/coredhcp/plugins"
-	"github.com/insomniacslk/dhcp/dhcpv4"
-	"github.com/sirupsen/logrus"
 )
 
 var log = logger.GetLogger("plugins/ipv6only")
 
-var v6only_wait time.Duration
+var v6onlyWait time.Duration
 
+// Plugin wraps the ipv6only plugin information.
 var Plugin = plugins.Plugin{
 	Name:   "ipv6only",
 	Setup4: setup4,
@@ -42,7 +46,7 @@ func setup4(args ...string) (handler.Handler4, error) {
 			log.Errorf("invalid duration: %v", args[0])
 			return nil, errors.New("ipv6only failed to initialize")
 		}
-		v6only_wait = dur
+		v6onlyWait = dur
 	}
 	if len(args) > 1 {
 		return nil, errors.New("too many arguments")
@@ -50,6 +54,7 @@ func setup4(args ...string) (handler.Handler4, error) {
 	return Handler4, nil
 }
 
+// Handler4 handles DHCPv4 packets for the ipv6only plugin.
 func Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	v6pref := req.IsOptionRequested(dhcpv4.OptionIPv6OnlyPreferred)
 	log.WithFields(logrus.Fields{
@@ -57,7 +62,7 @@ func Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 		"ipv6only": v6pref,
 	}).Debug("ipv6only status")
 	if v6pref {
-		resp.UpdateOption(dhcpv4.OptIPv6OnlyPreferred(v6only_wait))
+		resp.UpdateOption(dhcpv4.OptIPv6OnlyPreferred(v6onlyWait))
 		return resp, true
 	}
 	return resp, false

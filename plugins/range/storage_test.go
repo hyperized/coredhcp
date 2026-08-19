@@ -20,12 +20,10 @@ func testDBSetup() (*sql.DB, error) {
 		return nil, err
 	}
 	for _, record := range records {
-		stmt, err := db.Prepare("insert into leases4(mac, ip, expiry, hostname) values (?, ?, ?, ?)")
-		if err != nil {
-			return nil, fmt.Errorf("failed to prepare insert statement: %w", err)
-		}
-		defer stmt.Close()
-		if _, err := stmt.Exec(record.mac, record.ip.IP.String(), record.ip.expires, record.ip.hostname); err != nil {
+		if _, err := db.Exec(
+			"insert into leases4(mac, ip, expiry, hostname) values (?, ?, ?, ?)",
+			record.mac, record.ip.IP.String(), record.ip.expires, record.ip.hostname,
+		); err != nil {
 			return nil, fmt.Errorf("failed to insert record into test db: %w", err)
 		}
 	}
@@ -207,7 +205,7 @@ func TestFreeIPAddressExecutionError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to set up test database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	const triggerErrorMsg = "Custom deletion prevention trigger"
 	// Create a trigger that will cause DELETE operations to fail for records[0]

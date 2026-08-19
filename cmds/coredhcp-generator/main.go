@@ -2,17 +2,20 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+// The coredhcp-generator command renders a main.go for a coredhcp server
+// with a chosen set of plugins compiled in.
 package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
-	"html/template"
 	"log"
 	"os"
 	"path"
 	"sort"
 	"strings"
+	"text/template"
 
 	flag "github.com/spf13/pflag"
 )
@@ -39,12 +42,12 @@ var funcMap = template.FuncMap{
 }
 
 func usage() {
-	fmt.Fprintf(flag.CommandLine.Output(),
+	_, _ = fmt.Fprintf(flag.CommandLine.Output(),
 		"%s [-template tpl] [-outfile out] [-from pluginlist] [plugin [plugin...]]\n",
 		os.Args[0],
 	)
 	flag.PrintDefaults()
-	fmt.Fprintln(flag.CommandLine.Output(), `  plugin
+	_, _ = fmt.Fprintln(flag.CommandLine.Output(), `  plugin
 	Plugin name to include, as go import path.
 	Short names can be used for builtin coredhcp plugins (eg "serverid")`)
 }
@@ -52,14 +55,19 @@ func usage() {
 func main() {
 	flag.Usage = usage
 	flag.Parse()
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
 
+func run() error {
 	data, err := os.ReadFile(*flagTemplate)
 	if err != nil {
-		log.Fatalf("Failed to read template file '%s': %v", *flagTemplate, err)
+		return fmt.Errorf("failed to read template file '%s': %w", *flagTemplate, err)
 	}
 	t, err := template.New("coredhcp").Funcs(funcMap).Parse(string(data))
 	if err != nil {
-		log.Fatalf("Template parsing failed: %v", err)
+		return fmt.Errorf("template parsing failed: %w", err)
 	}
 	plugins := make(map[string]bool)
 	for _, pl := range flag.Args() {
@@ -84,7 +92,7 @@ func main() {
 		// path
 		fd, err := os.Open(*flagFromFile)
 		if err != nil {
-			log.Fatalf("Failed to read file '%s': %v", *flagFromFile, err)
+			return fmt.Errorf("failed to read file '%s': %w", *flagFromFile, err)
 		}
 		defer func() {
 			if err := fd.Close(); err != nil {
@@ -100,17 +108,17 @@ func main() {
 			plugins[pl] = true
 		}
 		if err := sc.Err(); err != nil {
-			log.Fatalf("Error reading file '%s': %v", *flagFromFile, err)
+			return fmt.Errorf("error reading file '%s': %w", *flagFromFile, err)
 		}
 	}
 	if len(plugins) == 0 {
-		log.Fatalf("No plugin specified!")
+		return errors.New("no plugin specified")
 	}
 	outfile := *flagOutfile
 	if outfile == "" {
 		tmpdir, err := os.MkdirTemp("", "coredhcp")
 		if err != nil {
-			log.Fatalf("Cannot create temporary directory: %v", err)
+			return fmt.Errorf("cannot create temporary directory: %w", err)
 		}
 		outfile = path.Join(tmpdir, "coredhcp.go")
 	}
@@ -121,9 +129,9 @@ func main() {
 		log.Printf("% 3d) %s", idx, pl)
 		idx++
 	}
-	outFD, err := os.OpenFile(outfile, os.O_CREATE|os.O_WRONLY, 0644)
+	outFD, err := os.OpenFile(outfile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
-		log.Fatalf("Failed to create output file '%s': %v", outfile, err)
+		return fmt.Errorf("failed to create output file '%s': %w", outfile, err)
 	}
 	defer func() {
 		if err := outFD.Close(); err != nil {
@@ -137,8 +145,9 @@ func main() {
 	}
 	sort.Strings(pluginList)
 	if err := t.Execute(outFD, pluginList); err != nil {
-		log.Fatalf("Template execution failed: %v", err)
+		return fmt.Errorf("template execution failed: %w", err)
 	}
 	log.Printf("Generated file '%s'. You can build it by running 'go build' in the output directory.", outfile)
 	fmt.Println(path.Dir(outfile))
+	return nil
 }

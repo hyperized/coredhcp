@@ -2,6 +2,8 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+// Package staticroute implements a plugin that serves classless static
+// routes (option 121) to DHCPv4 clients.
 package staticroute
 
 import (
@@ -9,10 +11,11 @@ import (
 	"net"
 	"strings"
 
+	"github.com/insomniacslk/dhcp/dhcpv4"
+
 	"github.com/coredhcp/coredhcp/handler"
 	"github.com/coredhcp/coredhcp/logger"
 	"github.com/coredhcp/coredhcp/plugins"
-	"github.com/insomniacslk/dhcp/dhcpv4"
 )
 
 var log = logger.GetLogger("plugins/staticroute")
@@ -61,7 +64,7 @@ func setup4(args ...string) (handler.Handler4, error) {
 }
 
 // Handler4 handles DHCPv4 packets for the static routes plugin
-func Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+func Handler4(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	if len(routes) > 0 {
 		resp.Options.Update(dhcpv4.Option{
 			Code:  dhcpv4.OptionCode(dhcpv4.OptionClasslessStaticRoute),

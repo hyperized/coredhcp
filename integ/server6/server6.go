@@ -3,8 +3,9 @@
 // LICENSE file in the root directory of this source tree.
 
 //go:build integration
-// +build integration
 
+// Integration test program that starts a DHCPv6 server in a network
+// namespace and exchanges a full solicit/advertise round with a client.
 package main
 
 import (

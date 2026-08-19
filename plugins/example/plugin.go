@@ -2,6 +2,8 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+// Package example implements a documented no-op plugin that serves as a
+// starting point for writing new plugins.
 package example
 
 // This is an example plugin that inspects a packet and prints it out. The code
@@ -10,11 +12,12 @@ package example
 // Feedback is welcome!
 
 import (
+	"github.com/insomniacslk/dhcp/dhcpv4"
+	"github.com/insomniacslk/dhcp/dhcpv6"
+
 	"github.com/coredhcp/coredhcp/handler"
 	"github.com/coredhcp/coredhcp/logger"
 	"github.com/coredhcp/coredhcp/plugins"
-	"github.com/insomniacslk/dhcp/dhcpv4"
-	"github.com/insomniacslk/dhcp/dhcpv6"
 )
 
 // We use a customizable logger, as part of the `logger` package. You can use
@@ -30,15 +33,17 @@ var log = logger.GetLogger("plugins/example")
 // functions:
 //
 // import (
-//     "github.com/coredhcp/coredhcp/plugins"
-//     "github.com/coredhcp/coredhcp/plugins/example"
+//
+//	"github.com/coredhcp/coredhcp/plugins"
+//	"github.com/coredhcp/coredhcp/plugins/example"
+//
 // )
 //
-// var Plugin = plugins.Plugin{
-//     Name: "example",
-//     Setup6: setup6,
-//     Setup4: setup4,
-// }
+//	var Plugin = plugins.Plugin{
+//	    Name: "example",
+//	    Setup6: setup6,
+//	    Setup4: setup4,
+//	}
 //
 // Name is simply the name used to register the plugin. It must be unique to
 // other registered plugins, or the operation will fail. In other words, don't
@@ -56,11 +61,11 @@ var log = logger.GetLogger("plugins/example")
 // plugins section. For example:
 //
 // server6:
-//   listen: '[::]547'
-//   - example:
-//   - server_id: LL aa:bb:cc:dd:ee:ff
-//   - file: "leases.txt"
 //
+//	listen: '[::]547'
+//	- example:
+//	- server_id: LL aa:bb:cc:dd:ee:ff
+//	- file: "leases.txt"
 var Plugin = plugins.Plugin{
 	Name:   "example",
 	Setup6: setup6,
@@ -74,14 +79,14 @@ var Plugin = plugins.Plugin{
 // `exampleHandler6` function. Such function will be called for every DHCPv6
 // packet that the server receives. Remember that a handler may not be called
 // for each packet, if the handler chain is interrupted before reaching it.
-func setup6(args ...string) (handler.Handler6, error) {
+func setup6(_ ...string) (handler.Handler6, error) {
 	log.Printf("loaded plugin for DHCPv6.")
 	return exampleHandler6, nil
 }
 
 // setup4 behaves like setupExample6, but for DHCPv4 packets. It
 // implements the `plugin.SetupFunc4` interface.
-func setup4(args ...string) (handler.Handler4, error) {
+func setup4(_ ...string) (handler.Handler4, error) {
 	log.Printf("loaded plugin for DHCPv4.")
 	return exampleHandler4, nil
 }

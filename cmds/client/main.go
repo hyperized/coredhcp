@@ -2,20 +2,18 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+// Sample DHCPv6 client to test on the local interface.
 package main
-
-/*
- * Sample DHCPv6 client to test on the local interface
- */
 
 import (
 	"flag"
 	"net"
 
-	"github.com/coredhcp/coredhcp/logger"
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/insomniacslk/dhcp/dhcpv6/client6"
 	"github.com/insomniacslk/dhcp/iana"
+
+	"github.com/coredhcp/coredhcp/logger"
 )
 
 var log = logger.GetLogger("main")

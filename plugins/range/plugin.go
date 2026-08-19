@@ -2,6 +2,8 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+// Package rangeplugin implements a plugin that hands out DHCPv4 leases
+// from an address range, persisting them in a sqlite database.
 package rangeplugin
 
 import (
@@ -13,12 +15,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/insomniacslk/dhcp/dhcpv4"
+
 	"github.com/coredhcp/coredhcp/handler"
 	"github.com/coredhcp/coredhcp/logger"
 	"github.com/coredhcp/coredhcp/plugins"
 	"github.com/coredhcp/coredhcp/plugins/allocators"
 	"github.com/coredhcp/coredhcp/plugins/allocators/bitmap"
-	"github.com/insomniacslk/dhcp/dhcpv4"
 )
 
 var log = logger.GetLogger("plugins/range")
@@ -31,8 +34,8 @@ var Plugin = plugins.Plugin{
 
 // Record holds an IP lease record
 type Record struct {
-	IP      net.IP
-	expires int
+	IP       net.IP
+	expires  int
 	hostname string
 }
 
@@ -58,7 +61,8 @@ func (p *PluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 	hostname := req.HostName()
 
 	if ok && req.MessageType() == dhcpv4.MessageTypeRelease {
-		return p.handleRelease(req, resp, record)
+		p.handleRelease(req, record)
+		return nil, true
 	}
 
 	if !ok {
@@ -70,8 +74,8 @@ func (p *PluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 			return nil, true
 		}
 		rec := Record{
-			IP:      ip.IP.To4(),
-			expires: int(time.Now().Add(p.LeaseTime).Unix()),
+			IP:       ip.IP.To4(),
+			expires:  int(time.Now().Add(p.LeaseTime).Unix()),
 			hostname: hostname,
 		}
 		err = p.saveIPAddress(req.ClientHWAddr, &rec)
@@ -98,11 +102,14 @@ func (p *PluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 	return resp, false
 }
 
-func (p *PluginState) handleRelease(req, _ *dhcpv4.DHCPv4, record *Record) (*dhcpv4.DHCPv4, bool) {
+// handleRelease frees the lease for req's client. The DHCP response to a
+// release is always "no response, stop processing", so failures are only
+// logged here.
+func (p *PluginState) handleRelease(req *dhcpv4.DHCPv4, record *Record) {
 	// Remove lease from storage
 	if freeErr := p.freeIPAddress(req.ClientHWAddr, record); freeErr != nil {
 		log.Errorf("Could not remove lease from storage for MAC %s: %v", req.ClientHWAddr.String(), freeErr)
-		return nil, true
+		return
 	}
 
 	// Remove from in-memory map
@@ -111,11 +118,10 @@ func (p *PluginState) handleRelease(req, _ *dhcpv4.DHCPv4, record *Record) (*dhc
 	// Release the IP address from allocator
 	if freeErr := p.allocator.Free(net.IPNet{IP: record.IP}); freeErr != nil {
 		log.Errorf("Could not free IP %s for MAC %s: %v", record.IP.String(), req.ClientHWAddr.String(), freeErr)
-		return nil, true
+		return
 	}
 
 	log.Printf("Released IP address %s for MAC %s", record.IP.String(), req.ClientHWAddr.String())
-	return nil, true
 }
 
 func setupRange(args ...string) (handler.Handler4, error) {
@@ -158,7 +164,7 @@ func setupRange(args ...string) (handler.Handler4, error) {
 	}
 	p.Recordsv4, err = loadRecords(p.leasedb)
 	if err != nil {
-		return nil, fmt.Errorf("could not load records from file: %v", err)
+		return nil, fmt.Errorf("could not load records from file: %w", err)
 	}
 
 	log.Printf("Loaded %d DHCPv4 leases from %s", len(p.Recordsv4), filename)
@@ -166,7 +172,7 @@ func setupRange(args ...string) (handler.Handler4, error) {
 	for _, v := range p.Recordsv4 {
 		ip, err := p.allocator.Allocate(net.IPNet{IP: v.IP})
 		if err != nil {
-			return nil, fmt.Errorf("failed to re-allocate leased ip %v: %v", v.IP.String(), err)
+			return nil, fmt.Errorf("failed to re-allocate leased ip %v: %w", v.IP.String(), err)
 		}
 		if ip.IP.String() != v.IP.String() {
 			return nil, fmt.Errorf("allocator did not re-allocate requested leased ip %v: %v", v.IP.String(), ip.String())

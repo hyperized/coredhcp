@@ -2,6 +2,8 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+// Package plugins provides the plugin registry and the setup machinery that
+// wires configured plugins into the server's handler chains.
 package plugins
 
 import (
@@ -79,11 +81,11 @@ func LoadPlugins(conf *config.Config) ([]handler.Handler4, []handler.Handler6, e
 				if err != nil {
 					return nil, nil, err
 				} else if h6 == nil {
-					return nil, nil, config.ConfigErrorFromString("no DHCPv6 handler for plugin %s", pluginConf.Name)
+					return nil, nil, config.ErrorFromString("no DHCPv6 handler for plugin %s", pluginConf.Name)
 				}
 				handlers6 = append(handlers6, h6)
 			} else {
-				return nil, nil, config.ConfigErrorFromString("DHCPv6: unknown plugin `%s`", pluginConf.Name)
+				return nil, nil, config.ErrorFromString("DHCPv6: unknown plugin `%s`", pluginConf.Name)
 			}
 		}
 	}
@@ -101,11 +103,11 @@ func LoadPlugins(conf *config.Config) ([]handler.Handler4, []handler.Handler6, e
 				if err != nil {
 					return nil, nil, err
 				} else if h4 == nil {
-					return nil, nil, config.ConfigErrorFromString("no DHCPv4 handler for plugin %s", pluginConf.Name)
+					return nil, nil, config.ErrorFromString("no DHCPv4 handler for plugin %s", pluginConf.Name)
 				}
 				handlers4 = append(handlers4, h4)
 			} else {
-				return nil, nil, config.ConfigErrorFromString("DHCPv4: unknown plugin `%s`", pluginConf.Name)
+				return nil, nil, config.ErrorFromString("DHCPv4: unknown plugin `%s`", pluginConf.Name)
 			}
 		}
 	}

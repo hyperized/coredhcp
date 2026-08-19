@@ -58,12 +58,13 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/coredhcp/coredhcp/handler"
-	"github.com/coredhcp/coredhcp/logger"
-	"github.com/coredhcp/coredhcp/plugins"
 	"github.com/fsnotify/fsnotify"
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
+
+	"github.com/coredhcp/coredhcp/handler"
+	"github.com/coredhcp/coredhcp/logger"
+	"github.com/coredhcp/coredhcp/plugins"
 )
 
 const (

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 
+	// The sqlite3 driver registers itself with database/sql on import.
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -32,7 +33,7 @@ func loadRecords(db *sql.DB) (map[string]*Record, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to query leases database: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var (
 		mac, ip, hostname string
 		expiry            int
@@ -60,12 +61,8 @@ func loadRecords(db *sql.DB) (map[string]*Record, error) {
 
 // saveIPAddress writes out a lease to storage
 func (p *PluginState) saveIPAddress(mac net.HardwareAddr, record *Record) error {
-	stmt, err := p.leasedb.Prepare(`insert or replace into leases4(mac, ip, expiry, hostname) values (?, ?, ?, ?)`)
-	if err != nil {
-		return fmt.Errorf("statement preparation failed: %w", err)
-	}
-	defer stmt.Close()
-	if _, err := stmt.Exec(
+	if _, err := p.leasedb.Exec(
+		`insert or replace into leases4(mac, ip, expiry, hostname) values (?, ?, ?, ?)`,
 		mac.String(),
 		record.IP.String(),
 		record.expires,
@@ -78,12 +75,8 @@ func (p *PluginState) saveIPAddress(mac net.HardwareAddr, record *Record) error 
 
 // freeIPAddress removes a lease from storage
 func (p *PluginState) freeIPAddress(mac net.HardwareAddr, record *Record) error {
-	stmt, err := p.leasedb.Prepare(`delete from leases4 where mac = ? and ip = ?`)
-	if err != nil {
-		return fmt.Errorf("statement preparation failed: %w", err)
-	}
-	defer stmt.Close()
-	if _, err := stmt.Exec(
+	if _, err := p.leasedb.Exec(
+		`delete from leases4 where mac = ? and ip = ?`,
 		mac.String(),
 		record.IP.String(),
 	); err != nil {

@@ -24,7 +24,7 @@ func TestOptionRequested(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	v6only_wait = 0x1234 * time.Second
+	v6onlyWait = 0x1234 * time.Second
 
 	resp, stop := Handler4(req, stub)
 	if resp == nil {

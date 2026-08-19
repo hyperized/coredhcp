@@ -48,11 +48,13 @@ func TestRoundTrip(t *testing.T) {
 	// Sanity checks on the response
 	success := result.GetOption(dhcpv6.OptionStatusCode)
 	var mo dhcpv6.MessageOptions
+	// No StatusCode option at all is an implicit success.
 	if len(success) > 1 {
 		t.Fatal("Got multiple StatusCode options")
-	} else if len(success) == 0 { // Everything OK
-	} else if err := mo.FromBytes(success[0].ToBytes()); err != nil || mo.Status().StatusCode != dhcpIana.StatusSuccess {
-		t.Fatalf("Did not get a (implicit or explicit) success status code: %v", success)
+	} else if len(success) == 1 {
+		if err := mo.FromBytes(success[0].ToBytes()); err != nil || mo.Status().StatusCode != dhcpIana.StatusSuccess {
+			t.Fatalf("Did not get a (implicit or explicit) success status code: %v", success)
+		}
 	}
 
 	var iapd *dhcpv6.OptIAPD

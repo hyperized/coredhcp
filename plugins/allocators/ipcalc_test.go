@@ -32,8 +32,8 @@ func ExampleOffset() {
 	// 8534002176 <nil>
 	// 1092352278528 <nil>
 	// 71588398925611008 <nil>
-	// 0 Operation overflows
-	// 0 Operation overflows
+	// 0 operation overflows
+	// 0 operation overflows
 }
 
 func ExampleAddPrefixes() {
@@ -51,7 +51,7 @@ func ExampleAddPrefixes() {
 	// 2001:eb7:: <nil>
 	// 2002:db8:: <nil>
 	// 2001:db8:0:7f:8000:: <nil>
-	// <nil> Operation overflows
+	// <nil> operation overflows
 	// <nil> AddPrefixes needs 128-bit IPs
 }
 

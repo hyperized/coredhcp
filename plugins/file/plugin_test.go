@@ -412,8 +412,8 @@ func TestSetupFile(t *testing.T) {
 	tmp, err := os.CreateTemp("", "test_plugin_file")
 	require.NoError(t, err)
 	defer func() {
-		tmp.Close()
-		os.Remove(tmp.Name())
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
 	}()
 
 	t.Run("typical case", func(t *testing.T) {

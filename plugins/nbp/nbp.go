@@ -21,23 +21,23 @@
 //
 // server6:
 //   - plugins:
-//     - nbp: http://[2001:db8:a::1]/nbp
+//   - nbp: http://[2001:db8:a::1]/nbp
 //
 // server4:
 //   - plugins:
-//     - nbp: tftp://10.0.0.254/nbp
-//
+//   - nbp: tftp://10.0.0.254/nbp
 package nbp
 
 import (
 	"fmt"
 	"net/url"
 
+	"github.com/insomniacslk/dhcp/dhcpv4"
+	"github.com/insomniacslk/dhcp/dhcpv6"
+
 	"github.com/coredhcp/coredhcp/handler"
 	"github.com/coredhcp/coredhcp/logger"
 	"github.com/coredhcp/coredhcp/plugins"
-	"github.com/insomniacslk/dhcp/dhcpv4"
-	"github.com/insomniacslk/dhcp/dhcpv6"
 )
 
 var log = logger.GetLogger("plugins/nbp")
@@ -56,7 +56,7 @@ var (
 
 func parseArgs(args ...string) (*url.URL, error) {
 	if len(args) != 1 {
-		return nil, fmt.Errorf("Exactly one argument must be passed to NBP plugin, got %d", len(args))
+		return nil, fmt.Errorf("exactly one argument must be passed to NBP plugin, got %d", len(args))
 	}
 	return url.Parse(args[0])
 }
@@ -111,10 +111,11 @@ func nbpHandler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 		return nil, true
 	}
 	for _, code := range decap.Options.RequestedOptions() {
-		if code == dhcpv6.OptionBootfileURL {
+		switch code {
+		case dhcpv6.OptionBootfileURL:
 			// bootfile URL is requested
 			resp.AddOption(opt59)
-		} else if code == dhcpv6.OptionBootfileParam {
+		case dhcpv6.OptionBootfileParam:
 			// optionally add opt60, bootfile params, if requested
 			if opt60 != nil {
 				resp.AddOption(opt60)

@@ -2,6 +2,8 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+// Package server listens for DHCPv4 and DHCPv6 packets and dispatches
+// them through the configured plugin handler chains.
 package server
 
 import (
@@ -13,12 +15,13 @@ import (
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 
+	"github.com/insomniacslk/dhcp/dhcpv4/server4"
+	"github.com/insomniacslk/dhcp/dhcpv6/server6"
+
 	"github.com/coredhcp/coredhcp/config"
 	"github.com/coredhcp/coredhcp/handler"
 	"github.com/coredhcp/coredhcp/logger"
 	"github.com/coredhcp/coredhcp/plugins"
-	"github.com/insomniacslk/dhcp/dhcpv4/server4"
-	"github.com/insomniacslk/dhcp/dhcpv6/server6"
 )
 
 var log = logger.GetLogger("server")
@@ -57,7 +60,7 @@ func listen4(a *net.UDPAddr) (*listener4, error) {
 	if a.Zone != "" {
 		ifi, err = net.InterfaceByName(a.Zone)
 		if err != nil {
-			return nil, fmt.Errorf("DHCPv4: Listen could not find interface %s: %v", a.Zone, err)
+			return nil, fmt.Errorf("DHCPv4: Listen could not find interface %s: %w", a.Zone, err)
 		}
 		l4.Interface = *ifi
 	} else {
@@ -90,7 +93,7 @@ func listen6(a *net.UDPAddr) (*listener6, error) {
 	if a.Zone != "" {
 		ifi, err = net.InterfaceByName(a.Zone)
 		if err != nil {
-			return nil, fmt.Errorf("DHCPv4: Listen could not find interface %s: %v", a.Zone, err)
+			return nil, fmt.Errorf("DHCPv6: Listen could not find interface %s: %w", a.Zone, err)
 		}
 		l6.Interface = *ifi
 	} else {
@@ -179,7 +182,9 @@ func (s *Servers) Wait() error {
 func (s *Servers) Close() {
 	for _, srv := range s.listeners {
 		if srv != nil {
-			srv.Close()
+			if err := srv.Close(); err != nil {
+				log.Errorf("error closing listener: %v", err)
+			}
 		}
 	}
 }

@@ -8,25 +8,31 @@ import (
 	"fmt"
 )
 
-// ConfigError is an error type returned upon configuration errors.
-type ConfigError struct {
+// Error is an error type returned upon configuration errors.
+type Error struct {
 	err error
 }
 
-// ConfigErrorFromString returns a ConfigError from the given error string.
-func ConfigErrorFromString(format string, args ...interface{}) *ConfigError {
-	return &ConfigError{
+// ErrorFromString returns an Error from the given format string and arguments.
+func ErrorFromString(format string, args ...interface{}) *Error {
+	return &Error{
 		err: fmt.Errorf(format, args...),
 	}
 }
 
-// ConfigErrorFromError returns a ConfigError from the given error object.
-func ConfigErrorFromError(err error) *ConfigError {
-	return &ConfigError{
+// ErrorFromError returns an Error wrapping the given error object.
+func ErrorFromError(err error) *Error {
+	return &Error{
 		err: err,
 	}
 }
 
-func (ce ConfigError) Error() string {
+func (ce Error) Error() string {
 	return fmt.Sprintf("error parsing config: %v", ce.err)
+}
+
+// Unwrap returns the underlying error, so errors.Is and errors.As see
+// through the config wrapper.
+func (ce Error) Unwrap() error {
+	return ce.err
 }
