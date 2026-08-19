@@ -4,7 +4,7 @@ GOLANGCI_IMAGE ?= golangci/golangci-lint:v2.12.2
 
 DOCKER_RUN = docker run --rm -v $(CURDIR):/src -w /src -e GOFLAGS=-buildvcs=false
 
-.PHONY: all build test test-linux test-integration lint cover fmt clean docker-image
+.PHONY: all build test test-linux test-integration lint cover bench fuzz fmt clean docker-image
 
 all: build
 
@@ -35,6 +35,19 @@ lint:
 cover:
 	go test -count=1 -coverprofile=coverage.out ./...
 	go tool cover -func=coverage.out | tail -1
+
+bench:
+	go test -run='^$$' -bench=. -benchmem ./...
+
+# Runs every fuzz target for FUZZTIME each; override like: make fuzz FUZZTIME=5m
+FUZZTIME ?= 30s
+fuzz:
+	@set -e; for pkg in $$(go list ./...); do \
+		for target in $$(go test -list '^Fuzz' $$pkg 2>/dev/null | grep '^Fuzz' || true); do \
+			echo "==> $$pkg $$target"; \
+			go test -run='^$$' -fuzz="^$$target$$" -fuzztime=$(FUZZTIME) $$pkg; \
+		done; \
+	done
 
 fmt:
 	gofmt -w .

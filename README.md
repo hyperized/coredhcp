@@ -44,6 +44,8 @@ $ make test       # unit tests with the race detector
 $ make test-linux # the same suite on Linux, in a container
 $ make lint       # golangci-lint, pinned version, in a container
 $ make cover      # coverage profile plus the total
+$ make bench      # benchmark suite with allocation counts
+$ make fuzz       # every fuzz target, 30s each (FUZZTIME=5m for longer)
 ```
 
 An example server is located under [cmd/coredhcp/](cmd/coredhcp/), so enter that
