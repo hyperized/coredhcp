@@ -7,6 +7,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"syscall"
@@ -56,7 +57,9 @@ func sendEthernet(iface net.Interface, resp *dhcpv4.DHCPv4) error {
 	dhcpLayer := packet.Layer(layers.LayerTypeDHCPv4)
 	dhcp, ok := dhcpLayer.(gopacket.SerializableLayer)
 	if !ok {
-		return fmt.Errorf("layer %s is not serializable", dhcpLayer.LayerType().String())
+		// dhcpLayer is nil when the payload does not decode as DHCPv4;
+		// calling LayerType on it here used to panic inside the error path.
+		return errors.New("cannot re-decode DHCPv4 payload for serialization")
 	}
 	err = gopacket.SerializeLayers(buf, opts, &eth, &ip, &udp, dhcp)
 	if err != nil {
