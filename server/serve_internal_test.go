@@ -342,3 +342,15 @@ func TestStartCleanupOnV4ListenFailureClosesV6(t *testing.T) {
 	assert.Nil(t, srv)
 	assert.Contains(t, err.Error(), "v4 listen boom")
 }
+
+// Close stays quiet when a listener was already closed (a shutdown signal and
+// Wait both close), but still reports genuine close failures.
+func TestServersCloseErrorPaths(_ *testing.T) {
+	s := &Servers{listeners: []listener{
+		&listener4{conn4: &fakeConn4{closeErr: net.ErrClosed}},
+		&listener4{conn4: &fakeConn4{closeErr: errors.New("genuinely broken")}},
+		nil,
+	}}
+	// Both paths execute without panicking; the ErrClosed one is silent.
+	s.Close()
+}
