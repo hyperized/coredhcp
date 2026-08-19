@@ -26,11 +26,15 @@ var Plugin = plugins.Plugin{
 	Setup4: setup4,
 }
 
-var routes dhcpv4.Routes
+// pluginState holds the static routes served by an instance of the
+// staticroute plugin.
+type pluginState struct {
+	routes dhcpv4.Routes
+}
 
 func setup4(args ...string) (handler.Handler4, error) {
 	log.Printf("loaded plugin for DHCPv4.")
-	routes = make(dhcpv4.Routes, 0)
+	p := pluginState{routes: make(dhcpv4.Routes, 0)}
 
 	if len(args) < 1 {
 		return nil, errors.New("need at least one static route")
@@ -40,35 +44,35 @@ func setup4(args ...string) (handler.Handler4, error) {
 	for _, arg := range args {
 		fields := strings.Split(arg, ",")
 		if len(fields) != 2 {
-			return Handler4, errors.New("expected a destination/gateway pair, got: " + arg)
+			return p.Handler4, errors.New("expected a destination/gateway pair, got: " + arg)
 		}
 
 		route := &dhcpv4.Route{}
 		_, route.Dest, err = net.ParseCIDR(fields[0])
 		if err != nil {
-			return Handler4, errors.New("expected a destination subnet, got: " + fields[0])
+			return p.Handler4, errors.New("expected a destination subnet, got: " + fields[0])
 		}
 
 		route.Router = net.ParseIP(fields[1])
 		if route.Router == nil {
-			return Handler4, errors.New("expected a gateway address, got: " + fields[1])
+			return p.Handler4, errors.New("expected a gateway address, got: " + fields[1])
 		}
 
-		routes = append(routes, route)
+		p.routes = append(p.routes, route)
 		log.Debugf("adding static route %s", route)
 	}
 
-	log.Printf("loaded %d static routes.", len(routes))
+	log.Printf("loaded %d static routes.", len(p.routes))
 
-	return Handler4, nil
+	return p.Handler4, nil
 }
 
 // Handler4 handles DHCPv4 packets for the static routes plugin
-func Handler4(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
-	if len(routes) > 0 {
+func (p *pluginState) Handler4(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+	if len(p.routes) > 0 {
 		resp.Options.Update(dhcpv4.Option{
 			Code:  dhcpv4.OptionCode(dhcpv4.OptionClasslessStaticRoute),
-			Value: routes,
+			Value: p.routes,
 		})
 	}
 

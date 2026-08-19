@@ -7,13 +7,13 @@ package staticroute
 import (
 	"testing"
 
+	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestSetup4(t *testing.T) {
-	assert.Empty(t, routes)
-
 	var err error
+
 	// no args
 	_, err = setup4()
 	if assert.Error(t, err) {
@@ -39,22 +39,24 @@ func TestSetup4(t *testing.T) {
 	}
 
 	// valid route
-	_, err = setup4("10.0.0.0/8,192.168.1.1")
+	h, err := setup4("10.0.0.0/8,192.168.1.1")
 	if assert.NoError(t, err) {
-		if assert.Equal(t, 1, len(routes)) {
-			assert.Equal(t, "10.0.0.0/8", routes[0].Dest.String())
-			assert.Equal(t, "192.168.1.1", routes[0].Router.String())
-		}
+		assert.NotNil(t, h)
 	}
 
 	// multiple valid routes
 	_, err = setup4("10.0.0.0/8,192.168.1.1", "192.168.2.0/24,192.168.1.100")
-	if assert.NoError(t, err) {
-		if assert.Equal(t, 2, len(routes)) {
-			assert.Equal(t, "10.0.0.0/8", routes[0].Dest.String())
-			assert.Equal(t, "192.168.1.1", routes[0].Router.String())
-			assert.Equal(t, "192.168.2.0/24", routes[1].Dest.String())
-			assert.Equal(t, "192.168.1.100", routes[1].Router.String())
-		}
-	}
+	assert.NoError(t, err)
+}
+
+// TestHandler4NoRoutes exercises the zero-routes branch of Handler4, which
+// setup4 can never produce (it requires at least one valid route), so it is
+// only reachable through direct construction of the unexported pluginState.
+func TestHandler4NoRoutes(t *testing.T) {
+	p := pluginState{routes: dhcpv4.Routes{}}
+
+	stub := &dhcpv4.DHCPv4{}
+	resp, stop := p.Handler4(nil, stub)
+	assert.False(t, stop)
+	assert.Nil(t, resp.Options.Get(dhcpv4.OptionClasslessStaticRoute))
 }

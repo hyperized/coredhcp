@@ -34,8 +34,6 @@ import (
 
 var log = logger.GetLogger("plugins/autoconfigure")
 
-var autoconfigure dhcpv4.AutoConfiguration
-
 // Plugin wraps the autoconfigure plugin information.
 var Plugin = plugins.Plugin{
 	Name:   "autoconfigure",
@@ -49,10 +47,17 @@ var argMap = map[string]dhcpv4.AutoConfiguration{
 	"AutoConfigure":      dhcpv4.AutoConfigure,
 }
 
+// pluginState holds the configuration of an instance of the autoconfigure
+// plugin.
+type pluginState struct {
+	autoconfigure dhcpv4.AutoConfiguration
+}
+
 func setup4(args ...string) (handler.Handler4, error) {
+	var p pluginState
 	if len(args) > 0 {
 		var ok bool
-		autoconfigure, ok = argMap[args[0]]
+		p.autoconfigure, ok = argMap[args[0]]
 		if !ok {
 			return nil, fmt.Errorf("unexpected value '%v' for autoconfigure argument", args[0])
 		}
@@ -60,22 +65,22 @@ func setup4(args ...string) (handler.Handler4, error) {
 	if len(args) > 1 {
 		return nil, errors.New("too many arguments")
 	}
-	return Handler4, nil
+	return p.Handler4, nil
 }
 
 // Handler4 handles DHCPv4 packets for the autoconfigure plugin.
-func Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	if resp.MessageType() != dhcpv4.MessageTypeOffer || !resp.YourIPAddr.IsUnspecified() {
 		return resp, false
 	}
 
 	ac, ok := req.AutoConfigure()
 	if ok {
-		resp.UpdateOption(dhcpv4.OptAutoConfigure(autoconfigure))
+		resp.UpdateOption(dhcpv4.OptAutoConfigure(p.autoconfigure))
 		log.With(
 			"mac", req.ClientHWAddr.String(),
 			"autoconfigure", fmt.Sprintf("%v", ac),
-		).Debugf("Responded with autoconfigure %v", autoconfigure)
+		).Debugf("Responded with autoconfigure %v", p.autoconfigure)
 		return resp, false
 	}
 

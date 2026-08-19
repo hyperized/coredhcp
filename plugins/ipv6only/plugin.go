@@ -30,38 +30,42 @@ import (
 
 var log = logger.GetLogger("plugins/ipv6only")
 
-var v6onlyWait time.Duration
-
 // Plugin wraps the ipv6only plugin information.
 var Plugin = plugins.Plugin{
 	Name:   "ipv6only",
 	Setup4: setup4,
 }
 
+// pluginState holds the configuration of an instance of the ipv6only plugin.
+type pluginState struct {
+	v6onlyWait time.Duration
+}
+
 func setup4(args ...string) (handler.Handler4, error) {
+	var p pluginState
 	if len(args) > 0 {
 		dur, err := time.ParseDuration(args[0])
 		if err != nil {
 			log.Errorf("invalid duration: %v", args[0])
 			return nil, errors.New("ipv6only failed to initialize")
 		}
-		v6onlyWait = dur
+		p.v6onlyWait = dur
 	}
 	if len(args) > 1 {
 		return nil, errors.New("too many arguments")
 	}
-	return Handler4, nil
+	return p.Handler4, nil
 }
 
 // Handler4 handles DHCPv4 packets for the ipv6only plugin.
-func Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	v6pref := req.IsOptionRequested(dhcpv4.OptionIPv6OnlyPreferred)
 	log.With(
 		"mac", req.ClientHWAddr.String(),
 		"ipv6only", v6pref,
 	).Debug("ipv6only status")
 	if v6pref {
-		resp.UpdateOption(dhcpv4.OptIPv6OnlyPreferred(v6onlyWait))
+		resp.UpdateOption(dhcpv4.OptIPv6OnlyPreferred(p.v6onlyWait))
 		return resp, true
 	}
 	return resp, false
