@@ -1,0 +1,5 @@
+server6:
+  plugins:
+    - server_id: LL
+  listen:
+    - "[::1]:1547"

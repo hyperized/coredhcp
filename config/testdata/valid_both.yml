@@ -1,0 +1,12 @@
+server6:
+  plugins:
+    - server_id: LL
+    - dns: "2001:db8::1"
+  listen:
+    - "[::1]:1547"
+server4:
+  plugins:
+    - lease_time: 3600s
+    - router: 192.0.2.1
+  listen:
+    - "127.0.0.1:1067"

@@ -1,0 +1,4 @@
+server4:
+  plugins: not-a-list
+  listen:
+    - "127.0.0.1:1067"

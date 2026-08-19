@@ -156,14 +156,7 @@ func (c *Config) getListenAddress(addr string, ver protocolVersion) (*net.UDPAdd
 
 	ip := net.ParseIP(ipStr)
 	if ipStr == "" {
-		switch ver {
-		case protocolV4:
-			ip = net.IPv4zero
-		case protocolV6:
-			ip = net.IPv6unspecified
-		default:
-			panic("BUG: Unknown protocol version")
-		}
+		ip = defaultIP(ver)
 	}
 	if ip == nil {
 		return nil, ErrorFromString("dhcpv%d: invalid IP address in `listen` directive: %s", ver, ipStr)
@@ -174,14 +167,7 @@ func (c *Config) getListenAddress(addr string, ver protocolVersion) (*net.UDPAdd
 
 	var port int
 	if portStr == "" {
-		switch ver {
-		case protocolV4:
-			port = dhcpv4.ServerPort
-		case protocolV6:
-			port = dhcpv6.DefaultServerPort
-		default:
-			panic("BUG: Unknown protocol version")
-		}
+		port = defaultPort(ver)
 	} else {
 		port, err = strconv.Atoi(portStr)
 		if err != nil {
@@ -260,7 +246,7 @@ func expandLLMulticast(addr *net.UDPAddr) ([]net.UDPAddr, error) {
 		needFlags |= net.FlagBroadcast
 	}
 
-	ifs, err := net.Interfaces()
+	ifs, err := netInterfaces()
 	ret := make([]net.UDPAddr, 0, len(ifs))
 	if err != nil {
 		return nil, fmt.Errorf("could not list network interfaces: %w", err)
@@ -341,4 +327,36 @@ func (c *Config) parseListen(ver protocolVersion) ([]net.UDPAddr, error) {
 		listeners = append(listeners, *l)
 	}
 	return listeners, nil
+}
+
+// netInterfaces is swappable so interface-dependent listen expansion can be
+// tested deterministically.
+var netInterfaces = net.Interfaces
+
+// defaultIP returns the unspecified address for the protocol version. The
+// version has been validated by the caller; anything else is a programming
+// error.
+func defaultIP(ver protocolVersion) net.IP {
+	switch ver {
+	case protocolV4:
+		return net.IPv4zero
+	case protocolV6:
+		return net.IPv6unspecified
+	default:
+		panic("BUG: Unknown protocol version")
+	}
+}
+
+// defaultPort returns the standard server port for the protocol version. The
+// version has been validated by the caller; anything else is a programming
+// error.
+func defaultPort(ver protocolVersion) int {
+	switch ver {
+	case protocolV4:
+		return dhcpv4.ServerPort
+	case protocolV6:
+		return dhcpv6.DefaultServerPort
+	default:
+		panic("BUG: Unknown protocol version")
+	}
 }

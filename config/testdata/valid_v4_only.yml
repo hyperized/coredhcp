@@ -1,0 +1,5 @@
+server4:
+  plugins:
+    - router: 192.0.2.1
+  listen:
+    - "127.0.0.1:1067"
