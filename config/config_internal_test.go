@@ -86,7 +86,7 @@ func TestProtoVersionCheck(t *testing.T) {
 
 func TestParsePlugins(t *testing.T) {
 	t.Run("empty list", func(t *testing.T) {
-		got, err := parsePlugins([]interface{}{})
+		got, err := parsePlugins([]any{})
 		require.NoError(t, err)
 		assert.Empty(t, got)
 	})
@@ -96,40 +96,40 @@ func TestParsePlugins(t *testing.T) {
 		// (string/int/bool): it falls back to an empty, non-nil map, so
 		// this hits the "exactly one plugin" branch rather than "not a
 		// string map".
-		_, err := parsePlugins([]interface{}{42})
+		_, err := parsePlugins([]any{42})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "exactly one plugin")
 	})
 
 	t.Run("item is a typed-nil map hits the not-a-string-map branch", func(t *testing.T) {
 		// cast.ToStringMap(v) only returns a genuinely nil map when v's
-		// dynamic type is exactly map[string]interface{} with a nil
+		// dynamic type is exactly map[string]any with a nil
 		// value; this is not something a YAML config can produce (a
 		// YAML null list entry decodes to an untyped nil, which cast
 		// turns into an empty non-nil map instead), so this path is
 		// only reachable via a direct call like this one.
-		_, err := parsePlugins([]interface{}{map[string]interface{}(nil)})
+		_, err := parsePlugins([]any{map[string]any(nil)})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "is not a string map")
 	})
 
 	t.Run("multiple keys rejected", func(t *testing.T) {
-		_, err := parsePlugins([]interface{}{
-			map[string]interface{}{"foo": "a", "bar": "b"},
+		_, err := parsePlugins([]any{
+			map[string]any{"foo": "a", "bar": "b"},
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "exactly one plugin")
 	})
 
 	t.Run("empty map rejected", func(t *testing.T) {
-		_, err := parsePlugins([]interface{}{map[string]interface{}{}})
+		_, err := parsePlugins([]any{map[string]any{}})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "exactly one plugin")
 	})
 
 	t.Run("single plugin with string args", func(t *testing.T) {
-		got, err := parsePlugins([]interface{}{
-			map[string]interface{}{"dns": "8.8.8.8 8.8.4.4"},
+		got, err := parsePlugins([]any{
+			map[string]any{"dns": "8.8.8.8 8.8.4.4"},
 		})
 		require.NoError(t, err)
 		require.Len(t, got, 1)
@@ -138,8 +138,8 @@ func TestParsePlugins(t *testing.T) {
 	})
 
 	t.Run("single plugin with a non-string args value", func(t *testing.T) {
-		got, err := parsePlugins([]interface{}{
-			map[string]interface{}{"lease_time": 3600},
+		got, err := parsePlugins([]any{
+			map[string]any{"lease_time": 3600},
 		})
 		require.NoError(t, err)
 		require.Len(t, got, 1)
@@ -148,8 +148,8 @@ func TestParsePlugins(t *testing.T) {
 	})
 
 	t.Run("single plugin with no args", func(t *testing.T) {
-		got, err := parsePlugins([]interface{}{
-			map[string]interface{}{"server_id": nil},
+		got, err := parsePlugins([]any{
+			map[string]any{"server_id": nil},
 		})
 		require.NoError(t, err)
 		require.Len(t, got, 1)
@@ -157,9 +157,9 @@ func TestParsePlugins(t *testing.T) {
 	})
 
 	t.Run("multiple plugins preserve order", func(t *testing.T) {
-		got, err := parsePlugins([]interface{}{
-			map[string]interface{}{"a": "1"},
-			map[string]interface{}{"b": "2"},
+		got, err := parsePlugins([]any{
+			map[string]any{"a": "1"},
+			map[string]any{"b": "2"},
 		})
 		require.NoError(t, err)
 		require.Len(t, got, 2)
@@ -287,8 +287,8 @@ func TestConfigGetPlugins(t *testing.T) {
 
 	t.Run("valid plugins list", func(t *testing.T) {
 		c := New()
-		c.v.Set("server4.plugins", []interface{}{
-			map[string]interface{}{"router": "192.0.2.1"},
+		c.v.Set("server4.plugins", []any{
+			map[string]any{"router": "192.0.2.1"},
 		})
 		got, err := c.getPlugins(protocolV4)
 		require.NoError(t, err)
@@ -313,7 +313,7 @@ func TestConfigParseConfig(t *testing.T) {
 
 	t.Run("plugin error propagates", func(t *testing.T) {
 		c := New()
-		c.v.Set("server6", map[string]interface{}{})
+		c.v.Set("server6", map[string]any{})
 		err := c.parseConfig(protocolV6)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "invalid plugins section")
@@ -322,24 +322,24 @@ func TestConfigParseConfig(t *testing.T) {
 	t.Run("listen error propagates", func(t *testing.T) {
 		c := New()
 		// A non-empty plugin list, since an explicitly empty
-		// []interface{}{} collapses to a nil slice under
+		// []any{} collapses to a nil slice under
 		// cast.ToSliceE (append to nil with nothing to add stays nil),
 		// which getPlugins would otherwise reject before parseListen
 		// is ever reached.
-		c.v.Set("server6.plugins", []interface{}{
-			map[string]interface{}{"dns": "8.8.8.8"},
+		c.v.Set("server6.plugins", []any{
+			map[string]any{"dns": "8.8.8.8"},
 		})
-		c.v.Set("server6.listen", []interface{}{"not-an-ip"})
+		c.v.Set("server6.listen", []any{"not-an-ip"})
 		err := c.parseConfig(protocolV6)
 		require.Error(t, err)
 	})
 
 	t.Run("v6 success populates Server6 only", func(t *testing.T) {
 		c := New()
-		c.v.Set("server6.plugins", []interface{}{
-			map[string]interface{}{"dns": "8.8.8.8"},
+		c.v.Set("server6.plugins", []any{
+			map[string]any{"dns": "8.8.8.8"},
 		})
-		c.v.Set("server6.listen", []interface{}{"[::1]:547"})
+		c.v.Set("server6.listen", []any{"[::1]:547"})
 		err := c.parseConfig(protocolV6)
 		require.NoError(t, err)
 		require.NotNil(t, c.Server6)
@@ -350,10 +350,10 @@ func TestConfigParseConfig(t *testing.T) {
 
 	t.Run("v4 success populates Server4 only", func(t *testing.T) {
 		c := New()
-		c.v.Set("server4.plugins", []interface{}{
-			map[string]interface{}{"router": "192.0.2.1"},
+		c.v.Set("server4.plugins", []any{
+			map[string]any{"router": "192.0.2.1"},
 		})
-		c.v.Set("server4.listen", []interface{}{"127.0.0.1:6767"})
+		c.v.Set("server4.listen", []any{"127.0.0.1:6767"})
 		err := c.parseConfig(protocolV4)
 		require.NoError(t, err)
 		require.NotNil(t, c.Server4)
@@ -497,7 +497,7 @@ func TestConfigParseListen(t *testing.T) {
 
 	t.Run("listen as a real list", func(t *testing.T) {
 		c := New()
-		c.v.Set("server4.listen", []interface{}{"127.0.0.1:6767", "127.0.0.2:6768"})
+		c.v.Set("server4.listen", []any{"127.0.0.1:6767", "127.0.0.2:6768"})
 		got, err := c.parseListen(protocolV4)
 		require.NoError(t, err)
 		require.Len(t, got, 2)
@@ -517,7 +517,7 @@ func TestConfigParseListen(t *testing.T) {
 		// cast.ToStringSliceE(listen) errors and parseListen falls back
 		// to cast.ToString(listen), which also fails and yields "" -
 		// which splitHostPort accepts as the trivial empty address.
-		c.v.Set("server4.listen", map[string]interface{}{"a": "b"})
+		c.v.Set("server4.listen", map[string]any{"a": "b"})
 		got, err := c.parseListen(protocolV4)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
@@ -526,7 +526,7 @@ func TestConfigParseListen(t *testing.T) {
 
 	t.Run("bad address in list propagates the error", func(t *testing.T) {
 		c := New()
-		c.v.Set("server4.listen", []interface{}{"not-an-ip"})
+		c.v.Set("server4.listen", []any{"not-an-ip"})
 		_, err := c.parseListen(protocolV4)
 		require.Error(t, err)
 	})
@@ -534,7 +534,7 @@ func TestConfigParseListen(t *testing.T) {
 	t.Run("unzoned multicast expands to all qualifying interfaces", func(t *testing.T) {
 		c := New()
 		want := qualifyingInterfaces(t, net.FlagMulticast)
-		c.v.Set("server6.listen", []interface{}{"[ff02::1:2]:547"})
+		c.v.Set("server6.listen", []any{"[ff02::1:2]:547"})
 		got, err := c.parseListen(protocolV6)
 		if len(want) == 0 {
 			require.Error(t, err)
@@ -546,7 +546,7 @@ func TestConfigParseListen(t *testing.T) {
 
 	t.Run("zoned multicast is not expanded", func(t *testing.T) {
 		c := New()
-		c.v.Set("server6.listen", []interface{}{"[ff02::1:2%lo0]:547"})
+		c.v.Set("server6.listen", []any{"[ff02::1:2%lo0]:547"})
 		got, err := c.parseListen(protocolV6)
 		require.NoError(t, err)
 		require.Len(t, got, 1)

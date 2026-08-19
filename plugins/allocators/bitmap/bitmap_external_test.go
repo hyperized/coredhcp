@@ -48,7 +48,7 @@ func TestExhaustAndReallocateAfterFree(t *testing.T) {
 	require.NoError(t, err)
 
 	allocd := []net.IPNet{}
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		n, err := alloc.Allocate(net.IPNet{Mask: net.CIDRMask(64, 128)})
 		require.NoError(t, err, "should not fail before exhaustion")
 		allocd = append(allocd, n)

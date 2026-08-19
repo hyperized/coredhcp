@@ -14,7 +14,7 @@ type Error struct {
 }
 
 // ErrorFromString returns an Error from the given format string and arguments.
-func ErrorFromString(format string, args ...interface{}) *Error {
+func ErrorFromString(format string, args ...any) *Error {
 	return &Error{
 		err: fmt.Errorf(format, args...),
 	}

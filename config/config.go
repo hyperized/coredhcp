@@ -92,7 +92,7 @@ func protoVersionCheck(v protocolVersion) error {
 	return nil
 }
 
-func parsePlugins(pluginList []interface{}) ([]PluginConfig, error) {
+func parsePlugins(pluginList []any) ([]PluginConfig, error) {
 	plugins := make([]PluginConfig, 0, len(pluginList))
 	for idx, val := range pluginList {
 		conf := cast.ToStringMap(val)

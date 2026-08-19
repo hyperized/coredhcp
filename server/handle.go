@@ -261,7 +261,7 @@ func oobIfIndex4(oob *ipv4.ControlMessage) int {
 
 // XXX: performance-wise, Pool may or may not be good (see https://github.com/golang/go/issues/23199)
 // Interface is good for what we want. Maybe "just" trust the GC and we'll be fine ?
-var bufpool = sync.Pool{New: func() interface{} { r := make([]byte, MaxDatagram); return &r }}
+var bufpool = sync.Pool{New: func() any { r := make([]byte, MaxDatagram); return &r }}
 
 // MaxDatagram is the maximum length of message that can be received.
 const MaxDatagram = 1 << 16
