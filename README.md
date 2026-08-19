@@ -30,6 +30,16 @@ configure other plugins, see [config.yml.example](cmd/coredhcp/config.yml.exampl
 
 ## Build and run
 
+Day-to-day tasks are wrapped in the Makefile:
+
+```
+$ make            # build everything into bin/
+$ make test       # unit tests with the race detector
+$ make test-linux # the same suite on Linux, in a container
+$ make lint       # golangci-lint, pinned version, in a container
+$ make cover      # coverage profile plus the total
+```
+
 An example server is located under [cmd/coredhcp/](cmd/coredhcp/), so enter that
 directory first. To build a server with a custom set of plugins, see the "Server
 with custom plugins" section below.
