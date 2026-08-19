@@ -47,23 +47,23 @@ const leaseDuration = 3600 * time.Second
 func setupPrefix(args ...string) (handler.Handler6, error) {
 	// - prefix: 2001:db8::/48 64
 	if len(args) < 2 {
-		return nil, errors.New("Need both a subnet and an allocation max size")
+		return nil, errors.New("need both a subnet and an allocation max size")
 	}
 
 	_, prefix, err := net.ParseCIDR(args[0])
 	if err != nil {
-		return nil, fmt.Errorf("Invalid pool subnet: %v", err)
+		return nil, fmt.Errorf("invalid pool subnet: %w", err)
 	}
 
 	allocSize, err := strconv.Atoi(args[1])
 	if err != nil || allocSize > 128 || allocSize < 0 {
-		return nil, fmt.Errorf("Invalid prefix length: %v", err)
+		return nil, fmt.Errorf("invalid prefix length: %w", err)
 	}
 
 	// TODO: select allocators based on heuristics or user configuration
 	alloc, err := bitmap.NewBitmapAllocator(*prefix, allocSize)
 	if err != nil {
-		return nil, fmt.Errorf("Could not initialize prefix allocator: %v", err)
+		return nil, fmt.Errorf("could not initialize prefix allocator: %w", err)
 	}
 
 	return (&Handler{
@@ -206,7 +206,7 @@ func (h *Handler) Handle(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 		// with an empty, or length-only hint)
 
 		// Assign a new lease to satisfy the request
-		var newLeases []lease
+		newLeases := knownLeases
 		for i, prefix := range hints {
 			if satisfied.Test(uint(i)) {
 				continue
@@ -228,11 +228,11 @@ func (h *Handler) Handle(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 			}
 
 			addPrefix(iapdResp, l)
-			newLeases = append(knownLeases, l)
+			newLeases = append(newLeases, l)
 			log.Debugf("Allocated %s to %s (IAID: %x)", &allocated, client, iapd.IaId)
 		}
 
-		if newLeases != nil {
+		if len(newLeases) != len(knownLeases) {
 			h.Records[recordKey(client)] = newLeases
 		}
 		h.Unlock()
