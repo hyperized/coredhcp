@@ -114,6 +114,10 @@ server4:
     # - ":44480" Listens on a specific port.
     # - "%eno1" Listens on the wildcard address on one interface.
     # - "192.0.2.1%eno1:44480" with all parts
+    #
+    # IPv6 addresses take brackets, with the zone accepted on either side of
+    # the closing bracket: "[2001:db8::1%eno1]:547" and "[2001:db8::1]%eno1:547"
+    # both work.
 
     # plugins is a mandatory section, which defines how requests are handled.
     # It is a list of maps, matching plugin names to their arguments.
