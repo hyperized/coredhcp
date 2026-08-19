@@ -31,11 +31,13 @@ import (
 	pl_metrics "github.com/coredhcp/coredhcp/plugins/metrics"
 	pl_mtu "github.com/coredhcp/coredhcp/plugins/mtu"
 	pl_nbp "github.com/coredhcp/coredhcp/plugins/nbp"
+	pl_netbox "github.com/coredhcp/coredhcp/plugins/netbox"
 	pl_netmask "github.com/coredhcp/coredhcp/plugins/netmask"
 	pl_ntp "github.com/coredhcp/coredhcp/plugins/ntp"
 	pl_options "github.com/coredhcp/coredhcp/plugins/options"
 	pl_prefix "github.com/coredhcp/coredhcp/plugins/prefix"
 	pl_range "github.com/coredhcp/coredhcp/plugins/range"
+	pl_redis "github.com/coredhcp/coredhcp/plugins/redis"
 	pl_router "github.com/coredhcp/coredhcp/plugins/router"
 	pl_searchdomains "github.com/coredhcp/coredhcp/plugins/searchdomains"
 	pl_serverid "github.com/coredhcp/coredhcp/plugins/serverid"
@@ -61,11 +63,13 @@ var desiredPlugins = []*plugins.Plugin{
 	&pl_metrics.Plugin,
 	&pl_mtu.Plugin,
 	&pl_nbp.Plugin,
+	&pl_netbox.Plugin,
 	&pl_netmask.Plugin,
 	&pl_ntp.Plugin,
 	&pl_options.Plugin,
 	&pl_prefix.Plugin,
 	&pl_range.Plugin,
+	&pl_redis.Plugin,
 	&pl_router.Plugin,
 	&pl_searchdomains.Plugin,
 	&pl_serverid.Plugin,

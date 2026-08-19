@@ -52,6 +52,7 @@ $ make test             # unit tests with the race detector
 $ make test-linux       # the same suite on Linux, in a container
 $ make test-integration # DHCPv6 against a client in network namespaces
 $ make test-compose     # DHCPv4 against clients on a docker bridge
+$ make test-redis       # the redis plugin against a real Redis, in compose
 $ make lint             # golangci-lint, pinned version, in a container
 $ make cover            # coverage profile plus the total
 $ make bench            # benchmark suite with allocation counts
@@ -121,6 +122,13 @@ run several copies on one host, as parallel CI jobs do:
 $ make test-compose COMPOSE_PROJECT=coredhcp-mr123 DHCP_NET_PREFIX=172.31.241
 ```
 
+`make test-redis` runs the redis plugin's integration tests against a real
+Redis server ([test/redis/](test/redis/)): one container for Redis with a
+password set, one `golang` container running the tests tagged `integration`
+against it. The netbox plugin's integration tests have no stack here; they run
+on demand against an existing NetBox instance with `NETBOX_URL`,
+`NETBOX_TOKEN` and `NETBOX_TEST_MAC` set, see the package documentation.
+
 ## Docker
 
 The [Dockerfile](./Dockerfile) builds a cgo-free binary and ships it on
@@ -139,11 +147,9 @@ CoreDHCP is heavily based on plugins: even the core functionalities are
 implemented as plugins. Therefore, knowing how to write one is the key to add
 new features to CoreDHCP.
 
-Core plugins can be found under the [plugins](/plugins/) directory. Additional
-plugins can also be found in the
-[coredhcp/plugins](https://github.com/coredhcp/plugins) repository.
+Core plugins can be found under the [plugins](/plugins/) directory.
 
-This fork adds four plugins upstream does not have:
+This fork adds six plugins upstream does not have built in:
 
 * [options](plugins/options/) sets any DHCP option from config
   (`15:string:home.lan`), typed and validated, instead of one plugin per
@@ -154,6 +160,20 @@ This fork adds four plugins upstream does not have:
   from a file
 * [ntp](plugins/ntp/) announces NTP servers, option 42 on DHCPv4 and the
   RFC 5908 option on DHCPv6
+* [netbox](plugins/netbox/) serves each client the address documented in
+  NetBox on the interface that carries its MAC, devices and virtual machines
+  alike, with a bounded cache in front of the API (NetBox 4.2 or newer)
+* [redis](plugins/redis/) serves static leases, router, DNS and lease time
+  from Redis hashes keyed by MAC, over a small RESP client of its own rather
+  than a client library; `redis://` and `rediss://` URLs, AUTH and database
+  selection are supported
+
+The last two started as the `netbox` and `redis` plugins in the
+[coredhcp/plugins](https://github.com/coredhcp/plugins) repository, which has
+not moved since 2020. They are rewrites, not ports: both families are served,
+results are cached, errors are bounded, and the NetBox one speaks the current
+API. Tokens and passwords can be given as `env:NAME` instead of a literal;
+prefer that, because the config loader logs plugin arguments at startup.
 
 The `range` plugin also releases expired leases here (a pool on upstream
 fills up forever: coredhcp/coredhcp#148).

@@ -79,6 +79,18 @@ server6:
         # the lease mapping during runtime whenever the lease file is updated.
         - file: "leases.txt"
 
+        # netbox serves the IPv6 address documented in NetBox on the interface
+        # that carries the client's MAC address (NetBox 4.2 or newer). Results
+        # are cached; ttl:, negative-ttl:, timeout: and lifetime: tune it.
+        # - netbox: <base URL> <token | env:NAME> [ttl:5m] [negative-ttl:30s] [timeout:5s] [lifetime:1h]
+        # - netbox: https://netbox.example.com env:NETBOX_TOKEN
+
+        # redis serves the ipv6 field of the hash stored at mac:<client MAC>,
+        # plus dns and leaseTime when present. The address may be a host:port
+        # or a redis:// / rediss:// URL with credentials and database.
+        # - redis: <address> [password:<value | env:NAME>] [timeout:2s] [prefix:mac:] [lifetime:1h]
+        # - redis: rediss://redis.example.com:6380/0 password:env:REDIS_PASSWORD
+
         # dns adds information about available DNS resolvers to the responses
         # - dns: <resolver IP> <... resolver IPs>
         - dns: 2001:4860:4860::8888 2001:4860:4860::8844
@@ -182,6 +194,21 @@ server4:
         # * lease duration can be given in any format understood by go's
         # "ParseDuration": https://golang.org/pkg/time/#ParseDuration
         - range: leases.sqlite3 10.10.10.100 10.10.10.200 60s
+
+        # netbox serves the IPv4 address (and its subnet mask) documented in
+        # NetBox on the interface that carries the client's MAC address, for
+        # devices and virtual machines alike (NetBox 4.2 or newer). Unknown
+        # clients fall through to the plugins after it; list it before range
+        # and after the option plugins, as with file.
+        # - netbox: <base URL> <token | env:NAME> [ttl:5m] [negative-ttl:30s] [timeout:5s]
+        # - netbox: https://netbox.example.com env:NETBOX_TOKEN
+
+        # redis serves static leases from Redis hashes keyed mac:<client MAC>,
+        # with fields ipv4 (address or CIDR, CIDR also sets the subnet mask),
+        # router, dns (comma-separated) and leaseTime (a Go duration).
+        # Unknown clients fall through; list it like file.
+        # - redis: <address> [password:<value | env:NAME>] [timeout:2s] [prefix:mac:]
+        # - redis: 127.0.0.1:6379
 
         # staticroute advertises additional routes the client should install in
         # its routing table as described in RFC3442
