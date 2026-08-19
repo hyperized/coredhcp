@@ -66,6 +66,32 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("template parsing failed: %w", err)
 	}
+
+	pluginList, err := collectPlugins()
+	if err != nil {
+		return err
+	}
+	outfile, err := resolveOutfile()
+	if err != nil {
+		return err
+	}
+
+	log.Printf("Generating output file '%s' with %d plugin(s):", outfile, len(pluginList))
+	for i, pl := range pluginList {
+		log.Printf("% 3d) %s", i+1, pl)
+	}
+	if err := render(t, outfile, pluginList); err != nil {
+		return err
+	}
+	log.Printf("Generated file '%s'. You can build it by running 'go build' in the output directory.", outfile)
+	fmt.Println(path.Dir(outfile))
+	return nil
+}
+
+// collectPlugins merges the plugin import paths given as arguments with, when
+// -from is set, those listed in the file. The result is deduplicated and
+// sorted.
+func collectPlugins() ([]string, error) {
 	plugins := make(map[string]bool)
 	for _, pl := range flag.Args() {
 		pl := strings.TrimSpace(pl)
@@ -78,54 +104,67 @@ func run() error {
 			// would put them at the base of $GOPATH/src.
 			// Assume this is one of the builtin plugins. If needed, use the -from option
 			// which always requires (and uses) exact paths
-
-			// XXX: we could also look into github.com/coredhcp/plugins
 			pl = importBase + "plugins/" + pl
 		}
 		plugins[pl] = true
 	}
 	if *flagFromFile != "" {
-		// additional plugin names from a text file, one line per plugin import
-		// path
-		fd, err := os.Open(*flagFromFile)
-		if err != nil {
-			return fmt.Errorf("failed to read file '%s': %w", *flagFromFile, err)
-		}
-		defer func() {
-			if err := fd.Close(); err != nil {
-				log.Printf("Error closing file '%s': %v", *flagFromFile, err)
-			}
-		}()
-		sc := bufio.NewScanner(fd)
-		for sc.Scan() {
-			pl := strings.TrimSpace(sc.Text())
-			if pl == "" {
-				continue
-			}
-			plugins[pl] = true
-		}
-		if err := sc.Err(); err != nil {
-			return fmt.Errorf("error reading file '%s': %w", *flagFromFile, err)
+		if err := pluginsFromFile(*flagFromFile, plugins); err != nil {
+			return nil, err
 		}
 	}
 	if len(plugins) == 0 {
-		return errors.New("no plugin specified")
+		return nil, errors.New("no plugin specified")
 	}
-	outfile := *flagOutfile
-	if outfile == "" {
-		tmpdir, err := os.MkdirTemp("", "coredhcp")
-		if err != nil {
-			return fmt.Errorf("cannot create temporary directory: %w", err)
-		}
-		outfile = path.Join(tmpdir, "coredhcp.go")
-	}
-
-	log.Printf("Generating output file '%s' with %d plugin(s):", outfile, len(plugins))
-	idx := 1
+	pluginList := make([]string, 0, len(plugins))
 	for pl := range plugins {
-		log.Printf("% 3d) %s", idx, pl)
-		idx++
+		pluginList = append(pluginList, pl)
 	}
+	sort.Strings(pluginList)
+	return pluginList, nil
+}
+
+// pluginsFromFile adds plugin import paths read from fname, one per line, to
+// plugins.
+func pluginsFromFile(fname string, plugins map[string]bool) error {
+	fd, err := os.Open(fname)
+	if err != nil {
+		return fmt.Errorf("failed to read file '%s': %w", fname, err)
+	}
+	defer func() {
+		if err := fd.Close(); err != nil {
+			log.Printf("Error closing file '%s': %v", fname, err)
+		}
+	}()
+	sc := bufio.NewScanner(fd)
+	for sc.Scan() {
+		pl := strings.TrimSpace(sc.Text())
+		if pl == "" {
+			continue
+		}
+		plugins[pl] = true
+	}
+	if err := sc.Err(); err != nil {
+		return fmt.Errorf("error reading file '%s': %w", fname, err)
+	}
+	return nil
+}
+
+// resolveOutfile returns the -o path, or coredhcp.go in a fresh temporary
+// directory when none was given.
+func resolveOutfile() (string, error) {
+	if *flagOutfile != "" {
+		return *flagOutfile, nil
+	}
+	tmpdir, err := os.MkdirTemp("", "coredhcp")
+	if err != nil {
+		return "", fmt.Errorf("cannot create temporary directory: %w", err)
+	}
+	return path.Join(tmpdir, "coredhcp.go"), nil
+}
+
+// render executes the template into outfile.
+func render(t *template.Template, outfile string, pluginList []string) error {
 	outFD, err := os.OpenFile(outfile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create output file '%s': %w", outfile, err)
@@ -136,15 +175,8 @@ func run() error {
 		}
 	}()
 	// WARNING: no escaping of the provided strings is done
-	pluginList := make([]string, 0, len(plugins))
-	for pl := range plugins {
-		pluginList = append(pluginList, pl)
-	}
-	sort.Strings(pluginList)
 	if err := t.Execute(outFD, pluginList); err != nil {
 		return fmt.Errorf("template execution failed: %w", err)
 	}
-	log.Printf("Generated file '%s'. You can build it by running 'go build' in the output directory.", outfile)
-	fmt.Println(path.Dir(outfile))
 	return nil
 }
