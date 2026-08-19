@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/coredhcp/coredhcp/config"
 	"github.com/coredhcp/coredhcp/logger"
@@ -110,6 +112,17 @@ func run(w io.Writer) error {
 	if err != nil {
 		return err
 	}
+
+	// shut down cleanly on SIGINT/SIGTERM
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sig)
+	go func() {
+		s := <-sig
+		log.Infof("received %s, shutting down", s)
+		srv.Close()
+	}()
+
 	if err := srv.Wait(); err != nil {
 		log.Error(err)
 	}
