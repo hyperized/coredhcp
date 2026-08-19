@@ -49,68 +49,70 @@ func RegisterPlugin(plugin *Plugin) error {
 	return nil
 }
 
+// loadHandlers walks one protocol family's plugin list, calling each
+// configured plugin's setup function in order. Plugins without a setup
+// function for this family are skipped with a warning, matching the
+// long-standing behaviour.
+func loadHandlers[H any](family string, list []config.PluginConfig,
+	setup func(*Plugin) func(...string) (H, error), isNil func(H) bool,
+) ([]H, error) {
+	handlers := make([]H, 0, len(list))
+	for _, pluginConf := range list {
+		plugin, ok := RegisteredPlugins[pluginConf.Name]
+		if !ok {
+			return nil, config.ErrorFromString("%s: unknown plugin `%s`", family, pluginConf.Name)
+		}
+		log.Printf("%s: loading plugin `%s`", family, pluginConf.Name)
+		setupFn := setup(plugin)
+		if setupFn == nil {
+			log.Warningf("%s: plugin `%s` has no setup function for %s", family, pluginConf.Name, family)
+			continue
+		}
+		h, err := setupFn(pluginConf.Args...)
+		if err != nil {
+			return nil, err
+		}
+		if isNil(h) {
+			return nil, config.ErrorFromString("no %s handler for plugin %s", family, pluginConf.Name)
+		}
+		handlers = append(handlers, h)
+	}
+	return handlers, nil
+}
+
 // LoadPlugins reads a Config object and loads the plugins as specified in the
 // `plugins` section, in order. For a plugin to be available, it must have been
 // previously registered with plugins.RegisterPlugin. This is normally done at
 // plugin import time.
-// This function returns the list of loaded v6 plugins, the list of loaded v4
+// This function returns the list of loaded v4 plugins, the list of loaded v6
 // plugins, and an error if any.
 func LoadPlugins(conf *config.Config) ([]handler.Handler4, []handler.Handler6, error) {
 	log.Print("Loading plugins...")
-	handlers4 := make([]handler.Handler4, 0)
-	handlers6 := make([]handler.Handler6, 0)
 
 	if conf.Server6 == nil && conf.Server4 == nil {
 		return nil, nil, errors.New("no configuration found for either DHCPv6 or DHCPv4")
 	}
 
-	// now load the plugins. We need to call its setup function with
-	// the arguments extracted above. The setup function is mapped in
-	// plugins.RegisteredPlugins .
-
-	// Load DHCPv6 plugins.
+	handlers4 := make([]handler.Handler4, 0)
+	handlers6 := make([]handler.Handler6, 0)
+	var err error
 	if conf.Server6 != nil {
-		for _, pluginConf := range conf.Server6.Plugins {
-			if plugin, ok := RegisteredPlugins[pluginConf.Name]; ok {
-				log.Printf("DHCPv6: loading plugin `%s`", pluginConf.Name)
-				if plugin.Setup6 == nil {
-					log.Warningf("DHCPv6: plugin `%s` has no setup function for DHCPv6", pluginConf.Name)
-					continue
-				}
-				h6, err := plugin.Setup6(pluginConf.Args...)
-				if err != nil {
-					return nil, nil, err
-				} else if h6 == nil {
-					return nil, nil, config.ErrorFromString("no DHCPv6 handler for plugin %s", pluginConf.Name)
-				}
-				handlers6 = append(handlers6, h6)
-			} else {
-				return nil, nil, config.ErrorFromString("DHCPv6: unknown plugin `%s`", pluginConf.Name)
-			}
+		handlers6, err = loadHandlers("DHCPv6", conf.Server6.Plugins,
+			func(p *Plugin) func(...string) (handler.Handler6, error) { return p.Setup6 },
+			func(h handler.Handler6) bool { return h == nil },
+		)
+		if err != nil {
+			return nil, nil, err
 		}
 	}
-	// Load DHCPv4 plugins. Yes, duplicated code, there's not really much that
-	// can be deduplicated here.
 	if conf.Server4 != nil {
-		for _, pluginConf := range conf.Server4.Plugins {
-			if plugin, ok := RegisteredPlugins[pluginConf.Name]; ok {
-				log.Printf("DHCPv4: loading plugin `%s`", pluginConf.Name)
-				if plugin.Setup4 == nil {
-					log.Warningf("DHCPv4: plugin `%s` has no setup function for DHCPv4", pluginConf.Name)
-					continue
-				}
-				h4, err := plugin.Setup4(pluginConf.Args...)
-				if err != nil {
-					return nil, nil, err
-				} else if h4 == nil {
-					return nil, nil, config.ErrorFromString("no DHCPv4 handler for plugin %s", pluginConf.Name)
-				}
-				handlers4 = append(handlers4, h4)
-			} else {
-				return nil, nil, config.ErrorFromString("DHCPv4: unknown plugin `%s`", pluginConf.Name)
-			}
+		handlers4, err = loadHandlers("DHCPv4", conf.Server4.Plugins,
+			func(p *Plugin) func(...string) (handler.Handler4, error) { return p.Setup4 },
+			func(h handler.Handler4) bool { return h == nil },
+		)
+		if err != nil {
+			return nil, nil, err
 		}
 	}
-
 	return handlers4, handlers6, nil
 }
