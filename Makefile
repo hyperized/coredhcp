@@ -11,7 +11,12 @@ DHCP_NET_PREFIX  ?= 172.31.240
 export DHCP_NET_PREFIX
 COMPOSE_TEST = docker compose -p $(COMPOSE_PROJECT) -f test/compose/docker-compose.yml
 
-.PHONY: all build test test-linux test-integration test-compose lint cover bench fuzz fmt clean docker-image
+# The redis plugin's integration tests under test/redis/: a real Redis and a Go
+# container running the tagged tests against it.
+REDIS_PROJECT ?= coredhcp-redis-itest
+COMPOSE_REDIS = docker compose -p $(REDIS_PROJECT) -f test/redis/docker-compose.yml
+
+.PHONY: all build test test-linux test-integration test-compose test-redis lint cover bench fuzz fmt clean docker-image
 
 all: build
 
@@ -45,6 +50,16 @@ test-compose:
 	trap teardown EXIT INT TERM; \
 	teardown; \
 	$(COMPOSE_TEST) up --build --exit-code-from checker
+
+# Integration tests for the redis plugin against a real Redis server, in
+# compose. The netbox plugin's integration tests have no stack here: they run
+# on demand against an existing NetBox, see plugins/netbox.
+test-redis:
+	@set -eu; \
+	teardown() { $(COMPOSE_REDIS) down --volumes --remove-orphans >/dev/null 2>&1 || true; }; \
+	trap teardown EXIT INT TERM; \
+	teardown; \
+	$(COMPOSE_REDIS) up --exit-code-from tester
 
 lint:
 	$(DOCKER_RUN) $(GOLANGCI_IMAGE) golangci-lint run
