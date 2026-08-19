@@ -204,11 +204,13 @@ func (s *Servers) Wait() error {
 	return errors.Join(errs...)
 }
 
-// Close closes all listening connections
+// Close closes all listening connections. It is safe to call more than once:
+// a shutdown signal and Wait both close the listeners, and the second close
+// of a connection is not an error worth reporting.
 func (s *Servers) Close() {
 	for _, srv := range s.listeners {
 		if srv != nil {
-			if err := srv.Close(); err != nil {
+			if err := srv.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 				log.Errorf("error closing listener: %v", err)
 			}
 		}

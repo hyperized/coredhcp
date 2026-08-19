@@ -1,0 +1,34 @@
+# coredhcp configuration for the docker-compose DHCPv4 test.
+#
+# Template: scripts/render-config.sh substitutes each placeholder with the
+# matching environment variable before the server starts. The network prefix is
+# the only knob, so the whole address plan follows one value.
+#
+# The checker parses the rendered file for its expectations, so the offered
+# options are compared against the server's own configuration rather than
+# against a second copy of the same values.
+
+server4:
+    # Bind to the compose network interface (eth0 inside the container). A
+    # bound listener means replies leave through the interface the request
+    # arrived on, which is what makes the layer-2 unicast path work.
+    listen:
+        - "%eth0"
+
+    plugins:
+        # Order matters. Everything that decorates the reply has to come before
+        # `file`, because the file plugin stops the chain as soon as it matches
+        # a MAC address.
+        - lease_time: @LEASE_TIME@
+        - server_id: @NET@.2
+        - dns: @NET@.1 9.9.9.9
+        - router: @NET@.1
+        - netmask: 255.255.255.0
+
+        # Static leases, keyed on MAC. This is what makes the assertions
+        # deterministic: a given client always gets a known address.
+        - file: "/etc/coredhcp/leases-v4.txt"
+
+        # Clients with no static lease fall through to the pool. The lease
+        # database lives on a writable volume; /etc/coredhcp is read-only.
+        - range: /var/lib/coredhcp/leases.sqlite3 @NET@.100 @NET@.110 @LEASE_TIME@

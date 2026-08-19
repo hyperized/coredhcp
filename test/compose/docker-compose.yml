@@ -1,0 +1,175 @@
+# End-to-end DHCPv4 test stack: coredhcp built from the repo Dockerfile,
+# busybox clients with fixed MAC addresses on a shared bridge, and a checker
+# that compares every offer against the server's own configuration.
+#
+# Drive it with `make test-compose` from the repo root, which sets the project
+# name and tears the stack down afterwards.
+#
+# Optional knobs, all with defaults: COMPOSE_PROJECT_NAME, DHCP_NET_PREFIX,
+# DHCP_LEASE_TIME, BUSYBOX_TAG, CHECK_TIMEOUT, and COREDHCP_LOGLEVEL, which is
+# worth setting to debug when a run fails.
+
+name: ${COMPOSE_PROJECT_NAME:-coredhcp-dhcp4-itest}
+
+# The client MAC addresses are anchored here so that the addresses docker
+# programs onto the interfaces and the addresses written into the static lease
+# file always come from one place. config-render receives the same values.
+x-mac-client-a: &mac-client-a "02:00:00:c0:de:01"
+x-mac-client-b: &mac-client-b "02:00:00:c0:de:02"
+x-mac-client-c: &mac-client-c "02:00:00:c0:de:03"
+x-mac-client-dynamic: &mac-client-dynamic "02:00:00:c0:de:99"
+
+x-dhcp-client: &dhcp-client
+  image: busybox:${BUSYBOX_TAG:-1.37.0}
+  # tini as PID 1: clients idle until the checker has read their results (see
+  # config-render for why nothing but the checker may exit), and a bare `sleep`
+  # as PID 1 ignores SIGTERM, so every teardown would otherwise sit out the 10
+  # second kill timeout.
+  init: true
+  depends_on:
+    server:
+      condition: service_healthy
+  # udhcpc opens an AF_PACKET socket; nothing else is needed, in particular no
+  # NET_ADMIN, because the capture script never configures the interface.
+  cap_drop: [ALL]
+  cap_add: [NET_RAW]
+  command: ["/bin/sh", "/src/scripts/run-client.sh"]
+  volumes:
+    - ./:/src:ro
+    - results:/results
+  networks: [dhcp]
+
+services:
+  # Renders the server config and the static lease file from the templates in
+  # config/ into the shared volume, substituting the network prefix and the
+  # client MAC addresses.
+  #
+  # It idles afterwards instead of exiting, and the server waits on its
+  # healthcheck rather than on service_completed_successfully: compose disarms
+  # `up --exit-code-from checker` as soon as some other container exits first,
+  # and the run then never ends. The checker has to be the only service that
+  # ever exits. If rendering fails the file never appears, this service goes
+  # unhealthy, and compose fails the run on the server's dependency.
+  config-render:
+    image: busybox:${BUSYBOX_TAG:-1.37.0}
+    init: true
+    # No network at all: it only writes files, and leaving it off the bridge
+    # keeps compose from creating a default network for this one service.
+    network_mode: none
+    command: ["/bin/sh", "-c", "/src/scripts/render-config.sh; exec sleep ${SERVICE_LINGER:-3600}"]
+    healthcheck:
+      test: ["CMD", "test", "-f", "/etc/coredhcp/config.yaml"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+    environment:
+      NET: ${DHCP_NET_PREFIX:-172.31.240}
+      LEASE_TIME: ${DHCP_LEASE_TIME:-300s}
+      MAC_A: *mac-client-a
+      MAC_B: *mac-client-b
+      MAC_C: *mac-client-c
+    volumes:
+      - ./:/src:ro
+      - coredhcp-conf:/etc/coredhcp
+
+  server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    depends_on:
+      config-render:
+        condition: service_healthy
+    command: ["--conf", "/etc/coredhcp/config.yaml", "--loglevel", "${COREDHCP_LOGLEVEL:-info}"]
+    # No privileged mode: binding udp/67 needs NET_BIND_SERVICE, and NET_RAW
+    # covers both SO_BINDTODEVICE for the interface-bound listener and the
+    # AF_PACKET socket used to unicast replies to clients that have no address
+    # yet. Both are in docker's default set; everything else is dropped.
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE, NET_RAW]
+    # Healthy once udp/67 is actually bound. 0043 is port 67 in the hex
+    # notation /proc/net/udp uses. Without this the clients would race the
+    # listener and rely on udhcpc's retries to paper over the gap.
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q ':0043 ' /proc/net/udp"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+    volumes:
+      - coredhcp-conf:/etc/coredhcp:ro
+      # The range plugin writes its lease database, so it gets its own
+      # writable volume rather than loosening the config mount.
+      - coredhcp-leasedb:/var/lib/coredhcp
+    networks:
+      dhcp:
+        # Fixed address, because the server_id the clients are checked against
+        # is baked into the rendered config.
+        ipv4_address: ${DHCP_NET_PREFIX:-172.31.240}.2
+
+  # Three clients with a static lease keyed on their MAC, one without, so the
+  # range plugin's allocation path is covered too.
+  client-a:
+    <<: *dhcp-client
+    mac_address: *mac-client-a
+    environment:
+      CLIENT_NAME: client-a
+
+  client-b:
+    <<: *dhcp-client
+    mac_address: *mac-client-b
+    environment:
+      CLIENT_NAME: client-b
+      # Sets the broadcast flag, so this client's reply comes back as a UDP
+      # broadcast while the others exercise the layer-2 unicast path.
+      UDHCPC_EXTRA_ARGS: "-B"
+
+  client-c:
+    <<: *dhcp-client
+    mac_address: *mac-client-c
+    environment:
+      CLIENT_NAME: client-c
+
+  client-dynamic:
+    <<: *dhcp-client
+    mac_address: *mac-client-dynamic
+    environment:
+      CLIENT_NAME: client-dynamic
+
+  # Exits last and decides the outcome of the run: `up --exit-code-from
+  # checker` returns this container's exit code.
+  checker:
+    image: busybox:${BUSYBOX_TAG:-1.37.0}
+    init: true
+    depends_on: [client-a, client-b, client-c, client-dynamic]
+    cap_drop: [ALL]
+    command: ["/bin/sh", "/src/scripts/check-leases.sh"]
+    environment:
+      # Clients whose address must equal the static lease for their MAC, and
+      # clients whose address must fall inside the range plugin's pool. Adding
+      # a client service means adding it here too.
+      EXPECTED_CLIENTS: "client-a client-b client-c client-dynamic"
+      DYNAMIC_CLIENTS: "client-dynamic"
+      CHECK_TIMEOUT: ${CHECK_TIMEOUT:-90}
+    volumes:
+      - ./:/src:ro
+      - results:/results
+      - coredhcp-conf:/etc/coredhcp:ro
+    networks: [dhcp]
+
+networks:
+  dhcp:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        # Docker's IPAM only allocates out of ip_range, which leaves the static
+        # leases (.11-.13), the dynamic pool (.100-.110) and the server's fixed
+        # address (.2) free of any accidental collision with container
+        # addressing. Override DHCP_NET_PREFIX to run several stacks at once.
+        - subnet: ${DHCP_NET_PREFIX:-172.31.240}.0/24
+          ip_range: ${DHCP_NET_PREFIX:-172.31.240}.192/26
+          gateway: ${DHCP_NET_PREFIX:-172.31.240}.1
+
+volumes:
+  coredhcp-conf:
+  coredhcp-leasedb:
+  results:

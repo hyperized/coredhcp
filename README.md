@@ -39,13 +39,47 @@ configure other plugins, see [config.yml.example](cmd/coredhcp/config.yml.exampl
 Day-to-day tasks are wrapped in the Makefile:
 
 ```
-$ make            # build everything into bin/
-$ make test       # unit tests with the race detector
-$ make test-linux # the same suite on Linux, in a container
-$ make lint       # golangci-lint, pinned version, in a container
-$ make cover      # coverage profile plus the total
-$ make bench      # benchmark suite with allocation counts
-$ make fuzz       # every fuzz target, 30s each (FUZZTIME=5m for longer)
+$ make                  # build everything into bin/
+$ make test             # unit tests with the race detector
+$ make test-linux       # the same suite on Linux, in a container
+$ make test-integration # DHCPv6 against a client in network namespaces
+$ make test-compose     # DHCPv4 against clients on a docker bridge
+$ make lint             # golangci-lint, pinned version, in a container
+$ make cover            # coverage profile plus the total
+$ make bench            # benchmark suite with allocation counts
+$ make fuzz             # every fuzz target, 30s each (FUZZTIME=5m for longer)
+```
+
+### Integration tests
+
+Two stacks exercise the protocol on the wire, one per address family.
+
+`make test-integration` runs the DHCPv6 server and a client in a pair of
+network namespaces ([test/integration/](test/integration/)). Namespaces are a
+Linux feature, so the Makefile runs that one in a container.
+
+`make test-compose` runs DHCPv4 end to end over a docker bridge
+([test/compose/](test/compose/)): the server built from the Dockerfile, four
+busybox clients with fixed MAC addresses, and a checker that asserts every
+offered lease. Three of the clients have a static lease in the `file` plugin,
+the fourth has none and falls through to the `range` plugin's pool. One of them
+sets the broadcast flag, so both reply paths get used: a UDP broadcast for that
+client and a raw layer-2 unicast for the others.
+
+The clients never apply the address they are offered, because docker's IPAM
+already owns their interface. A udhcpc script records the offer instead, and
+the checker compares it against the server's own rendered configuration:
+addresses, router, netmask, DNS, server id and lease time. Docker's own address
+pool sits well above the static leases and the range pool, so container
+addressing cannot collide with a lease even by accident.
+
+A run takes a few seconds once the image has been built, and the stack is torn
+down afterwards whether it passed or failed. Override the project name and the
+network prefix to run more than one copy on a host, which is what parallel CI
+jobs need:
+
+```
+$ make test-compose COMPOSE_PROJECT=coredhcp-mr123 DHCP_NET_PREFIX=172.31.241
 ```
 
 An example server is located under [cmd/coredhcp/](cmd/coredhcp/), so enter that
@@ -97,14 +131,17 @@ INFO[2019-01-05T22:29:21Z] DHCPv6Message
 
 ## Docker
 
-There is a [Dockerfile](./Dockerfile) and a [docker-compose.yml](./docker-compose.yml).
+The [Dockerfile](./Dockerfile) builds a cgo-free binary and ships it on
+debian-slim. `make docker-image` builds it, and the entrypoint reads its
+configuration from `/etc/coredhcp/config.yaml`, so mount one there. There is an
+example configuration file [config.yml.example](./cmd/coredhcp/config.yml.example)
+to start from.
 
-Docker compose expects a configuration file under `/etc/coredhcp/config.yaml`, and it is
-mapped to `./etc/coredhcp/config.yaml` when using `docker compose`. You can adjust the exported
-volume in `docker-compose.yml` to point to a different configuration file on the host file system.
-
-There is an example configuration file [config.yml.example](./cmd/coredhcp/config.yml.example)
-that you can use as a starting point.
+Running the container takes some care: a DHCP server has to share a broadcast
+domain with its clients, so publishing ports out of a NAT network achieves
+nothing. The compose stack in [test/compose/](test/compose/) is a working
+example. It puts the server and its clients on one user-defined bridge and
+grants `NET_BIND_SERVICE` and `NET_RAW` rather than running privileged.
 
 # Plugins
 

@@ -4,7 +4,14 @@ GOLANGCI_IMAGE ?= golangci/golangci-lint:v2.12.2
 
 DOCKER_RUN = docker run --rm -v $(CURDIR):/src -w /src -e GOFLAGS=-buildvcs=false
 
-.PHONY: all build test test-linux test-integration lint cover bench fuzz fmt clean docker-image
+# The docker-compose DHCPv4 test stack under test/compose/. Override the project
+# name and the network prefix to run several stacks on one host at once.
+COMPOSE_PROJECT  ?= coredhcp-dhcp4-itest
+DHCP_NET_PREFIX  ?= 172.31.240
+export DHCP_NET_PREFIX
+COMPOSE_TEST = docker compose -p $(COMPOSE_PROJECT) -f test/compose/docker-compose.yml
+
+.PHONY: all build test test-linux test-integration test-compose lint cover bench fuzz fmt clean docker-image
 
 all: build
 
@@ -28,6 +35,16 @@ test-integration:
 		./test/integration/setup-netns.sh && \
 		cd test/integration/server6 && \
 		go build -tags=integration -race . && ./server6'
+
+# End-to-end DHCPv4 test over a real broadcast domain: the server built from
+# the Dockerfile, busybox clients with fixed MAC addresses, and a checker that
+# asserts every offered lease. The stack is torn down whether it passes or not.
+test-compose:
+	@set -eu; \
+	teardown() { $(COMPOSE_TEST) down --volumes --remove-orphans >/dev/null 2>&1 || true; }; \
+	trap teardown EXIT INT TERM; \
+	teardown; \
+	$(COMPOSE_TEST) up --build --exit-code-from checker
 
 lint:
 	$(DOCKER_RUN) $(GOLANGCI_IMAGE) golangci-lint run

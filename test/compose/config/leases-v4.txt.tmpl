@@ -1,0 +1,9 @@
+# Static DHCPv4 leases for the docker-compose test, one "MAC IP" pair per line.
+#
+# Template: scripts/render-config.sh fills in the MAC addresses from the compose
+# file, so a client and its lease cannot drift apart, and the network prefix
+# from the compose network. The addresses sit below docker's own ip_range, so
+# nothing on the bridge can already hold them.
+@MAC_A@ @NET@.11
+@MAC_B@ @NET@.12
+@MAC_C@ @NET@.13
