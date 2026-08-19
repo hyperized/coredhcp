@@ -7,63 +7,40 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go: ['1.24', '1.25']
+        go: ['1.24', '1.25', '1.26']
     steps:
       - uses: actions/checkout@v4
-        with:
-          # clone in the gopath
-          path: src/github.com/${{ github.repository }}
       - uses: actions/setup-go@v5
         with:
-          stable: false
           go-version: ${{ matrix.go }}
-      - name: setup environment
-        run: |
-          # `env` doesn't allow for variable expansion, so we use the GITHUB_ENV
-          # trick.
-          echo "GOPATH=$GITHUB_WORKSPACE" >> $GITHUB_ENV
-          echo "GO111MODULE=on" >> $GITHUB_ENV
       - name: build coredhcp
-        run: |
-          set -exu
-          cd $GITHUB_WORKSPACE/src/github.com/${{ github.repository }}/cmds/coredhcp
-          go build
+        run: go build ./cmd/coredhcp
       - uses: actions/upload-artifact@v4
         with:
           name: coredhcp-${{ matrix.go }}
-          path: src/github.com/${{ github.repository }}/cmds/coredhcp/coredhcp
+          path: coredhcp
           if-no-files-found: error
   coredhcp-generator:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go: ['1.24', '1.25']
+        go: ['1.24', '1.25', '1.26']
     steps:
       - uses: actions/checkout@v4
-        with:
-          # clone in the gopath
-          path: src/github.com/${{ github.repository }}
       - uses: actions/setup-go@v5
         with:
-          stable: false
           go-version: ${{ matrix.go }}
-      - name: setup environment
-        run: |
-          # `env` doesn't allow for variable expansion, so we use the GITHUB_ENV
-          # trick.
-          echo "GOPATH=$GITHUB_WORKSPACE" >> $GITHUB_ENV
-          echo "GOBIN=$GITHUB_WORKSPACE/bin" >> $GITHUB_ENV
-      - name: build coredhcp-generator
+      - name: build and check coredhcp-generator
         run: |
           set -exu
-          cd "${GITHUB_WORKSPACE}"/src/github.com/${{ github.repository }}/cmds/coredhcp-generator
+          cd cmd/coredhcp-generator
           go build
           builddir=$(./coredhcp-generator -f core-plugins.txt)
           cd "${builddir}"
           ls -l
-          go mod init "coredhcp"
-          go mod edit -replace "github.com/coredhcp/coredhcp=${GITHUB_WORKSPACE}/src/github.com/${{ github.repository }}"
+          go mod init coredhcp
+          go mod edit -replace "github.com/coredhcp/coredhcp=${GITHUB_WORKSPACE}"
           go mod tidy
           go build
-          gofmt -w "${builddir}/coredhcp.go"
-          diff -u "${builddir}/coredhcp.go" "${GITHUB_WORKSPACE}"/src/github.com/${{ github.repository }}/cmds/coredhcp/main.go
+          gofmt -w coredhcp.go
+          diff -u coredhcp.go "${GITHUB_WORKSPACE}/cmd/coredhcp/main.go"

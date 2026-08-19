@@ -4,7 +4,7 @@
 
 Why is it even needed? Go is a compiled language with no dynamic loading
 support. In order to load a plugin, it has to be compiled in. We are happy to
-provide a standard [main.go](/cmds/coredhcp/main.go), and at the same time we
+provide a standard [main.go](/cmd/coredhcp/main.go), and at the same time we
 don't want to include plugins that not everyone would use, otherwise the binary
 size would grow without control.
 

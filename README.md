@@ -18,7 +18,7 @@ The following configuration runs a DHCPv6-only server, listening on all the inte
 server6:
     # this server will listen on all the available interfaces, on the default
     # DHCPv6 server port, and will join the default multicast groups. For more
-    # control, see the `listen` directive in cmds/coredhcp/config.yml.example .
+    # control, see the `listen` directive in cmd/coredhcp/config.yml.example .
     plugins:
         - server_id: LL 00:de:ad:be:ef:00
         - file: "leases.txt"
@@ -26,17 +26,17 @@ server6:
 ```
 
 For more complex examples, like how to listen on specific interfaces and
-configure other plugins, see [config.yml.example](cmds/coredhcp/config.yml.example).
+configure other plugins, see [config.yml.example](cmd/coredhcp/config.yml.example).
 
 ## Build and run
 
-An example server is located under [cmds/coredhcp/](cmds/coredhcp/), so enter that
+An example server is located under [cmd/coredhcp/](cmd/coredhcp/), so enter that
 directory first. To build a server with a custom set of plugins, see the "Server
 with custom plugins" section below.
 
-Once you have a working configuration in `config.yml` (see [config.yml.example](cmds/coredhcp/config.yml.example)), you can build and run the server:
+Once you have a working configuration in `config.yml` (see [config.yml.example](cmd/coredhcp/config.yml.example)), you can build and run the server:
 ```
-$ cd cmds/coredhcp
+$ cd cmd/coredhcp
 $ go build
 $ sudo ./coredhcp
 INFO[2019-01-05T22:28:07Z] Registering plugin "file"
@@ -59,9 +59,9 @@ INFO[2019-01-05T22:28:07Z] Waiting
 ```
 
 Then try it with the local test client, that is located under
-[cmds/client/](cmds/client):
+[cmd/client/](cmd/client):
 ```
-$ cd cmds/client
+$ cd cmd/client
 $ go build
 $ sudo ./client
 INFO[2019-01-05T22:29:21Z] &{ReadTimeout:3s WriteTimeout:3s LocalAddr:[::1]:546 RemoteAddr:[::1]:547}
@@ -85,7 +85,7 @@ Docker compose expects a configuration file under `/etc/coredhcp/config.yaml`, a
 mapped to `./etc/coredhcp/config.yaml` when using `docker compose`. You can adjust the exported
 volume in `docker-compose.yml` to point to a different configuration file on the host file system.
 
-There is an example configuration file [config.yml.example](./cmds/coredhcp/config.yml.example)
+There is an example configuration file [config.yml.example](./cmd/coredhcp/config.yml.example)
 that you can use as a starting point.
 
 # Plugins
@@ -101,7 +101,7 @@ plugins can also be found in the
 ## Server with custom plugins
 
 To build a server with a custom set of plugins you can use the
-[coredhcp-generator](/cmds/coredhcp-generator/) tool. Head there for
+[coredhcp-generator](/cmd/coredhcp-generator/) tool. Head there for
 documentation on how to use it.
 
 # How to write a plugin
