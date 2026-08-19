@@ -49,6 +49,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -110,30 +111,56 @@ func (s *pluginState) numRecords() int {
 // the specified file. The records have to be one per line, a mac address and an
 // IPv4 address.
 func LoadDHCPv4Records(filename string) (map[string]netip.Addr, error) {
-	return loadDHCPRecords(filename, 4, netip.Addr.Is4)
-}
-
-// LoadDHCPv6Records loads the DHCPv6Records global map with records stored on
-// the specified file. The records have to be one per line, a mac address and an
-// IPv6 address.
-func LoadDHCPv6Records(filename string) (map[string]netip.Addr, error) {
-	return loadDHCPRecords(filename, 6, netip.Addr.Is6)
-}
-
-// loadDHCPRecords loads the MAC<->IP mappings with records stored on
-// the specified file. The records have to be one per line, a mac address and an
-// IP address.
-func loadDHCPRecords(filename string, protVer int, check func(netip.Addr) bool) (map[string]netip.Addr, error) {
-	log.Infof("reading IPv%d leases from %s", protVer, filename)
-	addresses := make(map[string]int)
+	log.Infof("reading IPv4 leases from %s", filename)
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck // read-only open()
 
+	records, err := parseDHCPv4Records(f)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", filename, err)
+	}
+	return records, nil
+}
+
+// LoadDHCPv6Records loads the DHCPv6Records global map with records stored on
+// the specified file. The records have to be one per line, a mac address and an
+// IPv6 address.
+func LoadDHCPv6Records(filename string) (map[string]netip.Addr, error) {
+	log.Infof("reading IPv6 leases from %s", filename)
+	f, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck // read-only open()
+
+	records, err := parseDHCPv6Records(f)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", filename, err)
+	}
+	return records, nil
+}
+
+// parseDHCPv4Records parses the MAC<->IPv4 mappings out of r. The records
+// have to be one per line, a mac address and an IPv4 address.
+func parseDHCPv4Records(r io.Reader) (map[string]netip.Addr, error) {
+	return parseDHCPRecords(r, 4, netip.Addr.Is4)
+}
+
+// parseDHCPv6Records parses the MAC<->IPv6 mappings out of r. The records
+// have to be one per line, a mac address and an IPv6 address.
+func parseDHCPv6Records(r io.Reader) (map[string]netip.Addr, error) {
+	return parseDHCPRecords(r, 6, netip.Addr.Is6)
+}
+
+// parseDHCPRecords parses the MAC<->IP mappings out of r. The records have to
+// be one per line, a mac address and an IP address.
+func parseDHCPRecords(r io.Reader, protVer int, check func(netip.Addr) bool) (map[string]netip.Addr, error) {
+	addresses := make(map[string]int)
 	records := make(map[string]netip.Addr)
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(r)
 	lineNo := 0
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -147,18 +174,18 @@ func loadDHCPRecords(filename string, protVer int, check func(netip.Addr) bool) 
 
 		tokens := strings.Fields(line)
 		if len(tokens) != 2 {
-			return nil, fmt.Errorf("%s:%d malformed line, want 2 fields, got %d: %s", filename, lineNo, len(tokens), line)
+			return nil, fmt.Errorf("line %d: malformed line, want 2 fields, got %d: %s", lineNo, len(tokens), line)
 		}
 		hwaddr, err := net.ParseMAC(tokens[0])
 		if err != nil {
-			return nil, fmt.Errorf("%s:%d malformed hardware address: %s", filename, lineNo, tokens[0])
+			return nil, fmt.Errorf("line %d: malformed hardware address: %s", lineNo, tokens[0])
 		}
 		ipaddr, err := netip.ParseAddr(tokens[1])
 		if err != nil {
-			return nil, fmt.Errorf("%s:%d expected an IPv%d address, got: %s", filename, lineNo, protVer, tokens[1])
+			return nil, fmt.Errorf("line %d: expected an IPv%d address, got: %s", lineNo, protVer, tokens[1])
 		}
 		if !check(ipaddr) {
-			return nil, fmt.Errorf("%s:%d expected an IPv%d address, got: %s", filename, lineNo, protVer, ipaddr)
+			return nil, fmt.Errorf("line %d: expected an IPv%d address, got: %s", lineNo, protVer, ipaddr)
 		}
 
 		// note that net.HardwareAddr.String() uses lowercase hexadecimal
