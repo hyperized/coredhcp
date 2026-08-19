@@ -26,7 +26,6 @@ import (
 	"fmt"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
-	"github.com/sirupsen/logrus"
 
 	"github.com/coredhcp/coredhcp/handler"
 	"github.com/coredhcp/coredhcp/logger"
@@ -73,17 +72,17 @@ func Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	ac, ok := req.AutoConfigure()
 	if ok {
 		resp.UpdateOption(dhcpv4.OptAutoConfigure(autoconfigure))
-		log.WithFields(logrus.Fields{
-			"mac":           req.ClientHWAddr.String(),
-			"autoconfigure": fmt.Sprintf("%v", ac),
-		}).Debugf("Responded with autoconfigure %v", autoconfigure)
+		log.With(
+			"mac", req.ClientHWAddr.String(),
+			"autoconfigure", fmt.Sprintf("%v", ac),
+		).Debugf("Responded with autoconfigure %v", autoconfigure)
 		return resp, false
 	}
 
-	log.WithFields(logrus.Fields{
-		"mac":           req.ClientHWAddr.String(),
-		"autoconfigure": "nil",
-	}).Debugf("Client does not support autoconfigure")
+	log.With(
+		"mac", req.ClientHWAddr.String(),
+		"autoconfigure", "nil",
+	).Debug("Client does not support autoconfigure")
 	// RFC2563 2.3: if no address is chosen for the host [...]
 	// If the DHCPDISCOVER does not contain the Auto-Configure option,
 	// it is not answered.

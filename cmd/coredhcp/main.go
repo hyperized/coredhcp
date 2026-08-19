@@ -9,7 +9,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"os"
 
 	"github.com/coredhcp/coredhcp/config"
@@ -33,34 +32,16 @@ import (
 	pl_sleep "github.com/coredhcp/coredhcp/plugins/sleep"
 	pl_staticroute "github.com/coredhcp/coredhcp/plugins/staticroute"
 
-	"github.com/sirupsen/logrus"
 	flag "github.com/spf13/pflag"
 )
 
 var (
 	flagLogFile     = flag.StringP("logfile", "l", "", "Name of the log file to append to. Default: stdout/stderr only")
 	flagLogNoStdout = flag.BoolP("nostdout", "N", false, "Disable logging to stdout/stderr")
-	flagLogLevel    = flag.StringP("loglevel", "L", "info", fmt.Sprintf("Log level. One of %v", getLogLevels()))
+	flagLogLevel    = flag.StringP("loglevel", "L", "info", fmt.Sprintf("Log level. One of %v", logger.Levels()))
 	flagConfig      = flag.StringP("conf", "c", "", "Use this configuration file instead of the default location")
 	flagPlugins     = flag.BoolP("plugins", "P", false, "list plugins")
 )
-
-var logLevels = map[string]func(*logrus.Logger){
-	"none":    func(l *logrus.Logger) { l.SetOutput(io.Discard) },
-	"debug":   func(l *logrus.Logger) { l.SetLevel(logrus.DebugLevel) },
-	"info":    func(l *logrus.Logger) { l.SetLevel(logrus.InfoLevel) },
-	"warning": func(l *logrus.Logger) { l.SetLevel(logrus.WarnLevel) },
-	"error":   func(l *logrus.Logger) { l.SetLevel(logrus.ErrorLevel) },
-	"fatal":   func(l *logrus.Logger) { l.SetLevel(logrus.FatalLevel) },
-}
-
-func getLogLevels() []string {
-	var levels []string
-	for k := range logLevels {
-		levels = append(levels, k)
-	}
-	return levels
-}
 
 var desiredPlugins = []*plugins.Plugin{
 	&pl_autoconfigure.Plugin,
@@ -91,19 +72,19 @@ func main() {
 	}
 
 	log := logger.GetLogger("main")
-	fn, ok := logLevels[*flagLogLevel]
-	if !ok {
-		log.Fatalf("Invalid log level '%s'. Valid log levels are %v", *flagLogLevel, getLogLevels())
+	if err := logger.SetLevel(*flagLogLevel); err != nil {
+		log.Fatal(err)
 	}
-	fn(log.Logger)
 	log.Infof("Setting log level to '%s'", *flagLogLevel)
 	if *flagLogFile != "" {
 		log.Infof("Logging to file %s", *flagLogFile)
-		logger.WithFile(log, *flagLogFile)
+		if err := logger.WithFile(*flagLogFile); err != nil {
+			log.Fatalf("Failed to open log file: %v", err)
+		}
 	}
 	if *flagLogNoStdout {
 		log.Infof("Disabling logging to stdout/stderr")
-		logger.WithNoStdOutErr(log)
+		logger.WithNoStdOutErr()
 	}
 	config, err := config.Load(*flagConfig)
 	if err != nil {

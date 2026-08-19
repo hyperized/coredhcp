@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
-	"github.com/sirupsen/logrus"
 
 	"github.com/coredhcp/coredhcp/handler"
 	"github.com/coredhcp/coredhcp/logger"
@@ -57,10 +56,10 @@ func setup4(args ...string) (handler.Handler4, error) {
 // Handler4 handles DHCPv4 packets for the ipv6only plugin.
 func Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	v6pref := req.IsOptionRequested(dhcpv4.OptionIPv6OnlyPreferred)
-	log.WithFields(logrus.Fields{
-		"mac":      req.ClientHWAddr.String(),
-		"ipv6only": v6pref,
-	}).Debug("ipv6only status")
+	log.With(
+		"mac", req.ClientHWAddr.String(),
+		"ipv6only", v6pref,
+	).Debug("ipv6only status")
 	if v6pref {
 		resp.UpdateOption(dhcpv4.OptIPv6OnlyPreferred(v6onlyWait))
 		return resp, true

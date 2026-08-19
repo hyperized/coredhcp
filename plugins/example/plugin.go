@@ -21,9 +21,9 @@ import (
 )
 
 // We use a customizable logger, as part of the `logger` package. You can use
-// `logger.GetLogger()` to get a singleton instance of the logger. Then just use
-// it with the `logrus` interface (https://github.com/sirupsen/logrus). More
-// information in the docstring of the logger package.
+// `logger.GetLogger()` to get a logger carrying this plugin's prefix, with
+// the usual leveled printf-style methods plus `With` for structured context.
+// More information in the docstring of the logger package.
 var log = logger.GetLogger("plugins/example")
 
 // Plugin wraps the information necessary to register a plugin.
