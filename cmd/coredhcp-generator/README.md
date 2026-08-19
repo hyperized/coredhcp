@@ -1,40 +1,48 @@
 ## CoreDHCP Generator
 
-`coredhcp-generator` is a tool used to build CoreDHCP with the plugins you want.
+`coredhcp-generator` builds a CoreDHCP `main.go` with exactly the plugins you
+want.
 
-Why is it even needed? Go is a compiled language with no dynamic loading
-support. In order to load a plugin, it has to be compiled in. We are happy to
-provide a standard [main.go](/cmd/coredhcp/main.go), and at the same time we
-don't want to include plugins that not everyone would use, otherwise the binary
-size would grow without control.
+Why is it needed? Go is a compiled language with no dynamic loading, so a
+plugin has to be compiled in. The standard [main.go](/cmd/coredhcp/main.go)
+includes the built-in plugins; anything more, or less, means generating your
+own.
 
-You can use `coredhcp-generator` to generate a `main.go` that includes all the
-plugins you wish. Just use it as follows:
+Pass plugins as import paths, as bare names (which resolve to the built-in
+`plugins/` directory), from a file with one import path per line, or any mix:
 
 ```
-$ ./coredhcp-generator --from core-plugins.txt
-2019/11/21 23:32:04 Generating output file '/tmp/coredhcp547019106/coredhcp.go' with 7 plugin(s):
-2019/11/21 23:32:04   1) github.com/coredhcp/coredhcp/plugins/file
-2019/11/21 23:32:04   2) github.com/coredhcp/coredhcp/plugins/lease_time
-2019/11/21 23:32:04   3) github.com/coredhcp/coredhcp/plugins/netmask
-2019/11/21 23:32:04   4) github.com/coredhcp/coredhcp/plugins/range
-2019/11/21 23:32:04   5) github.com/coredhcp/coredhcp/plugins/router
-2019/11/21 23:32:04   6) github.com/coredhcp/coredhcp/plugins/server_id
-2019/11/21 23:32:04   7) github.com/coredhcp/coredhcp/plugins/dns
-2019/11/21 23:32:04 Generated file '/tmp/coredhcp547019106/coredhcp.go'. You can build it by running 'go build' in the output directory.
+$ go build
+$ ./coredhcp-generator serverid file range
+2026/08/19 12:09:36 Generating output file '/tmp/coredhcp2214597915/coredhcp.go' with 3 plugin(s):
+2026/08/19 12:09:36   1) github.com/coredhcp/coredhcp/plugins/file
+2026/08/19 12:09:36   2) github.com/coredhcp/coredhcp/plugins/range
+2026/08/19 12:09:36   3) github.com/coredhcp/coredhcp/plugins/serverid
+2026/08/19 12:09:36 Generated file '/tmp/coredhcp2214597915/coredhcp.go'. You can build it by running 'go build' in the output directory.
+/tmp/coredhcp2214597915
 ```
 
-You can also specify the plugin list on the command line, or mix it with
-`--from`:
+The last line is the output directory on its own, so it can feed a script.
+`--from core-plugins.txt` reads the built-in plugin list, and `-o` writes to a
+chosen path instead of a temporary directory:
+
 ```
 $ ./coredhcp-generator --from core-plugins.txt \
     github.com/coredhcp/plugins/redis
 ```
 
-Notice that it created a file called `coredhcp.go` in a temporary directory. You
-can now `go build` that file and have your own custom CoreDHCP.
+## Building the generated file
 
-## Bugs
+The output directory holds a single `coredhcp.go` and no `go.mod`. Create one
+that points back at your checkout, then build:
 
-CoreDHCP uses Go versioned modules. The generated file does not do that yet. We
-will add this feature soon.
+```
+$ cd /tmp/coredhcp2214597915
+$ go mod init coredhcp
+$ go mod edit -replace github.com/coredhcp/coredhcp=/path/to/your/checkout
+$ go mod tidy
+$ go build
+```
+
+This is exactly what the build workflow does in CI, where the result is also
+diffed against the checked-in main.go to keep the two in sync.
