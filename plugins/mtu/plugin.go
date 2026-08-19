@@ -34,7 +34,11 @@ const (
 	maxMTU = 65535
 )
 
-var mtu uint16
+// pluginState holds the MTU handed out by one setup instance of the
+// plugin.
+type pluginState struct {
+	mtu uint16
+}
 
 func setup4(args ...string) (handler.Handler4, error) {
 	if len(args) != 1 {
@@ -47,15 +51,15 @@ func setup4(args ...string) (handler.Handler4, error) {
 	if v < minMTU || v > maxMTU {
 		return nil, fmt.Errorf("mtu must be between %d and %d, got %d", minMTU, maxMTU, v)
 	}
-	mtu = uint16(v)
-	log.Infof("loaded mtu %d.", mtu)
-	return Handler4, nil
+	p := pluginState{mtu: uint16(v)}
+	log.Infof("loaded mtu %d.", p.mtu)
+	return p.Handler4, nil
 }
 
 // Handler4 handles DHCPv4 packets for the mtu plugin
-func Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	if req.IsOptionRequested(dhcpv4.OptionInterfaceMTU) {
-		resp.Options.Update(dhcpv4.Option{Code: dhcpv4.OptionInterfaceMTU, Value: dhcpv4.Uint16(mtu)})
+		resp.Options.Update(dhcpv4.Option{Code: dhcpv4.OptionInterfaceMTU, Value: dhcpv4.Uint16(p.mtu)})
 	}
 	return resp, false
 }
