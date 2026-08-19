@@ -2,32 +2,41 @@ name: Build
 
 on: [push, pull_request]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   coredhcp:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix:
-        go: ['1.24', '1.25', '1.26']
+        go: ['1.25', '1.26']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go }}
       - name: build coredhcp
         run: go build ./cmd/coredhcp
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coredhcp-${{ matrix.go }}
           path: coredhcp
           if-no-files-found: error
   coredhcp-generator:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix:
-        go: ['1.24', '1.25', '1.26']
+        go: ['1.25', '1.26']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go }}
       - name: build and check coredhcp-generator
