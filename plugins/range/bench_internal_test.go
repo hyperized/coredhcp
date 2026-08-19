@@ -52,7 +52,7 @@ func BenchmarkHandler4NewLease(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	pl := PluginState{
+	pl := pluginState{
 		leasedb:   db,
 		Recordsv4: make(map[string]*Record),
 		allocator: alloc,
@@ -87,7 +87,7 @@ func BenchmarkHandler4Renewal(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	pl := PluginState{
+	pl := pluginState{
 		leasedb:   db,
 		Recordsv4: make(map[string]*Record),
 		allocator: alloc,

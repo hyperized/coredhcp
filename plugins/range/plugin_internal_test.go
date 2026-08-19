@@ -66,7 +66,7 @@ func TestSetupRangeAllocatorCreationError(t *testing.T) {
 }
 
 func TestHandler4Inform(t *testing.T) {
-	pl := PluginState{}
+	pl := pluginState{}
 
 	hwaddr, err := net.ParseMAC("02:00:00:00:00:20")
 	require.NoError(t, err)
@@ -85,7 +85,7 @@ func TestHandler4NewAllocation(t *testing.T) {
 	require.NoError(t, err)
 
 	mockAlloc := &mockAllocator{}
-	pl := PluginState{
+	pl := pluginState{
 		leasedb:   db,
 		Recordsv4: make(map[string]*Record),
 		allocator: mockAlloc,
@@ -124,7 +124,7 @@ func TestHandler4NewAllocationAllocateError(t *testing.T) {
 	require.NoError(t, err)
 
 	mockAlloc := &mockFailingAllocator{}
-	pl := PluginState{
+	pl := pluginState{
 		leasedb:   db,
 		Recordsv4: make(map[string]*Record),
 		allocator: mockAlloc,
@@ -155,7 +155,7 @@ func TestHandler4NewAllocationSaveError(t *testing.T) {
 	require.NoError(t, db.Close()) // force saveIPAddress to fail
 
 	mockAlloc := &mockAllocator{}
-	pl := PluginState{
+	pl := pluginState{
 		leasedb:   db,
 		Recordsv4: make(map[string]*Record),
 		allocator: mockAlloc,
@@ -194,7 +194,7 @@ func TestHandler4RenewalExtendsLease(t *testing.T) {
 		expires:  int(time.Now().Add(-time.Hour).Unix()), // already expired: due for renewal
 		hostname: "old-name",
 	}
-	pl := PluginState{
+	pl := pluginState{
 		leasedb:   db,
 		Recordsv4: map[string]*Record{hwaddr.String(): existing},
 		LeaseTime: time.Hour,
@@ -230,7 +230,7 @@ func TestHandler4RenewalSaveError(t *testing.T) {
 		expires:  int(time.Now().Add(-time.Hour).Unix()),
 		hostname: "old-name",
 	}
-	pl := PluginState{
+	pl := pluginState{
 		leasedb:   db,
 		Recordsv4: map[string]*Record{hwaddr.String(): existing},
 		LeaseTime: time.Hour,
@@ -256,7 +256,7 @@ func TestHandler4Release(t *testing.T) {
 
 	mockAlloc := &mockAllocator{}
 
-	pl := PluginState{
+	pl := pluginState{
 		leasedb:   db,
 		Recordsv4: make(map[string]*Record),
 		allocator: mockAlloc,
@@ -312,7 +312,7 @@ func TestHandler4ReleaseAllocatorError(t *testing.T) {
 
 	mockAlloc := &mockFailingAllocator{}
 
-	pl := PluginState{
+	pl := pluginState{
 		leasedb:   db,
 		Recordsv4: make(map[string]*Record),
 		allocator: mockAlloc,
@@ -366,7 +366,7 @@ func TestHandler4ReleaseStorageError(t *testing.T) {
 
 	mockAlloc := &mockAllocator{}
 
-	pl := PluginState{
+	pl := pluginState{
 		leasedb:   db,
 		Recordsv4: make(map[string]*Record),
 		allocator: mockAlloc,

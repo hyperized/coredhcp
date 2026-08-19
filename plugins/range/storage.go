@@ -68,7 +68,7 @@ func loadRecords(db *sql.DB) (map[string]*Record, error) {
 }
 
 // saveIPAddress writes out a lease to storage
-func (p *PluginState) saveIPAddress(mac net.HardwareAddr, record *Record) error {
+func (p *pluginState) saveIPAddress(mac net.HardwareAddr, record *Record) error {
 	if _, err := p.leasedb.Exec(
 		`insert or replace into leases4(mac, ip, expiry, hostname) values (?, ?, ?, ?)`,
 		mac.String(),
@@ -82,7 +82,7 @@ func (p *PluginState) saveIPAddress(mac net.HardwareAddr, record *Record) error 
 }
 
 // freeIPAddress removes a lease from storage
-func (p *PluginState) freeIPAddress(mac net.HardwareAddr, record *Record) error {
+func (p *pluginState) freeIPAddress(mac net.HardwareAddr, record *Record) error {
 	if _, err := p.leasedb.Exec(
 		`delete from leases4 where mac = ? and ip = ?`,
 		mac.String(),
@@ -94,7 +94,7 @@ func (p *PluginState) freeIPAddress(mac net.HardwareAddr, record *Record) error 
 }
 
 // registerBackingDB installs a database connection string as the backing store for leases
-func (p *PluginState) registerBackingDB(filename string) error {
+func (p *pluginState) registerBackingDB(filename string) error {
 	if p.leasedb != nil {
 		return errors.New("cannot swap out a lease database while running")
 	}

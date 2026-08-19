@@ -73,7 +73,7 @@ func TestLoadRecords(t *testing.T) {
 }
 
 func TestWriteRecords(t *testing.T) {
-	pl := PluginState{}
+	pl := pluginState{}
 	if err := pl.registerBackingDB(":memory:"); err != nil {
 		t.Fatalf("Could not setup file")
 	}
@@ -105,7 +105,7 @@ func TestFreeIPAddress(t *testing.T) {
 		t.Fatalf("Failed to set up test DB: %v", err)
 	}
 
-	pl := PluginState{leasedb: db}
+	pl := pluginState{leasedb: db}
 
 	hwaddr, err := net.ParseMAC(records[1].mac)
 	if err != nil {
@@ -135,7 +135,7 @@ func TestFreeIPAddress(t *testing.T) {
 }
 
 func TestFreeIPAddressNonExistent(t *testing.T) {
-	pl := PluginState{}
+	pl := pluginState{}
 	if err := pl.registerBackingDB(":memory:"); err != nil {
 		t.Fatalf("Could not setup file")
 	}
@@ -167,7 +167,7 @@ func TestFreeIPAddressVerifyDeletion(t *testing.T) {
 		t.Fatalf("Failed to set up test DB: %v", err)
 	}
 
-	pl := PluginState{leasedb: db}
+	pl := pluginState{leasedb: db}
 
 	parsedRecords, err := loadRecords(pl.leasedb)
 	if err != nil {
@@ -225,7 +225,7 @@ func TestFreeIPAddressExecutionError(t *testing.T) {
 		t.Fatalf("Failed to create trigger: %v", err)
 	}
 
-	pl := PluginState{leasedb: db}
+	pl := pluginState{leasedb: db}
 
 	hwaddr, err := net.ParseMAC(records[0].mac)
 	if err != nil {
@@ -342,7 +342,7 @@ func TestLoadDBOpenError(t *testing.T) {
 }
 
 func TestRegisterBackingDBDoubleRegistration(t *testing.T) {
-	pl := PluginState{}
+	pl := pluginState{}
 	require.NoError(t, pl.registerBackingDB(":memory:"))
 
 	err := pl.registerBackingDB(":memory:")

@@ -46,8 +46,8 @@ type Record struct {
 	hostname string
 }
 
-// PluginState is the data held by an instance of the range plugin
-type PluginState struct {
+// pluginState is the data held by an instance of the range plugin
+type pluginState struct {
 	// Rough lock for the whole plugin, we'll get better performance once we use leasestorage
 	sync.Mutex
 	// Recordsv4 holds a MAC -> IP address and lease time mapping
@@ -58,7 +58,7 @@ type PluginState struct {
 }
 
 // Handler4 handles DHCPv4 packets for the range plugin
-func (p *PluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	if req.MessageType() == dhcpv4.MessageTypeInform {
 		return resp, false
 	}
@@ -112,7 +112,7 @@ func (p *PluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 // handleRelease frees the lease for req's client. The DHCP response to a
 // release is always "no response, stop processing", so failures are only
 // logged here.
-func (p *PluginState) handleRelease(req *dhcpv4.DHCPv4, record *Record) {
+func (p *pluginState) handleRelease(req *dhcpv4.DHCPv4, record *Record) {
 	// Remove lease from storage
 	if freeErr := p.freeIPAddress(req.ClientHWAddr, record); freeErr != nil {
 		log.Errorf("Could not remove lease from storage for MAC %s: %v", req.ClientHWAddr.String(), freeErr)
@@ -134,7 +134,7 @@ func (p *PluginState) handleRelease(req *dhcpv4.DHCPv4, record *Record) {
 func setupRange(args ...string) (handler.Handler4, error) {
 	var (
 		err error
-		p   PluginState
+		p   pluginState
 	)
 
 	if len(args) < 4 {
