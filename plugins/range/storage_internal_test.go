@@ -6,12 +6,15 @@ package rangeplugin
 
 import (
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"fmt"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func testDBSetup() (*sql.DB, error) {
@@ -236,4 +239,113 @@ func TestFreeIPAddressExecutionError(t *testing.T) {
 	assert.Error(t, err, "Should return error due to trigger preventing deletion")
 	assert.Contains(t, err.Error(), "record delete failed", "Error should indicate record delete failure")
 	assert.Contains(t, err.Error(), triggerErrorMsg, "Error should contain trigger message")
+}
+
+// TestLoadRecordsMalformedRows covers loadRecords' validation of rows that
+// were written directly with raw SQL, bypassing saveIPAddress's guarantees
+// (mac/ip are just TEXT columns as far as SQLite is concerned).
+func TestLoadRecordsMalformedRows(t *testing.T) {
+	cases := []struct {
+		name       string
+		mac        string
+		ip         string
+		expiry     any
+		wantErrSub string
+	}{
+		{"malformed MAC", "not-a-mac", "10.0.0.1", 1, "malformed hardware address"},
+		{"malformed IP", "aa:bb:cc:dd:ee:ff", "not-an-ip", 1, "expected an IPv4 address"},
+		{"IPv6 address instead of IPv4", "aa:bb:cc:dd:ee:ff", "2001:db8::1", 1, "expected an IPv4 address"},
+		{"non-numeric expiry", "aa:bb:cc:dd:ee:ff", "10.0.0.1", "not-a-number", "failed to scan row"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := loadDB(":memory:")
+			require.NoError(t, err)
+			_, err = db.Exec(
+				"insert into leases4(mac, ip, expiry, hostname) values (?, ?, ?, ?)",
+				tc.mac, tc.ip, tc.expiry, "host",
+			)
+			require.NoError(t, err)
+
+			_, err = loadRecords(db)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErrSub)
+		})
+	}
+}
+
+func TestLoadRecordsQueryError(t *testing.T) {
+	db, err := loadDB(":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	_, err = loadRecords(db)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to query leases database")
+}
+
+// errRowsDriver is a minimal database/sql/driver implementation whose Rows
+// always fail iteration with a non-io.EOF error, so that we can
+// deterministically exercise loadRecords' rows.Err() branch. Real SQLite
+// query results are materialized up front, so this can't be triggered
+// through the sqlite driver itself.
+type errRowsDriver struct{}
+
+func (errRowsDriver) Open(string) (driver.Conn, error) { return &errRowsConn{}, nil }
+
+type errRowsConn struct{}
+
+func (c *errRowsConn) Prepare(string) (driver.Stmt, error) { return &errRowsStmt{}, nil }
+func (c *errRowsConn) Close() error                        { return nil }
+func (c *errRowsConn) Begin() (driver.Tx, error)           { return nil, errors.New("unsupported") }
+
+type errRowsStmt struct{}
+
+func (s *errRowsStmt) Close() error  { return nil }
+func (s *errRowsStmt) NumInput() int { return -1 }
+func (s *errRowsStmt) Exec([]driver.Value) (driver.Result, error) {
+	return nil, errors.New("unsupported")
+}
+func (s *errRowsStmt) Query([]driver.Value) (driver.Rows, error) { return &errRows{}, nil }
+
+type errRows struct{}
+
+func (r *errRows) Columns() []string { return []string{"mac", "ip", "expiry", "hostname"} }
+func (r *errRows) Close() error      { return nil }
+func (r *errRows) Next([]driver.Value) error {
+	return errors.New("simulated row iteration failure")
+}
+
+func TestLoadRecordsRowsIterationError(t *testing.T) {
+	const driverName = "rangeplugin_errrows_test"
+	sql.Register(driverName, errRowsDriver{})
+
+	db, err := sql.Open(driverName, "irrelevant")
+	require.NoError(t, err)
+
+	_, err = loadRecords(db)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed lease database row scanning")
+	assert.Contains(t, err.Error(), "simulated row iteration failure")
+}
+
+func TestLoadDBOpenError(t *testing.T) {
+	orig := sqlOpen
+	t.Cleanup(func() { sqlOpen = orig })
+	sqlOpen = func(string, string) (*sql.DB, error) {
+		return nil, errors.New("simulated open failure")
+	}
+
+	_, err := loadDB("irrelevant")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to open database")
+}
+
+func TestRegisterBackingDBDoubleRegistration(t *testing.T) {
+	pl := PluginState{}
+	require.NoError(t, pl.registerBackingDB(":memory:"))
+
+	err := pl.registerBackingDB(":memory:")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot swap out a lease database")
 }

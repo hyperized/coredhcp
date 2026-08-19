@@ -32,6 +32,13 @@ var Plugin = plugins.Plugin{
 	Setup4: setupRange,
 }
 
+// newIPv4Allocator is bitmap.NewIPv4Allocator, extracted as a seam for
+// tests. setupRange already validates that start <= end and that both
+// parse as IPv4 addresses before calling this, so through the public API
+// the allocator can never actually fail to construct; overriding this var
+// is the only way to exercise that error path deterministically.
+var newIPv4Allocator = bitmap.NewIPv4Allocator
+
 // Record holds an IP lease record
 type Record struct {
 	IP       net.IP
@@ -149,7 +156,7 @@ func setupRange(args ...string) (handler.Handler4, error) {
 		return nil, errors.New("start of IP range has to be lower than or equal to the end of an IP range")
 	}
 
-	p.allocator, err = bitmap.NewIPv4Allocator(ipRangeStart, ipRangeEnd)
+	p.allocator, err = newIPv4Allocator(ipRangeStart, ipRangeEnd)
 	if err != nil {
 		return nil, fmt.Errorf("could not create an allocator: %w", err)
 	}

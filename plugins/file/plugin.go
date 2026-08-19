@@ -80,10 +80,31 @@ var Plugin = plugins.Plugin{
 	Setup4: setup4,
 }
 
-var recLock sync.RWMutex
+// fsnotifyNewWatcher and watcherAdd are indirections over the two fsnotify
+// calls setupFile makes to wire up autorefresh. Production code always uses
+// the real implementations assigned here; tests substitute them to simulate
+// the watcher failing to initialize or attach, which real filesystem
+// operations can't trigger deterministically.
+var (
+	fsnotifyNewWatcher = fsnotify.NewWatcher
+	watcherAdd         = (*fsnotify.Watcher).Add
+)
 
-// StaticRecords holds a MAC -> IP address mapping
-var StaticRecords map[string]netip.Addr
+// pluginState holds the MAC -> IP address mapping backing a single instance
+// of the file plugin, plus the lock protecting it. setupFile creates one
+// instance per call, so a deployment using the plugin on both server4 and
+// server6 keeps their lease sets independent.
+type pluginState struct {
+	mu   sync.RWMutex
+	recs map[string]netip.Addr
+}
+
+// numRecords returns the number of currently loaded records.
+func (s *pluginState) numRecords() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.recs)
+}
 
 // LoadDHCPv4Records loads the DHCPv4Records global map with records stored on
 // the specified file. The records have to be one per line, a mac address and an
@@ -172,7 +193,7 @@ func duplicatesWarning(ipAddresses map[string]int) {
 }
 
 // Handler6 handles DHCPv6 packets for the file plugin
-func Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
+func (s *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	m, err := req.GetInnerMessage()
 	if err != nil {
 		log.Errorf("BUG: could not decapsulate: %v", err)
@@ -190,10 +211,10 @@ func Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 		return resp, false
 	}
 
-	recLock.RLock()
-	defer recLock.RUnlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	ipaddr, ok := StaticRecords[mac.String()]
+	ipaddr, ok := s.recs[mac.String()]
 	if !ok {
 		log.Infof("MAC address %s is unknown", mac)
 		return resp, false
@@ -214,14 +235,14 @@ func Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 }
 
 // Handler4 handles DHCPv4 packets for the file plugin
-func Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+func (s *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	if req.MessageType() == dhcpv4.MessageTypeInform {
 		return resp, false
 	}
-	recLock.RLock()
-	defer recLock.RUnlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	ipaddr, ok := StaticRecords[req.ClientHWAddr.String()]
+	ipaddr, ok := s.recs[req.ClientHWAddr.String()]
 	if !ok {
 		log.Infof("MAC address %s is unknown", req.ClientHWAddr)
 		return resp, false
@@ -251,8 +272,10 @@ func setupFile(v6 bool, args ...string) (handler.Handler6, handler.Handler4, err
 		return nil, nil, errors.New("got empty file name")
 	}
 
+	s := &pluginState{}
+
 	// load initial database from lease file
-	if err = loadFromFile(v6, filename); err != nil {
+	if err = s.loadFromFile(v6, filename); err != nil {
 		return nil, nil, err
 	}
 
@@ -260,13 +283,13 @@ func setupFile(v6 bool, args ...string) (handler.Handler6, handler.Handler4, err
 	// changes and reload the lease mapping on any event
 	if len(args) > 1 && args[1] == autoRefreshArg {
 		// creates a new file watcher
-		watcher, err := fsnotify.NewWatcher()
+		watcher, err := fsnotifyNewWatcher()
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create watcher: %w", err)
 		}
 
 		// have file watcher watch over lease file
-		if err = watcher.Add(filename); err != nil {
+		if err = watcherAdd(watcher, filename); err != nil {
 			return nil, nil, fmt.Errorf("failed to watch %s: %w", filename, err)
 		}
 
@@ -274,23 +297,23 @@ func setupFile(v6 bool, args ...string) (handler.Handler6, handler.Handler4, err
 		// on the file
 		go func() {
 			for range watcher.Events {
-				err := loadFromFile(v6, filename)
+				err := s.loadFromFile(v6, filename)
 				if err != nil {
 					log.Warningf("failed to refresh from %s: %s", filename, err)
 
 					continue
 				}
 
-				log.Infof("updated to %d leases from %s", len(StaticRecords), filename)
+				log.Infof("updated to %d leases from %s", s.numRecords(), filename)
 			}
 		}()
 	}
 
-	log.Infof("loaded %d leases from %s", len(StaticRecords), filename)
-	return Handler6, Handler4, nil
+	log.Infof("loaded %d leases from %s", s.numRecords(), filename)
+	return s.Handler6, s.Handler4, nil
 }
 
-func loadFromFile(v6 bool, filename string) error {
+func (s *pluginState) loadFromFile(v6 bool, filename string) error {
 	var err error
 	var records map[string]netip.Addr
 	var protver int
@@ -305,10 +328,10 @@ func loadFromFile(v6 bool, filename string) error {
 		return fmt.Errorf("failed to load DHCPv%d records: %w", protver, err)
 	}
 
-	recLock.Lock()
-	defer recLock.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	StaticRecords = records
+	s.recs = records
 
 	return nil
 }

@@ -15,8 +15,15 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// sqlOpen is sql.Open, extracted as a seam for tests. The registered
+// "sqlite" driver only implements driver.Driver (not driver.DriverContext),
+// so database/sql defers connecting until first use and sql.Open itself
+// never actually fails for it; overriding this var is the only way to
+// exercise the error path below deterministically.
+var sqlOpen = sql.Open
+
 func loadDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s", path))
+	db, err := sqlOpen("sqlite", fmt.Sprintf("file:%s", path))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database (%T): %w", err, err)
 	}
