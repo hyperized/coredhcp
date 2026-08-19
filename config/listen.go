@@ -20,14 +20,21 @@ import (
 	"github.com/spf13/cast"
 )
 
-// BUG(Natolumin): listen specifications of the form `[ip6]%iface:port` or
-// `[ip6]%iface` are not supported, even though they are the default format of
-// the `ss` utility in linux. Use `[ip6%iface]:port` instead
-
 // splitHostPort splits an address of the form ip%zone:port into ip,zone and port.
 // It still returns if any of these are unset (unlike net.SplitHostPort which
-// returns an error if there is no port)
+// returns an error if there is no port).
+// Both zone placements are accepted: `[ip6%iface]:port` (the net package's
+// form) and `[ip6]%iface:port` or `[ip6]%iface` (the form the ss utility
+// prints), the latter by moving the zone inside the brackets first.
 func splitHostPort(hostport string) (ip string, zone string, port string, err error) {
+	if i := strings.Index(hostport, "]%"); i >= 0 {
+		rest := hostport[i+2:]
+		zonePart, portPart := rest, ""
+		if j := strings.IndexByte(rest, ':'); j >= 0 {
+			zonePart, portPart = rest[:j], rest[j:]
+		}
+		hostport = hostport[:i] + "%" + zonePart + "]" + portPart
+	}
 	ip, port, err = net.SplitHostPort(hostport)
 	if err != nil {
 		// Either there is no port, or a more serious error.
@@ -129,9 +136,12 @@ func defaultListen(ver protocolVersion) ([]net.UDPAddr, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Deliberately no wildcard [::] listener here: the multicast
+		// groups cover standard clients and relays, and a DHCP server
+		// should not accept unicast on every address unless the operator
+		// asked for exactly that in `listen`.
 		l = append(l,
 			net.UDPAddr{IP: dhcpv6.AllDHCPServers, Port: dhcpv6.DefaultServerPort},
-			// XXX: Do we want to listen on [::] as default ?
 		)
 		return l, nil
 	}
