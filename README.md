@@ -1,6 +1,12 @@
 # coredhcp
 
-[![Build Status](https://travis-ci.org/coredhcp/coredhcp.svg?branch=master)](https://travis-ci.org/coredhcp/coredhcp)
+This is a maintained fork of [coredhcp/coredhcp](https://github.com/coredhcp/coredhcp).
+It diverges deliberately: standard library `log/slog` instead of logrus, a
+pure-Go sqlite driver (no cgo), per-instance plugin state instead of package
+globals, a strict golangci-lint config at zero issues, and near-total test
+coverage. Commits are kept small and per-concern so changes can flow back
+upstream.
+
 [![codecov](https://codecov.io/gh/coredhcp/coredhcp/branch/master/graph/badge.svg)](https://codecov.io/gh/coredhcp/coredhcp)
 [![Go Report Card](https://goreportcard.com/badge/github.com/coredhcp/coredhcp)](https://goreportcard.com/report/github.com/coredhcp/coredhcp)
 
@@ -49,10 +55,10 @@ Once you have a working configuration in `config.yml` (see [config.yml.example](
 $ cd cmd/coredhcp
 $ go build
 $ sudo ./coredhcp
-INFO[2019-01-05T22:28:07Z] Registering plugin "file"
-INFO[2019-01-05T22:28:07Z] Registering plugin "server_id"
-INFO[2019-01-05T22:28:07Z] Loading configuration
-INFO[2019-01-05T22:28:07Z] Found plugin: `server_id` with 2 args, `[LL 00:de:ad:be:ef:00]`
+time=2026-08-19T22:28:07Z level=INFO msg="Registering plugin \"file\"" prefix=plugins
+time=2026-08-19T22:28:07Z level=INFO msg="Registering plugin \"server_id\"" prefix=plugins
+time=2026-08-19T22:28:07Z level=INFO msg="Loading configuration" prefix=main
+time=2026-08-19T22:28:07Z level=INFO msg="Found plugin: `server_id` with 2 args" prefix=config
 INFO[2019-01-05T22:28:07Z] Found plugin: `file` with 1 args, `[leases.txt]`
 INFO[2019-01-05T22:28:07Z] Loading plugins...
 INFO[2019-01-05T22:28:07Z] Loading plugin `server_id`
