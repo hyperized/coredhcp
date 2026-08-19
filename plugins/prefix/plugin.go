@@ -149,11 +149,19 @@ func (h *pluginState) respondToIAPD(client dhcpv6.DUID, iapd *dhcpv6.OptIAPD) *d
 // requestedPrefixes returns the prefixes the client hints at in one IA_PD.
 // An IA_PD without any IAPrefix is still a valid request (just unspecified) and
 // we must attempt to allocate a prefix for it, so it gets a single empty hint,
-// which is equivalent to no hint.
+// which is equivalent to no hint. A hint whose prefix is absent on the wire
+// (the decoder returns nil for a zero prefix-length) is normalised to the same
+// empty prefix here, in one place: letting nil flow deeper used to crash the
+// handler as soon as the client already held a lease.
 func requestedPrefixes(iapd *dhcpv6.OptIAPD) []*dhcpv6.OptIAPrefix {
 	hints := iapd.Options.Prefixes()
 	if len(hints) == 0 {
 		return []*dhcpv6.OptIAPrefix{{Prefix: &net.IPNet{}}}
+	}
+	for _, hint := range hints {
+		if hint.Prefix == nil {
+			hint.Prefix = &net.IPNet{}
+		}
 	}
 	return hints
 }
@@ -257,19 +265,14 @@ func (e *pdExchange) wantsAnyPrefix(hintIdx int, hint *dhcpv6.OptIAPrefix) bool 
 	if e.satisfied.Test(uint(hintIdx)) {
 		return false
 	}
-	return hint.Prefix == nil || hint.Prefix.IP.Equal(net.IPv6zero)
+	return hint.Prefix.IP.Equal(net.IPv6zero)
 }
 
 // lengthMatches reports whether lease l has the prefix length hint asked for.
-// A hint that named no length takes any lease.
+// A hint that named no length takes any lease. hint.Prefix is never nil here:
+// requestedPrefixes normalises wire-level nil prefixes at the edge.
 //
 // This is a bad heuristic depending on the allocator behavior, to be improved.
-//
-// hint.Prefix is read without a nil check, which is the behaviour that was here
-// before: a hint with no prefix at all (which the wire decoder produces for a
-// prefix-length of 0) panics here as soon as the client holds a lease we have
-// not given out yet. Left as-is to keep this refactor behaviour-preserving; it
-// wants a fix of its own.
 func lengthMatches(hint *dhcpv6.OptIAPrefix, l lease) bool {
 	hintPrefixLen, _ := hint.Prefix.Mask.Size()
 	if hintPrefixLen == 0 {
@@ -329,14 +332,7 @@ func (h *pluginState) allocateForUnsatisfied(e *pdExchange) []lease {
 // newLease carves a prefix out of the pool for a single hint. It reports false
 // when the allocator has nothing to offer, which is not fatal to the request as
 // a whole: the other hints may still be satisfiable.
-//
-// A hint with no prefix at all is normalised to the empty prefix in place, which
-// the allocator reads as "anything will do".
 func (h *pluginState) newLease(hint *dhcpv6.OptIAPrefix) (lease, bool) {
-	if hint.Prefix == nil {
-		hint.Prefix = &net.IPNet{}
-	}
-
 	allocated, err := h.allocator.Allocate(*hint.Prefix)
 	if err != nil {
 		log.Debugf("Nothing allocated for hinted prefix %s", hint)

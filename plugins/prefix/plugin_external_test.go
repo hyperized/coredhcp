@@ -304,3 +304,30 @@ func TestHandleZeroIPHintLengthMismatchAllocatesNew(t *testing.T) {
 	thirdPrefixes := third.Options.IAPD()[0].Options.Prefixes()
 	require.Len(t, thirdPrefixes, 3, "both known leases plus one freshly allocated prefix")
 }
+
+// A client that already holds a lease and then sends an IA_PD hint whose
+// prefix is absent on the wire (the decoder yields Prefix == nil for a zero
+// prefix-length) used to crash the handler with a nil dereference in the
+// lease-matching pass. It must behave like an absent hint instead.
+func TestHandleNilHintPrefixWithExistingLease(t *testing.T) {
+	h, err := prefix.Plugin.Setup6("2001:db8::/48", "64")
+	require.NoError(t, err)
+
+	duid := testDUID()
+
+	// First exchange: acquire a lease so the matching passes have known
+	// leases to walk.
+	first := solicitWith(t, h, duid)
+	require.NotEmpty(t, first.Options.IAPD()[0].Options.Prefixes())
+
+	// Second exchange: same client, one nil-prefix hint.
+	var second *dhcpv6.Message
+	require.NotPanics(t, func() {
+		second = solicitWith(t, h, duid, &dhcpv6.OptIAPrefix{Prefix: nil})
+	})
+
+	// The reply carries a usable prefix rather than a status failure.
+	iapds := second.Options.IAPD()
+	require.Len(t, iapds, 1)
+	assert.NotEmpty(t, iapds[0].Options.Prefixes())
+}
