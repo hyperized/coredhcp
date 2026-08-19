@@ -2,7 +2,7 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// +build linux
+//go:build linux
 
 package server
 
@@ -16,10 +16,10 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv4"
 )
 
-//this function sends an unicast to the hardware address defined in resp.ClientHWAddr,
-//the layer3 destination address is still the broadcast address;
-//iface: the interface where the DHCP message should be sent;
-//resp: DHCPv4 struct, which should be sent;
+// this function sends an unicast to the hardware address defined in resp.ClientHWAddr,
+// the layer3 destination address is still the broadcast address;
+// iface: the interface where the DHCP message should be sent;
+// resp: DHCPv4 struct, which should be sent;
 func sendEthernet(iface net.Interface, resp *dhcpv4.DHCPv4) error {
 
 	eth := layers.Ethernet{
@@ -42,7 +42,7 @@ func sendEthernet(iface net.Interface, resp *dhcpv4.DHCPv4) error {
 
 	err := udp.SetNetworkLayerForChecksum(&ip)
 	if err != nil {
-		return fmt.Errorf("Send Ethernet: Couldn't set network layer: %v", err)
+		return fmt.Errorf("send Ethernet: couldn't set network layer: %w", err)
 	}
 
 	buf := gopacket.NewSerializeBuffer()
@@ -56,17 +56,17 @@ func sendEthernet(iface net.Interface, resp *dhcpv4.DHCPv4) error {
 	dhcpLayer := packet.Layer(layers.LayerTypeDHCPv4)
 	dhcp, ok := dhcpLayer.(gopacket.SerializableLayer)
 	if !ok {
-		return fmt.Errorf("Layer %s is not serializable", dhcpLayer.LayerType().String())
+		return fmt.Errorf("layer %s is not serializable", dhcpLayer.LayerType().String())
 	}
 	err = gopacket.SerializeLayers(buf, opts, &eth, &ip, &udp, dhcp)
 	if err != nil {
-		return fmt.Errorf("Cannot serialize layer: %v", err)
+		return fmt.Errorf("cannot serialize layer: %w", err)
 	}
 	data := buf.Bytes()
 
 	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, 0)
 	if err != nil {
-		return fmt.Errorf("Send Ethernet: Cannot open socket: %v", err)
+		return fmt.Errorf("send Ethernet: cannot open socket: %w", err)
 	}
 	defer func() {
 		err = syscall.Close(fd)
@@ -86,11 +86,11 @@ func sendEthernet(iface net.Interface, resp *dhcpv4.DHCPv4) error {
 		Protocol: 0,
 		Ifindex:  iface.Index,
 		Halen:    6,
-		Addr:     hwAddr, //not used
+		Addr:     hwAddr, // not used
 	}
 	err = syscall.Sendto(fd, data, 0, &ethAddr)
 	if err != nil {
-		return fmt.Errorf("Cannot send frame via socket: %v", err)
+		return fmt.Errorf("cannot send frame via socket: %w", err)
 	}
 	return nil
 }
