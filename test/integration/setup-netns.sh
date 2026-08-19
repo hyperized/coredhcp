@@ -1,8 +1,10 @@
 #!/bin/bash
 set -ex
 
-if [[ $UID -ne 0 ]] # TODO: check for permissions instead (we can have CAP_NET_ADMIN without root)
-then
+# Probe for CAP_NET_ADMIN instead of assuming root is required
+if ip link add __capprobe type dummy 2>/dev/null; then
+    ip link delete __capprobe
+else
     sudo "$0" "$@"
     exit $?
 fi

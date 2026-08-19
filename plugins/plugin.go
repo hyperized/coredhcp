@@ -41,8 +41,9 @@ func RegisterPlugin(plugin *Plugin) error {
 	}
 	log.Printf("Registering plugin '%s'", plugin.Name)
 	if _, ok := RegisteredPlugins[plugin.Name]; ok {
-		// TODO this highlights that asking the plugins to register themselves
-		// is not the right approach. Need to register them in the main program.
+		// TODO: the package-global registry map is the last piece of shared
+		// state here; replace it with a Registry type the caller constructs
+		// and injects, alongside the planned functional-options server API.
 		log.Panicf("Plugin '%s' is already registered", plugin.Name)
 	}
 	RegisteredPlugins[plugin.Name] = plugin
