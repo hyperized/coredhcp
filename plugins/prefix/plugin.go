@@ -118,12 +118,6 @@ func (h *Handler) Handle(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 
 	// Each request IA_PD requires an IA_PD response
 	for _, iapd := range msg.Options.IAPD() {
-		if err != nil {
-			log.Errorf("Malformed IAPD received: %v", err)
-			resp.AddOption(&dhcpv6.OptStatusCode{StatusCode: dhcpIana.StatusMalformedQuery})
-			return resp, true
-		}
-
 		iapdResp := &dhcpv6.OptIAPD{
 			IaId: iapd.IaId,
 		}

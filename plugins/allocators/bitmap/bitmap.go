@@ -124,9 +124,8 @@ func NewBitmapAllocator(pool net.IPNet, size int) (*Allocator, error) {
 		log.Warningln("Using a pool of more than 2^32 elements may result in large memory consumption")
 	}
 
-	if 1<<uint(allocOrder) > bitset.Cap() {
-		return nil, errors.New("can't fit this pool using the bitmap allocator")
-	}
+	// A bitset can always hold 1<<allocOrder items here: Cap() is the max
+	// uint, and allocOrder was bounded below strconv.IntSize above.
 
 	alloc := Allocator{
 		containing: pool,
