@@ -45,6 +45,77 @@ func TestSetup4(t *testing.T) {
 		assert.False(t, stop)
 		assert.True(t, net.ParseIP("192.0.2.1").Equal(result.ServerIPAddr))
 	})
+
+	t.Run("option 54 for our server, accepted with our identifier stamped", func(t *testing.T) {
+		h4, err := serverid.Plugin.Setup4("192.0.2.1")
+		require.NoError(t, err)
+
+		req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest}
+		req.UpdateOption(dhcpv4.OptServerIdentifier(net.ParseIP("192.0.2.1").To4()))
+		resp := &dhcpv4.DHCPv4{}
+
+		result, stop := h4(req, resp)
+		require.NotNil(t, result)
+		assert.False(t, stop)
+		assert.True(t, net.ParseIP("192.0.2.1").Equal(result.ServerIPAddr))
+		assert.True(t, net.ParseIP("192.0.2.1").Equal(dhcpv4.GetIP(dhcpv4.OptionServerIdentifier, result.Options)))
+	})
+
+	t.Run("option 54 for a different server, dropped", func(t *testing.T) {
+		h4, err := serverid.Plugin.Setup4("192.0.2.1")
+		require.NoError(t, err)
+
+		req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest}
+		req.UpdateOption(dhcpv4.OptServerIdentifier(net.ParseIP("192.0.2.9").To4()))
+		resp := &dhcpv4.DHCPv4{}
+
+		result, stop := h4(req, resp)
+		assert.Nil(t, result)
+		assert.True(t, stop)
+	})
+
+	// Regression: siaddr carried over from a prior exchange used to be
+	// mistaken for the server identifier. Without option 54 present, this
+	// server is entitled to answer regardless of what siaddr says.
+	t.Run("stale siaddr without option 54, accepted", func(t *testing.T) {
+		h4, err := serverid.Plugin.Setup4("192.0.2.1")
+		require.NoError(t, err)
+
+		req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest, ServerIPAddr: net.ParseIP("192.0.2.9").To4()}
+		resp := &dhcpv4.DHCPv4{}
+
+		result, stop := h4(req, resp)
+		require.NotNil(t, result)
+		assert.False(t, stop)
+	})
+
+	t.Run("RELEASE with foreign option 54, dropped", func(t *testing.T) {
+		h4, err := serverid.Plugin.Setup4("192.0.2.1")
+		require.NoError(t, err)
+
+		req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest}
+		req.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeRelease))
+		req.UpdateOption(dhcpv4.OptServerIdentifier(net.ParseIP("192.0.2.9").To4()))
+		resp := &dhcpv4.DHCPv4{}
+
+		result, stop := h4(req, resp)
+		assert.Nil(t, result)
+		assert.True(t, stop)
+	})
+
+	t.Run("DECLINE with foreign option 54, dropped", func(t *testing.T) {
+		h4, err := serverid.Plugin.Setup4("192.0.2.1")
+		require.NoError(t, err)
+
+		req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest}
+		req.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeDecline))
+		req.UpdateOption(dhcpv4.OptServerIdentifier(net.ParseIP("192.0.2.9").To4()))
+		resp := &dhcpv4.DHCPv4{}
+
+		result, stop := h4(req, resp)
+		assert.Nil(t, result)
+		assert.True(t, stop)
+	})
 }
 
 func TestSetup6(t *testing.T) {

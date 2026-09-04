@@ -3,7 +3,9 @@
 // LICENSE file in the root directory of this source tree.
 
 // Package serverid implements a plugin that enforces the server identifier
-// on DHCPv4 and DHCPv6 messages.
+// on DHCPv4 and DHCPv6 messages: a request explicitly addressed to a
+// different server (DHCPv4 option 54, DHCPv6 the ServerID option) is
+// dropped rather than answered.
 package serverid
 
 import (
@@ -77,16 +79,25 @@ func (p *pluginState6) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 }
 
 // Handler4 handles DHCPv4 packets for the server_id plugin.
+//
+// The field that decides whether a request is addressed to this server is
+// option 54, the DHCP server identifier (RFC 2131 §4.3.2). A client in
+// SELECTING state copies the server identifier from the offer it accepted
+// into its DHCPREQUEST, and every other server on the segment is expected to
+// stay quiet. siaddr is a different field (the next-server address for
+// bootstrapping, e.g. TFTP) that a client may carry over from an earlier
+// exchange or leave zero; it says nothing about which DHCP server the
+// request is for. Deciding on siaddr instead of option 54 means two servers
+// on one segment both answer the same REQUEST, so this handler never looks
+// at it.
 func (p *pluginState4) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	if req.OpCode != dhcpv4.OpcodeBootRequest {
 		log.Warningf("not a BootRequest, ignoring")
 		return resp, false
 	}
-	if req.ServerIPAddr != nil &&
-		!req.ServerIPAddr.Equal(net.IPv4zero) &&
-		!req.ServerIPAddr.Equal(p.serverID) {
-		// This request is not for us, drop it.
-		log.Infof("requested server ID does not match this server's ID. Got %v, want %v", req.ServerIPAddr, p.serverID)
+	if sid := req.ServerIdentifier(); sid != nil && !sid.Equal(p.serverID) {
+		// This request is for a different server, drop it.
+		log.Infof("requested server ID does not match this server's ID. Got %v, want %v", sid, p.serverID)
 		return nil, true
 	}
 	resp.ServerIPAddr = make(net.IP, net.IPv4len)
