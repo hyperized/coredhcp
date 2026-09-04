@@ -3,6 +3,7 @@ cmd/coredhcp/leases.txt
 cmd/coredhcp/leases4.txt
 cmd/coredhcp/config.yml
 cmd/coredhcp/coredhcp
+cmd/coredhcp-tui/coredhcp-tui
 cmd/client/client
 cmd/coredhcp-generator/coredhcp-generator
 .vscode
