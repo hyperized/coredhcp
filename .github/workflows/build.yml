@@ -28,6 +28,34 @@ jobs:
           name: coredhcp-${{ matrix.go }}
           path: coredhcp
           if-no-files-found: error
+  coredhcp-tui:
+    # The terminal UI lives in its own module under cmd/coredhcp-tui, so the
+    # root `go build ./...` never sees it.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        go: ['1.25', '1.26']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+          # setup-go keys its cache on the root go.mod by default; both modules
+          # have to be in the key or the TUI's dependencies are fetched twice.
+          cache-dependency-path: |
+            go.sum
+            cmd/coredhcp-tui/go.sum
+      - name: build coredhcp-tui
+        working-directory: cmd/coredhcp-tui
+        env:
+          CGO_ENABLED: '0'
+        run: go build -o ../../coredhcp-tui .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coredhcp-tui-${{ matrix.go }}
+          path: coredhcp-tui
+          if-no-files-found: error
   coredhcp-generator:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -39,6 +67,9 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go }}
+          cache-dependency-path: |
+            go.sum
+            cmd/coredhcp-tui/go.sum
       - name: build and check coredhcp-generator
         run: |
           set -exu
@@ -51,5 +82,34 @@ jobs:
           go mod edit -replace "github.com/coredhcp/coredhcp=${GITHUB_WORKSPACE}"
           go mod tidy
           go build
-          gofmt -w coredhcp.go
-          diff -u coredhcp.go "${GITHUB_WORKSPACE}/cmd/coredhcp/main.go"
+      - name: render and build the TUI main from its template
+        run: |
+          set -exu
+          cd cmd/coredhcp-generator
+          builddir=$(./coredhcp-generator -t coredhcp-tui.go.template -f core-plugins.txt)
+          cd "${builddir}"
+          ls -l
+          go mod init coredhcp-tui
+          # The rendered main imports both modules, and neither is published at
+          # a version that resolves - replace both with the checkout.
+          go mod edit -replace "github.com/coredhcp/coredhcp=${GITHUB_WORKSPACE}"
+          go mod edit -replace "github.com/coredhcp/coredhcp/cmd/coredhcp-tui=${GITHUB_WORKSPACE}/cmd/coredhcp-tui"
+          go mod tidy
+          CGO_ENABLED=0 go build
+      - name: committed mains match their templates
+        run: |
+          set -exu
+          cd "${GITHUB_WORKSPACE}"
+          # An untracked file is invisible to git diff, so fail loudly instead
+          # of passing a check that never looked at anything.
+          git ls-files --error-unmatch cmd/coredhcp/main.go cmd/coredhcp-tui/main.go
+          cd cmd/coredhcp-generator
+          ./coredhcp-generator -f core-plugins.txt \
+            -o "${GITHUB_WORKSPACE}/cmd/coredhcp/main.go"
+          ./coredhcp-generator -t coredhcp-tui.go.template -f core-plugins.txt \
+            -o "${GITHUB_WORKSPACE}/cmd/coredhcp-tui/main.go"
+          cd "${GITHUB_WORKSPACE}"
+          if ! git diff --exit-code -- cmd/coredhcp/main.go cmd/coredhcp-tui/main.go; then
+            echo "::error::a committed main.go no longer matches its template, run 'make generate'"
+            exit 1
+          fi

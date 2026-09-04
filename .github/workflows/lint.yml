@@ -15,15 +15,27 @@ concurrency:
 
 jobs:
   golangci:
-    name: golangci-lint
+    name: golangci-lint (${{ matrix.module }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # The terminal UI is a module of its own with its own .golangci.yml, and
+        # golangci-lint only ever lints one module at a time.
+        module: ['.', 'cmd/coredhcp-tui']
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: '1.26'
+          # setup-go keys its cache on the root go.mod by default; both modules
+          # have to be in the key or the TUI's dependencies are fetched twice.
+          cache-dependency-path: |
+            go.sum
+            cmd/coredhcp-tui/go.sum
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.12.2
+          working-directory: ${{ matrix.module }}

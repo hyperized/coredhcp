@@ -23,6 +23,11 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go }}
+          # setup-go keys its cache on the root go.mod by default; both modules
+          # have to be in the key or the TUI's dependencies are fetched twice.
+          cache-dependency-path: |
+            go.sum
+            cmd/coredhcp-tui/go.sum
       - name: run unit tests
         run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
       - name: report coverage to codecov
@@ -34,6 +39,19 @@ jobs:
           files: coverage.txt
           disable_search: true
           flags: unittests
+          fail_ci_if_error: true
+      # The terminal UI is a module of its own, so `go test ./...` above never
+      # reaches it. Same flags, its own profile and codecov flag.
+      - name: run unit tests for the TUI module
+        working-directory: cmd/coredhcp-tui
+        run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+      - name: report TUI coverage to codecov
+        if: env.CODECOV_TOKEN != ''
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          files: cmd/coredhcp-tui/coverage.txt
+          disable_search: true
+          flags: tui-unittests
           fail_ci_if_error: true
   integration-tests:
     runs-on: ubuntu-latest

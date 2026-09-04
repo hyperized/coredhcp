@@ -47,6 +47,13 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: '1.26'
+          # setup-go keys its cache on the root go.mod by default; both modules
+          # have to be in the key or the TUI's dependencies are fetched twice.
+          cache-dependency-path: |
+            go.sum
+            cmd/coredhcp-tui/go.sum
+      # The terminal UI ships as a second binary per platform. It is not in the
+      # container image: the Dockerfile builds ./cmd/coredhcp only.
       - name: build release binaries
         run: |
           set -eu
@@ -54,6 +61,8 @@ jobs:
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
               go build -trimpath -o "dist/coredhcp-linux-$arch" ./cmd/coredhcp
+            (cd cmd/coredhcp-tui && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+              go build -trimpath -o "$GITHUB_WORKSPACE/dist/coredhcp-tui-linux-$arch" .)
           done
           (cd dist && sha256sum ./* > SHA256SUMS)
       - name: create release
