@@ -94,6 +94,8 @@ confirmed, per-family counters, the request rate over the last minute, and the
 server's own log. It takes the flags `coredhcp` takes, minus `-N`: the console
 log goes into a pane instead.
 
+![coredhcp-tui on the demo stack: the traffic feed with offers, acks, releases and macfilter drops, the lease table, the plugin chain with per-plugin tallies, counters, the request rate and the server log](tui.png)
+
 ```
 $ sudo ./bin/coredhcp-tui -c config.yml
 ```
