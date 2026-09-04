@@ -31,6 +31,12 @@ $ ./coredhcp-generator --from core-plugins.txt \
     github.com/example/coredhcp-plugin-foo
 ```
 
+The repository has a second template: `-t coredhcp-tui.go.template` renders the
+same plugin set into [cmd/coredhcp-tui](/cmd/coredhcp-tui), the build of the
+server that comes with the terminal interface. `make generate` renders both
+mains from `core-plugins.txt`, and CI regenerates them and fails when either
+one has drifted from its template.
+
 ## Building the generated file
 
 The output directory holds a single `coredhcp.go` and no `go.mod`. Create one
@@ -45,4 +51,4 @@ $ go build
 ```
 
 This is exactly what the build workflow does in CI, where the result is also
-diffed against the checked-in main.go to keep the two in sync.
+diffed against the checked-in mains to keep them in sync.
