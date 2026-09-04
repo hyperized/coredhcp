@@ -661,7 +661,7 @@ func TestWithMaxLeasesBoundsLeaseTable(t *testing.T) {
 	}
 
 	h.waitText(fmt.Sprintf("client-%02d", n+3))
-	h.waitText(fmt.Sprintf("%d issued, 0 confirmed", n))
+	h.waitText(fmt.Sprintf("%d offered, 0 confirmed", n))
 }
 
 // TestWithLogLinesBoundsLogPane pins down that WithLogLines caps the log

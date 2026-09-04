@@ -195,7 +195,9 @@ func helpLines() []string {
 		"",
 		"[" + tagDim + "]Leases are read out of the traffic, not out of a plugin's" + resetTag,
 		"[" + tagDim + "]lease database: what was offered, acknowledged, refused" + resetTag,
-		"[" + tagDim + "]or released is what the server saw on the wire." + resetTag,
+		"[" + tagDim + "]or released is what the server saw on the wire. A lease" + resetTag,
+		"[" + tagDim + "]sits at offered until the client comes back for it; the" + resetTag,
+		"[" + tagDim + "]header's issued counts every offer since startup." + resetTag,
 	}
 }
 

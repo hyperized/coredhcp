@@ -33,13 +33,19 @@ follow their newest row until you scroll away from it.
 The server does not tell the UI what a plugin wrote to its lease database, and
 a plugin only sees the requests that reach its position in the chain. So the
 lease table is read out of the exchange itself, keyed on the family and the
-client identifier. On DHCPv4 a DISCOVER answered with an OFFER is *issued*, a
+client identifier. On DHCPv4 a DISCOVER answered with an OFFER is *offered*, a
 REQUEST acknowledged with an address is *confirmed*, a REQUEST answered with a
 NAK is *refused*, a RELEASE is *released*, and a DECLINE is *declined*. On
-DHCPv6 a SOLICIT answered with an ADVERTISE is issued, a REPLY carrying
+DHCPv6 a SOLICIT answered with an ADVERTISE is offered, a REPLY carrying
 addresses confirms one (including the rapid-commit REPLY to a SOLICIT), a REPLY
 with no addresses to a REQUEST, RENEW or REBIND is refused, and a RELEASE is
 released. An INFORM or an INFORMATION-REQUEST carries no lease and is ignored.
+
+The lease pane counts the table: how many clients sit in each state right now.
+The header counts the traffic: `issued=` is every offer the server has made
+since it started and `confirmed=` every acknowledgement, neither of which goes
+down. So a client that takes the address it was offered leaves `0 offered` in
+the pane title while the header still counts the offer.
 
 That means the table is what the server said on the wire, not what any plugin
 believes it stored. A lease handed out by a plugin before the UI started, or by

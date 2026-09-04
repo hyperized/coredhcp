@@ -1223,7 +1223,7 @@ func TestLeaseTransitionV4(t *testing.T) {
 		{
 			"discover offer issues a lease",
 			events.Request{Family: events.FamilyV4, Type: "DISCOVER", ReplyType: "OFFER", Outcome: events.OutcomeReplied},
-			leaseIssued,
+			leaseOffered,
 		},
 		{
 			"request ack with an address confirms it",
@@ -1271,7 +1271,7 @@ func TestLeaseTransitionV4(t *testing.T) {
 		{
 			"lower case types still match",
 			events.Request{Family: events.FamilyV4, Type: "discover", ReplyType: "offer", Outcome: events.OutcomeReplied},
-			leaseIssued,
+			leaseOffered,
 		},
 	}
 
@@ -1300,7 +1300,7 @@ func TestLeaseTransitionV6(t *testing.T) {
 		{
 			"solicit advertise issues a lease",
 			events.Request{Family: events.FamilyV6, Type: "SOLICIT", ReplyType: "ADVERTISE", Outcome: events.OutcomeReplied},
-			leaseIssued,
+			leaseOffered,
 		},
 		{
 			"rapid commit solicit reply confirms",
@@ -1365,7 +1365,7 @@ func TestLeaseTransitionV6(t *testing.T) {
 		{
 			"lower case types still match",
 			events.Request{Family: events.FamilyV6, Type: "solicit", ReplyType: "advertise", Outcome: events.OutcomeReplied},
-			leaseIssued,
+			leaseOffered,
 		},
 	}
 
@@ -1396,7 +1396,7 @@ func TestSolicitState(t *testing.T) {
 		reply string
 		want  leaseState
 	}{
-		{"advertise issues", "ADVERTISE", leaseIssued},
+		{"advertise issues", "ADVERTISE", leaseOffered},
 		{"rapid commit reply confirms", "REPLY", leaseConfirmed},
 		{"anything else says nothing", "OTHER", leaseNone},
 	}
@@ -1422,7 +1422,7 @@ func TestLeaseStateLabelAndTag(t *testing.T) {
 		wantTag   string
 	}{
 		{"none", leaseNone, "-", tagDim},
-		{"issued", leaseIssued, "issued", tagWarn},
+		{"offered", leaseOffered, "offered", tagWarn},
 		{"confirmed", leaseConfirmed, "confirmed", tagGood},
 		{"refused", leaseRefused, "refused", tagBad},
 		{"released", leaseReleased, "released", tagDim},
@@ -1453,8 +1453,8 @@ func TestLeaseTableUpdate(t *testing.T) {
 		a := events.Request{Family: events.FamilyV4, ClientID: "a", Time: baseTime}
 		b := events.Request{Family: events.FamilyV4, ClientID: "b", Time: baseTime.Add(time.Second)}
 
-		tbl.update(a, leaseIssued)
-		tbl.update(b, leaseIssued)
+		tbl.update(a, leaseOffered)
+		tbl.update(b, leaseOffered)
 
 		rows := tbl.rows()
 		require.Len(t, rows, 2)
@@ -1476,7 +1476,7 @@ func TestLeaseTableUpdate(t *testing.T) {
 			Hostname: "laptop", Plugin: "range",
 			Addresses: []netip.Prefix{netip.MustParsePrefix("10.0.0.5/32")},
 		}
-		tbl.update(full, leaseIssued)
+		tbl.update(full, leaseOffered)
 
 		bare := events.Request{Family: events.FamilyV4, ClientID: "a", Time: baseTime.Add(time.Second)}
 		tbl.update(bare, leaseConfirmed)
@@ -1492,7 +1492,7 @@ func TestLeaseTableUpdate(t *testing.T) {
 
 		tbl := newLeaseTable(10)
 		r := events.Request{Family: events.FamilyV4, ClientID: "a", Time: baseTime, LeaseTime: time.Hour}
-		tbl.update(r, leaseIssued)
+		tbl.update(r, leaseOffered)
 
 		assert.True(t, tbl.rows()[0].expiry.Equal(baseTime.Add(time.Hour)))
 	})
@@ -1501,7 +1501,7 @@ func TestLeaseTableUpdate(t *testing.T) {
 		t.Parallel()
 
 		tbl := newLeaseTable(10)
-		tbl.update(events.Request{Family: events.FamilyV4, ClientID: "a", Time: baseTime, LeaseTime: time.Hour}, leaseIssued)
+		tbl.update(events.Request{Family: events.FamilyV4, ClientID: "a", Time: baseTime, LeaseTime: time.Hour}, leaseOffered)
 		tbl.update(events.Request{Family: events.FamilyV4, ClientID: "a", Time: baseTime.Add(time.Second)}, leaseConfirmed)
 
 		assert.True(t, tbl.rows()[0].expiry.Equal(baseTime.Add(time.Hour)))
@@ -1512,7 +1512,7 @@ func TestLeaseTableUpdate(t *testing.T) {
 
 		for _, state := range []leaseState{leaseReleased, leaseRefused, leaseDeclined} {
 			tbl := newLeaseTable(10)
-			tbl.update(events.Request{Family: events.FamilyV4, ClientID: "a", Time: baseTime, LeaseTime: time.Hour}, leaseIssued)
+			tbl.update(events.Request{Family: events.FamilyV4, ClientID: "a", Time: baseTime, LeaseTime: time.Hour}, leaseOffered)
 			tbl.update(events.Request{Family: events.FamilyV4, ClientID: "a", Time: baseTime.Add(time.Second)}, state)
 
 			assert.True(t, tbl.rows()[0].expiry.IsZero())
@@ -1526,9 +1526,9 @@ func TestLeaseTableEviction(t *testing.T) {
 	t.Parallel()
 
 	tbl := newLeaseTable(2)
-	tbl.update(events.Request{Family: events.FamilyV4, ClientID: "a", Time: baseTime}, leaseIssued)
-	tbl.update(events.Request{Family: events.FamilyV4, ClientID: "b", Time: baseTime.Add(time.Second)}, leaseIssued)
-	tbl.update(events.Request{Family: events.FamilyV4, ClientID: "c", Time: baseTime.Add(2 * time.Second)}, leaseIssued)
+	tbl.update(events.Request{Family: events.FamilyV4, ClientID: "a", Time: baseTime}, leaseOffered)
+	tbl.update(events.Request{Family: events.FamilyV4, ClientID: "b", Time: baseTime.Add(time.Second)}, leaseOffered)
+	tbl.update(events.Request{Family: events.FamilyV4, ClientID: "c", Time: baseTime.Add(2 * time.Second)}, leaseOffered)
 
 	rows := tbl.rows()
 	require.Len(t, rows, 2)
@@ -1542,15 +1542,15 @@ func TestLeaseTableCounts(t *testing.T) {
 	t.Parallel()
 
 	tbl := newLeaseTable(10)
-	tbl.update(events.Request{Family: events.FamilyV4, ClientID: "a", Time: baseTime}, leaseIssued)
-	tbl.update(events.Request{Family: events.FamilyV4, ClientID: "b", Time: baseTime}, leaseIssued)
+	tbl.update(events.Request{Family: events.FamilyV4, ClientID: "a", Time: baseTime}, leaseOffered)
+	tbl.update(events.Request{Family: events.FamilyV4, ClientID: "b", Time: baseTime}, leaseOffered)
 
 	counts := tbl.counts()
-	assert.Equal(t, 2, counts[leaseIssued])
+	assert.Equal(t, 2, counts[leaseOffered])
 
 	tbl.update(events.Request{Family: events.FamilyV4, ClientID: "a", Time: baseTime.Add(time.Second)}, leaseConfirmed)
 	counts = tbl.counts()
-	assert.Equal(t, 1, counts[leaseIssued])
+	assert.Equal(t, 1, counts[leaseOffered])
 	assert.Equal(t, 1, counts[leaseConfirmed])
 }
 
@@ -1738,12 +1738,12 @@ func TestWriteLease(t *testing.T) {
 	assert.Contains(t, withHost, "laptop")
 	assert.Contains(t, withHost, "confirmed")
 
-	noHost := writeLease(100, cols, leaseCells{client: "aa:bb:cc:dd:ee:ff", state: "issued"})
+	noHost := writeLease(100, cols, leaseCells{client: "aa:bb:cc:dd:ee:ff", state: "offered"})
 	assert.NotContains(t, noHost, "laptop")
 
 	narrowCols := leaseColumns(30)
 	narrow := writeLease(30, narrowCols, leaseCells{
-		client: "aa:bb:cc:dd:ee:ff", addr: "10.0.0.5", state: "issued",
+		client: "aa:bb:cc:dd:ee:ff", addr: "10.0.0.5", state: "offered",
 		lease: "1h", seen: "now", plugin: "range",
 	})
 	assert.NotContains(t, narrow, "range", "the plugin column was dropped at this width")
@@ -1787,11 +1787,11 @@ func TestLeaseTitle(t *testing.T) {
 	t.Parallel()
 
 	var counts [leaseStateCount]int
-	counts[leaseIssued] = 3
+	counts[leaseOffered] = 3
 	counts[leaseConfirmed] = 7
 
 	title := leaseTitle(snapshot{leaseCounts: counts})
-	assert.Equal(t, " leases (3 issued, 7 confirmed) ", title)
+	assert.Equal(t, " leases (3 offered, 7 confirmed) ", title)
 }
 
 // ---------------------------------------------------------------------------

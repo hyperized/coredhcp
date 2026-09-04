@@ -24,9 +24,14 @@ type leaseState uint8
 
 // The lease states, derived from traffic rather than from any plugin's lease
 // database. leaseNone means the request said nothing about a lease.
+//
+// leaseOffered is an address the server put on the table and the client has
+// not taken yet. The header's issued counter is the lifetime number of those
+// offers, so the two numbers differ once a client accepts one: the offer is
+// counted for good, the table entry moves on to confirmed.
 const (
 	leaseNone leaseState = iota
-	leaseIssued
+	leaseOffered
 	leaseConfirmed
 	leaseRefused
 	leaseReleased
@@ -37,8 +42,8 @@ const (
 // label is the word shown in the state column.
 func (s leaseState) label() string {
 	switch s {
-	case leaseIssued:
-		return "issued"
+	case leaseOffered:
+		return "offered"
 	case leaseConfirmed:
 		return "confirmed"
 	case leaseRefused:
@@ -53,11 +58,11 @@ func (s leaseState) label() string {
 	return "-"
 }
 
-// tag grades the state: offered but not yet taken is attention, confirmed is
-// good, refused and declined are errors, released is history.
+// tag grades the state: an offer nobody has taken yet is attention, confirmed
+// is good, refused and declined are errors, released is history.
 func (s leaseState) tag() string {
 	switch s {
-	case leaseIssued:
+	case leaseOffered:
 		return tagWarn
 	case leaseConfirmed:
 		return tagGood
@@ -155,7 +160,7 @@ func (t *leaseTable) update(r events.Request, state leaseState) {
 	// deadline the OFFER carried is still the best we know.
 	if exp := expiryFor(r, state); !exp.IsZero() {
 		e.expiry = exp
-	} else if state != leaseIssued && state != leaseConfirmed {
+	} else if state != leaseOffered && state != leaseConfirmed {
 		e.expiry = time.Time{}
 	}
 }
@@ -164,7 +169,7 @@ func (t *leaseTable) update(r events.Request, state leaseState) {
 // not say. A lease that was released, refused or declined has no address to
 // count down, so those states clear it.
 func expiryFor(r events.Request, state leaseState) time.Time {
-	if state != leaseIssued && state != leaseConfirmed {
+	if state != leaseOffered && state != leaseConfirmed {
 		return time.Time{}
 	}
 
@@ -249,8 +254,11 @@ func (m *model) recordLease(r events.Request) {
 		return
 	}
 
+	// The totals count offers and confirmations for the lifetime of the
+	// process; the table holds one state per client, which is why an offer
+	// stays in the total after the client's entry has moved to confirmed.
 	switch state {
-	case leaseIssued:
+	case leaseOffered:
 		m.tot.issued++
 	case leaseConfirmed:
 		m.tot.confirmed++
@@ -299,7 +307,7 @@ func leaseTransitionV4(r events.Request) leaseState {
 
 	switch {
 	case typ == "DISCOVER" && reply == "OFFER":
-		return leaseIssued
+		return leaseOffered
 	case typ == "REQUEST" && reply == "ACK" && len(r.Addresses) > 0:
 		return leaseConfirmed
 	case typ == "REQUEST" && reply == "NAK":
@@ -349,7 +357,7 @@ func leaseTransitionV6(r events.Request) leaseState {
 func solicitState(reply string) leaseState {
 	switch reply {
 	case "ADVERTISE":
-		return leaseIssued
+		return leaseOffered
 	case "REPLY":
 		return leaseConfirmed
 	}
@@ -429,7 +437,7 @@ func grow(field *int, ceiling, spare int) {
 func leaseTitle(s snapshot) string {
 	counts := s.leaseCounts
 
-	return " leases (" + strconv.Itoa(counts[leaseIssued]) + " issued, " +
+	return " leases (" + strconv.Itoa(counts[leaseOffered]) + " offered, " +
 		strconv.Itoa(counts[leaseConfirmed]) + " confirmed) "
 }
 
