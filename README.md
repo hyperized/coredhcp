@@ -258,7 +258,11 @@ plugin pane replace the value of a `password:`, `token:` or `secret:` argument,
 and the password in a `scheme://user:pass@host` URL, with `***`.
 
 The `range` plugin also releases expired leases here (a pool on upstream
-fills up forever: coredhcp/coredhcp#148).
+fills up forever: coredhcp/coredhcp#148). It frees a lease only when the
+client names it in `ciaddr`, as RFC 2131 requires, so a forged DHCPRELEASE
+can no longer drain the pool, and it keeps an address a client declined out
+of circulation for `decline-probation` (24h by default) instead of handing
+the next client into the same conflict.
 
 ## Server with custom plugins
 

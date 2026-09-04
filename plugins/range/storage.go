@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 
 	// The pure-Go sqlite driver registers itself with database/sql on import,
 	// keeping the build cgo-free.
@@ -22,8 +23,30 @@ import (
 // exercise the error path below deterministically.
 var sqlOpen = sql.Open
 
+// dsnReservedChars are the characters that stop a path being just a path once
+// it is pasted into the "file:" URI the sqlite driver parses. '?' opens the
+// query string, so a configured "leases.db?mode=memory" quietly gives you an
+// in-memory store and every lease is gone at the next restart; '#' opens a
+// fragment and truncates the name. Neither belongs in a lease file path, so
+// they are refused by name rather than escaped.
+const dsnReservedChars = "?#"
+
+// validateDBPath rejects a configured lease database path that would smuggle
+// URI syntax into the DSN. It runs before sql.Open so a bad path fails at
+// startup instead of producing a store that looks like it works.
+func validateDBPath(path string) error {
+	i := strings.IndexAny(path, dsnReservedChars)
+	if i < 0 {
+		return nil
+	}
+	return fmt.Errorf("lease database path %q may not contain %q", path, path[i:i+1])
+}
+
 func loadDB(path string) (*sql.DB, error) {
-	db, err := sqlOpen("sqlite", fmt.Sprintf("file:%s", path))
+	if err := validateDBPath(path); err != nil {
+		return nil, err
+	}
+	db, err := sqlOpen("sqlite", "file:"+path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database (%T): %w", err, err)
 	}
