@@ -43,6 +43,9 @@
 // For DHCPv4 `server4`, note that the file plugin must come after any general plugins
 // needed, e.g. dns or router. The order is unimportant for DHCPv6, but will affect the
 // order of options in the DHCPv6 response.
+//
+// The plugin does not act on RELEASE or DECLINE messages. Its mappings are static, so
+// there is no lease to reclaim when a client gives one up or rejects one.
 package file
 
 import (
@@ -108,6 +111,12 @@ func (s *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 		return nil, true
 	}
 
+	// A Reply to a Release or Decline must not hand the address back to the
+	// client, so skip adding an IA_NA regardless of what the client asked for.
+	if m.MessageType == dhcpv6.MessageTypeRelease || m.MessageType == dhcpv6.MessageTypeDecline {
+		return resp, false
+	}
+
 	if m.Options.OneIANA() == nil {
 		log.Debug("No address requested")
 		return resp, false
@@ -144,7 +153,11 @@ func (s *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 
 // Handler4 handles DHCPv4 packets for the file plugin
 func (s *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
-	if req.MessageType() == dhcpv4.MessageTypeInform {
+	// INFORM asks for options only, and a static reservation has nothing to
+	// free when a client gives an address up or rejects it. All three pass
+	// through untouched for the plugins that come after this one.
+	if mt := req.MessageType(); mt == dhcpv4.MessageTypeInform ||
+		mt == dhcpv4.MessageTypeRelease || mt == dhcpv4.MessageTypeDecline {
 		return resp, false
 	}
 	s.mu.RLock()

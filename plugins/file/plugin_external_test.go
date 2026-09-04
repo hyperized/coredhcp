@@ -216,6 +216,53 @@ func TestHandler4(t *testing.T) {
 		assert.False(t, stop)
 		assert.Nil(t, result.YourIPAddr)
 	})
+
+	// A static reservation has nothing to free, so RELEASE and DECLINE from a
+	// known MAC must pass through untouched rather than getting the reserved
+	// address stamped in and the chain cut short.
+	releaseDeclineCases := []struct {
+		name string
+		mt   dhcpv4.MessageType
+	}{
+		{"RELEASE passes through untouched", dhcpv4.MessageTypeRelease},
+		{"DECLINE passes through untouched", dhcpv4.MessageTypeDecline},
+	}
+	for _, tc := range releaseDeclineCases {
+		t.Run(tc.name, func(t *testing.T) {
+			claddr, _ := net.ParseMAC(knownMAC)
+			req := &dhcpv4.DHCPv4{ClientHWAddr: claddr}
+			req.UpdateOption(dhcpv4.OptMessageType(tc.mt))
+			resp := &dhcpv4.DHCPv4{}
+
+			result, stop := h4(req, resp)
+			assert.Same(t, resp, result)
+			assert.False(t, stop)
+			assert.Nil(t, result.YourIPAddr)
+		})
+	}
+
+	// Guard against the RELEASE/DECLINE check swallowing message types that
+	// must still get the reserved address.
+	regularCases := []struct {
+		name string
+		mt   dhcpv4.MessageType
+	}{
+		{"DISCOVER from a known MAC still gets the address", dhcpv4.MessageTypeDiscover},
+		{"REQUEST from a known MAC still gets the address", dhcpv4.MessageTypeRequest},
+	}
+	for _, tc := range regularCases {
+		t.Run(tc.name, func(t *testing.T) {
+			claddr, _ := net.ParseMAC(knownMAC)
+			req := &dhcpv4.DHCPv4{ClientHWAddr: claddr}
+			req.UpdateOption(dhcpv4.OptMessageType(tc.mt))
+			resp := &dhcpv4.DHCPv4{}
+
+			result, stop := h4(req, resp)
+			assert.Same(t, resp, result)
+			assert.True(t, stop)
+			assert.Equal(t, net.IP(netip.MustParseAddr("192.0.2.100").AsSlice()), result.YourIPAddr)
+		})
+	}
 }
 
 func TestHandler6(t *testing.T) {
@@ -241,6 +288,49 @@ func TestHandler6(t *testing.T) {
 		req, err := dhcpv6.NewSolicit(claddr)
 		require.NoError(t, err)
 		resp, err := dhcpv6.NewAdvertiseFromSolicit(req)
+		require.NoError(t, err)
+
+		result, stop := h6(req, resp)
+		assert.False(t, stop)
+		if assert.Equal(t, 1, len(result.GetOption(dhcpv6.OptionIANA))) {
+			opt := result.GetOneOption(dhcpv6.OptionIANA)
+			assert.Contains(t, opt.String(), "IP=2001:db8::10:1")
+		}
+	})
+
+	// A Reply to a Release or Decline must not hand the address back to the
+	// client, even for a MAC with a known reservation.
+	noIANACases := []struct {
+		name string
+		mt   dhcpv6.MessageType
+	}{
+		{"Release does not add an IA_NA", dhcpv6.MessageTypeRelease},
+		{"Decline does not add an IA_NA", dhcpv6.MessageTypeDecline},
+	}
+	for _, tc := range noIANACases {
+		t.Run(tc.name, func(t *testing.T) {
+			claddr, _ := net.ParseMAC(knownMAC)
+			req, err := dhcpv6.NewSolicit(claddr)
+			require.NoError(t, err)
+			req.MessageType = tc.mt
+			resp, err := dhcpv6.NewMessage()
+			require.NoError(t, err)
+
+			result, stop := h6(req, resp)
+			assert.Same(t, resp, result)
+			assert.False(t, stop)
+			assert.Equal(t, 0, len(result.GetOption(dhcpv6.OptionIANA)))
+		})
+	}
+
+	// Guard against the Release/Decline check swallowing message types that
+	// must still get their IA_NA.
+	t.Run("Request from a known MAC still gets its IA_NA", func(t *testing.T) {
+		claddr, _ := net.ParseMAC(knownMAC)
+		req, err := dhcpv6.NewSolicit(claddr)
+		require.NoError(t, err)
+		req.MessageType = dhcpv6.MessageTypeRequest
+		resp, err := dhcpv6.NewMessage()
 		require.NoError(t, err)
 
 		result, stop := h6(req, resp)

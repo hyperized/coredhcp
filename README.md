@@ -264,6 +264,11 @@ can no longer drain the pool, and it keeps an address a client declined out
 of circulation for `decline-probation` (24h by default) instead of handing
 the next client into the same conflict.
 
+The `file` plugin no longer stamps its static reservation onto a RELEASE or
+DECLINE, and `server_id` decides whether a DHCPv4 request is addressed to
+this server by option 54 rather than by `siaddr`, so two servers on one
+segment stop both answering the same REQUEST.
+
 ## Server with custom plugins
 
 To build a server with a custom set of plugins you can use the
