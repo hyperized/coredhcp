@@ -9,12 +9,17 @@ import (
 	"net"
 	"testing"
 
+	"github.com/insomniacslk/dhcp/dhcpv4"
+	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 
 	"github.com/coredhcp/coredhcp/config"
+	"github.com/coredhcp/coredhcp/events"
+	"github.com/coredhcp/coredhcp/handler"
+	"github.com/coredhcp/coredhcp/plugins"
 )
 
 // testConfig builds a *config.Config with the given v6/v4 listen addresses.
@@ -353,4 +358,120 @@ func TestServersCloseErrorPaths(_ *testing.T) {
 	}}
 	// Both paths execute without panicking; the ErrClosed one is silent.
 	s.Close()
+}
+
+// --- observer reporting at startup ---
+
+// registerTestPlugin registers a plugin for the lifetime of the test and
+// removes it again, so the shared registry is left as it was found.
+func registerTestPlugin(t *testing.T, plugin *plugins.Plugin) {
+	t.Helper()
+	require.NoError(t, plugins.RegisterPlugin(plugin))
+	t.Cleanup(func() { delete(plugins.RegisteredPlugins, plugin.Name) })
+}
+
+// TestStartWithObserverReportsPluginsAndListeners checks the two things the
+// observer learns before any packet arrives: which plugins ended up in each
+// chain, and which sockets the server bound.
+func TestStartWithObserverReportsPluginsAndListeners(t *testing.T) {
+	registerTestPlugin(t, &plugins.Plugin{
+		Name: "server-observer-test",
+		Setup6: func(...string) (handler.Handler6, error) {
+			return func(_, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) { return resp, false }, nil
+		},
+		Setup4: func(...string) (handler.Handler4, error) {
+			return func(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) { return resp, false }, nil
+		},
+	})
+
+	cfg := &config.Config{
+		Server6: &config.ServerConfig{
+			Addresses: []net.UDPAddr{{IP: net.ParseIP("::1"), Port: 0}},
+			Plugins:   []config.PluginConfig{{Name: "server-observer-test", Args: []string{"six"}}},
+		},
+		Server4: &config.ServerConfig{
+			Addresses: []net.UDPAddr{{IP: net.ParseIP("127.0.0.1"), Port: 0}},
+			Plugins:   []config.PluginConfig{{Name: "server-observer-test", Args: []string{"four"}}},
+		},
+	}
+
+	obs := &recordObserver{}
+	srv, err := Start(cfg, WithObserver(obs))
+	require.NoError(t, err)
+	require.NotNil(t, srv)
+	srv.Close()
+	require.NoError(t, srv.Wait())
+
+	obs.mu.Lock()
+	defer obs.mu.Unlock()
+
+	// Plugins come in chain order, DHCPv6 first, matching the order the
+	// listeners start in.
+	assert.Equal(t, []events.Plugin{
+		{Family: events.FamilyV6, Name: "server-observer-test", Args: []string{"six"}},
+		{Family: events.FamilyV4, Name: "server-observer-test", Args: []string{"four"}},
+	}, obs.plugins)
+
+	require.Len(t, obs.listeners, 2)
+	assert.Equal(t, events.FamilyV6, obs.listeners[0].Family)
+	assert.Equal(t, events.FamilyV4, obs.listeners[1].Family)
+	for _, l := range obs.listeners {
+		host, port, err := net.SplitHostPort(l.Address)
+		require.NoError(t, err, "listener address %q", l.Address)
+		assert.True(t, net.ParseIP(host).IsLoopback(), "listener address %q", l.Address)
+		assert.NotEqual(t, "0", port, "the reported port is the one the socket actually got")
+		// The configured addresses carry no zone, so no interface is named.
+		assert.Empty(t, l.Interface)
+	}
+}
+
+// The listeners carry the observer down to the packet path, and without
+// WithObserver they carry nothing.
+func TestStartPassesObserverToListeners(t *testing.T) {
+	cfg := testConfig(t,
+		[]net.UDPAddr{{IP: net.ParseIP("::1"), Port: 0}},
+		[]net.UDPAddr{{IP: net.ParseIP("127.0.0.1"), Port: 0}},
+	)
+
+	obs := &recordObserver{}
+	srv, err := Start(cfg, WithObserver(obs))
+	require.NoError(t, err)
+	require.Len(t, srv.listeners, 2)
+	assert.Same(t, obs, srv.listeners[0].(*listener6).observer)
+	assert.Same(t, obs, srv.listeners[1].(*listener4).observer)
+	srv.Close()
+	require.NoError(t, srv.Wait())
+
+	plain, err := Start(cfg)
+	require.NoError(t, err)
+	require.Len(t, plain.listeners, 2)
+	assert.Nil(t, plain.listeners[0].(*listener6).observer)
+	assert.Nil(t, plain.listeners[1].(*listener4).observer)
+	plain.Close()
+	require.NoError(t, plain.Wait())
+}
+
+// Reporting is skipped entirely when nobody is watching.
+func TestReportWithoutObserver(t *testing.T) {
+	s := &Servers{}
+	s.reportPlugins(&plugins.Chains{
+		V4: []plugins.Link4{{Name: "four"}},
+		V6: []plugins.Link6{{Name: "six"}},
+	})
+	s.reportListener(events.FamilyV4, &net.UDPAddr{IP: net.IPv4zero, Port: 67}, "eth0")
+	assert.Nil(t, s.observer)
+}
+
+// A listener bound to an interface reports it, taken from the zone of the
+// configured address.
+func TestReportListenerNamesTheInterface(t *testing.T) {
+	obs := &recordObserver{}
+	s := &Servers{observer: obs}
+	s.reportListener(events.FamilyV6, &net.UDPAddr{IP: net.IPv6zero, Port: 547}, "eth0")
+
+	obs.mu.Lock()
+	defer obs.mu.Unlock()
+	assert.Equal(t, []events.Listener{
+		{Family: events.FamilyV6, Address: "[::]:547", Interface: "eth0"},
+	}, obs.listeners)
 }

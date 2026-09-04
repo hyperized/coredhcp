@@ -12,8 +12,6 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
-
-	"github.com/coredhcp/coredhcp/handler"
 )
 
 // discardConn4 is a conn4 double whose WriteTo drops every reply instead of
@@ -60,7 +58,7 @@ func BenchmarkHandleMsg4Discover(b *testing.B) {
 	req.SetBroadcast()
 	data := req.ToBytes()
 
-	l := &listener4{conn4: discardConn4{}, handlers: []handler.Handler4{passthrough4}}
+	l := &listener4{conn4: discardConn4{}, chain: chain4(passthrough4)}
 	l.Index = 1 // bound interface: avoids the "no interface information" error log on every broadcast reply
 	peer := &net.UDPAddr{IP: net.ParseIP("192.0.2.1")}
 
@@ -84,7 +82,7 @@ func BenchmarkHandleMsg6Solicit(b *testing.B) {
 	}
 	data := req.ToBytes()
 
-	l := &listener6{conn6: discardConn6{}, handlers: []handler.Handler6{passthrough6}}
+	l := &listener6{conn6: discardConn6{}, chain: chain6(passthrough6)}
 	peer := &net.UDPAddr{IP: net.ParseIP("2001:db8::1")}
 
 	for b.Loop() {

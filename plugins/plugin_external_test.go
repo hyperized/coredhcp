@@ -204,3 +204,147 @@ func TestLoadPluginsSuccess(t *testing.T) {
 	assert.Len(t, handlers6, 1)
 	assert.Len(t, handlers4, 1)
 }
+
+func TestLoadChainsNoConfig(t *testing.T) {
+	chains, err := plugins.LoadChains(&config.Config{})
+	assert.Nil(t, chains)
+	assert.EqualError(t, err, "no configuration found for either DHCPv6 or DHCPv4")
+}
+
+// The chain records the plugin each handler came from, in configuration
+// order. A plugin without a setup function for the family is skipped, so the
+// chain is shorter than the configured list and the positions shift.
+func TestLoadChainsNamesInChainOrder(t *testing.T) {
+	both := &plugins.Plugin{Name: "test-chain-both", Setup6: stubHandler6, Setup4: stubHandler4}
+	v4only := &plugins.Plugin{Name: "test-chain-v4-only", Setup4: stubHandler4}
+	register(t, both)
+	register(t, v4only)
+
+	conf := &config.Config{
+		Server6: &config.ServerConfig{
+			Plugins: []config.PluginConfig{
+				{Name: v4only.Name},
+				{Name: both.Name, Args: []string{"six"}},
+			},
+		},
+		Server4: &config.ServerConfig{
+			Plugins: []config.PluginConfig{
+				{Name: both.Name, Args: []string{"four", "args"}},
+				{Name: v4only.Name},
+			},
+		},
+	}
+
+	chains, err := plugins.LoadChains(conf)
+	require.NoError(t, err)
+	require.NotNil(t, chains)
+
+	require.Len(t, chains.V6, 1)
+	assert.Equal(t, both.Name, chains.V6[0].Name)
+	assert.Equal(t, []string{"six"}, chains.V6[0].Args)
+	assert.NotNil(t, chains.V6[0].Handler)
+
+	require.Len(t, chains.V4, 2)
+	assert.Equal(t, both.Name, chains.V4[0].Name)
+	assert.Equal(t, []string{"four", "args"}, chains.V4[0].Args)
+	assert.Equal(t, v4only.Name, chains.V4[1].Name)
+	assert.Nil(t, chains.V4[1].Args)
+}
+
+// Only the configured family gets a chain; the other one stays nil.
+func TestLoadChainsSingleFamily(t *testing.T) {
+	plugin := &plugins.Plugin{Name: "test-chain-single", Setup6: stubHandler6, Setup4: stubHandler4}
+	register(t, plugin)
+
+	cases := []struct {
+		name   string
+		conf   *config.Config
+		wantV4 int
+		wantV6 int
+	}{
+		{
+			name: "v6 only",
+			conf: &config.Config{Server6: &config.ServerConfig{
+				Plugins: []config.PluginConfig{{Name: plugin.Name}},
+			}},
+			wantV6: 1,
+		},
+		{
+			name: "v4 only",
+			conf: &config.Config{Server4: &config.ServerConfig{
+				Plugins: []config.PluginConfig{{Name: plugin.Name}},
+			}},
+			wantV4: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			chains, err := plugins.LoadChains(tc.conf)
+			require.NoError(t, err)
+			assert.Len(t, chains.V4, tc.wantV4)
+			assert.Len(t, chains.V6, tc.wantV6)
+		})
+	}
+}
+
+func TestLoadChainsErrors(t *testing.T) {
+	register(t, &plugins.Plugin{Name: "test-chain-setup6-error", Setup6: failingSetup6})
+	register(t, &plugins.Plugin{Name: "test-chain-setup4-error", Setup4: failingSetup4})
+
+	cases := []struct {
+		name string
+		conf *config.Config
+		want string
+	}{
+		{
+			name: "unknown plugin",
+			conf: &config.Config{Server4: &config.ServerConfig{
+				Plugins: []config.PluginConfig{{Name: "test-chain-does-not-exist"}},
+			}},
+			want: "DHCPv4: unknown plugin `test-chain-does-not-exist`",
+		},
+		{
+			name: "v6 setup fails",
+			conf: &config.Config{Server6: &config.ServerConfig{
+				Plugins: []config.PluginConfig{{Name: "test-chain-setup6-error"}},
+			}},
+			want: "setup6 boom",
+		},
+		{
+			name: "v4 setup fails",
+			conf: &config.Config{Server4: &config.ServerConfig{
+				Plugins: []config.PluginConfig{{Name: "test-chain-setup4-error"}},
+			}},
+			want: "setup4 boom",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			chains, err := plugins.LoadChains(tc.conf)
+			require.Error(t, err)
+			assert.Nil(t, chains)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+// Args in a link are a copy: rewriting the configuration afterwards does not
+// reach into a chain that is already loaded.
+func TestLoadChainsCopiesArgs(t *testing.T) {
+	plugin := &plugins.Plugin{Name: "test-chain-args", Setup4: stubHandler4}
+	register(t, plugin)
+
+	args := []string{"original"}
+	conf := &config.Config{Server4: &config.ServerConfig{
+		Plugins: []config.PluginConfig{{Name: plugin.Name, Args: args}},
+	}}
+
+	chains, err := plugins.LoadChains(conf)
+	require.NoError(t, err)
+	args[0] = "rewritten"
+
+	require.Len(t, chains.V4, 1)
+	assert.Equal(t, []string{"original"}, chains.V4[0].Args)
+}
