@@ -336,8 +336,12 @@ func TestAutorefresh(t *testing.T) {
 		"autorefresh did not pick up the newly added record")
 
 	// A malformed update must fail the reload (logging a warning) without
-	// disturbing the previously loaded leases.
-	require.NoError(t, os.WriteFile(path, []byte("this is not a valid lease line\n"), 0o600))
+	// disturbing the previously loaded leases. It is written in place rather
+	// than with os.WriteFile, which truncates first: the watcher can reload
+	// between the truncate and the write, and an empty file is a valid file
+	// with no leases, so the leases would already be gone before the bad
+	// content ever landed.
+	overwrite(t, path, "this is not a valid lease line\n")
 	require.Eventually(t, func() bool {
 		data, err := os.ReadFile(logPath)
 		if err != nil {
@@ -353,4 +357,16 @@ func TestAutorefresh(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte(mac1+" 2001:db8::10:1\n"+mac3+" 2001:db8::10:3\n"), 0o600))
 	require.Eventually(t, resolves(mac3), 5*time.Second, 20*time.Millisecond,
 		"autorefresh did not recover after a bad reload")
+}
+
+// overwrite replaces the start of path with data without truncating it, so a
+// watcher never sees the file empty. What was there before stays on after the
+// new content, which is fine for content that is meant to be malformed.
+func overwrite(t *testing.T, path, data string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	_, err = f.WriteAt([]byte(data), 0)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
 }
