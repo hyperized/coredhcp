@@ -1,0 +1,239 @@
+// Copyright 2018-present the CoreDHCP Authors. All rights reserved
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
+package tui
+
+import (
+	"time"
+
+	"github.com/gdamore/tcell/v2"
+
+	"github.com/coredhcp/coredhcp/events"
+)
+
+// handleKey is the application's input capture. It runs on tview's event
+// goroutine and only touches the model, so a key press costs one lock and the
+// next frame shows the result. Keys it consumed return nil; everything else is
+// handed back to tview.
+func (u *UI) handleKey(ev *tcell.EventKey) *tcell.EventKey {
+	// Any key press is worth a frame: it either changed the model or it is
+	// about to be drawn over by one that did.
+	defer u.m.touch()
+
+	if quitKey(ev) {
+		u.Stop()
+
+		return nil
+	}
+
+	// The help overlay swallows everything that is not a quit, which is what
+	// makes "any key closes it" true.
+	if u.m.helpOpen() {
+		u.m.toggleHelp()
+
+		return nil
+	}
+
+	if u.handleRune(ev) || u.handleScroll(ev) {
+		return nil
+	}
+
+	return ev
+}
+
+// quitKey reports whether ev asks the server's UI to go away. Ctrl-C is
+// handled here rather than left to tview so that shutdown always runs in the
+// same order.
+func quitKey(ev *tcell.EventKey) bool {
+	switch ev.Key() {
+	case tcell.KeyCtrlC, tcell.KeyEsc:
+		return true
+	case tcell.KeyRune:
+		return ev.Rune() == 'q' || ev.Rune() == 'Q'
+	}
+
+	return false
+}
+
+// handleRune deals with the letter and digit keys.
+func (u *UI) handleRune(ev *tcell.EventKey) bool {
+	if ev.Key() != tcell.KeyRune {
+		return false
+	}
+
+	switch r := ev.Rune(); r {
+	case 'p', 'P':
+		u.m.togglePause()
+	case 'c', 'C':
+		u.m.clearStats()
+	case '?':
+		u.m.toggleHelp()
+	case '1', '2', '3', '4':
+		u.m.setFocus(paneID(r - '1'))
+	default:
+		return false
+	}
+
+	return true
+}
+
+// handleScroll deals with focus movement and the scroll keys.
+func (u *UI) handleScroll(ev *tcell.EventKey) bool {
+	switch ev.Key() {
+	case tcell.KeyTab:
+		u.m.cycleFocus(1)
+	case tcell.KeyBacktab:
+		u.m.cycleFocus(-1)
+	case tcell.KeyUp:
+		u.m.scrollBy(-1)
+	case tcell.KeyDown:
+		u.m.scrollBy(1)
+	case tcell.KeyPgUp:
+		u.m.scrollPage(-1)
+	case tcell.KeyPgDn:
+		u.m.scrollPage(1)
+	case tcell.KeyHome:
+		u.m.scrollTop()
+	case tcell.KeyEnd:
+		u.m.scrollBottom()
+	default:
+		return false
+	}
+
+	return true
+}
+
+// touch marks the model as needing a frame.
+func (m *model) touch() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.dirty = true
+}
+
+// helpOpen reports whether the help overlay is up.
+func (m *model) helpOpen() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.help
+}
+
+// toggleHelp shows or hides the help overlay.
+func (m *model) toggleHelp() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.help = !m.help
+	m.dirty = true
+}
+
+// togglePause freezes the traffic pane on what it is showing. Collection
+// keeps running: the pane is a copy taken at the moment of the pause, so the
+// rows cannot shift under the operator while they read them.
+func (m *model) togglePause() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.paused = !m.paused
+	m.frozen = nil
+
+	if m.paused {
+		m.frozen = m.traffic.items()
+	}
+
+	m.dirty = true
+}
+
+// clearStats empties the traffic ring, the per-family counters and the rate
+// history. The lease table and the log survive: they are the record of what
+// the server did, and clearing the screen is about the noise, not the record.
+// The lease-derived issued and confirmed totals stay with the table.
+func (m *model) clearStats() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.traffic.reset()
+	m.frozen = nil
+	m.counts = map[events.Family]*familyCounters{}
+	m.reqRate.reset()
+	m.errRate.reset()
+
+	m.tot.requests, m.tot.dropped, m.tot.errors = 0, 0, 0
+	m.tot.lastSoftErr, m.tot.lastSendErr = time.Time{}, time.Time{}
+
+	for i := range m.panes {
+		m.panes[i].offset = 0
+		m.panes[i].follow = paneID(i).follows()
+	}
+
+	m.dirty = true
+}
+
+// setFocus points the scroll keys at a pane.
+func (m *model) setFocus(id paneID) {
+	if id < 0 || id >= paneCount {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.focus = id
+	m.dirty = true
+}
+
+// cycleFocus walks the focus one pane forwards or backwards.
+func (m *model) cycleFocus(delta int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.focus = paneID((int(m.focus) + delta + int(paneCount)) % int(paneCount))
+	m.dirty = true
+}
+
+// scrollBy moves the focused pane's window by delta rows, relative to where
+// the last frame actually put it. A pane that follows its newest row stops
+// following as soon as the operator moves away from the bottom, and starts
+// again when they come back to it.
+func (m *model) scrollBy(delta int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	v := &m.panes[m.focus]
+	v.offset = max(v.start+delta, 0)
+	v.follow = m.focus.follows() && v.offset >= max(v.total-v.height, 0)
+	m.dirty = true
+}
+
+// scrollPage moves the focused pane a screenful in either direction.
+func (m *model) scrollPage(dir int) {
+	m.mu.Lock()
+	height := max(m.panes[m.focus].height, 1)
+	m.mu.Unlock()
+
+	m.scrollBy(dir * height)
+}
+
+// scrollTop jumps the focused pane to its oldest row.
+func (m *model) scrollTop() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	v := &m.panes[m.focus]
+	v.offset, v.follow = 0, false
+	m.dirty = true
+}
+
+// scrollBottom jumps the focused pane to its newest row and, for the panes
+// that follow, hands it back to the live feed.
+func (m *model) scrollBottom() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	v := &m.panes[m.focus]
+	v.offset = max(v.total-v.height, 0)
+	v.follow = m.focus.follows()
+	m.dirty = true
+}

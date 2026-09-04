@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -19,7 +20,7 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv6/server6"
 
 	"github.com/coredhcp/coredhcp/config"
-	"github.com/coredhcp/coredhcp/handler"
+	"github.com/coredhcp/coredhcp/events"
 	"github.com/coredhcp/coredhcp/logger"
 	"github.com/coredhcp/coredhcp/plugins"
 )
@@ -47,13 +48,51 @@ type conn4 interface {
 type listener6 struct {
 	conn6
 	net.Interface
-	handlers []handler.Handler6
+	chain    []plugins.Link6
+	observer events.Observer
+	ifaces   ifaceCache
 }
 
 type listener4 struct {
 	conn4
 	net.Interface
-	handlers []handler.Handler4
+	chain    []plugins.Link4
+	observer events.Observer
+	ifaces   ifaceCache
+}
+
+// ifaceCache maps interface indexes to names for one listener.
+//
+// A listener that is not bound to an interface learns which one a packet came
+// in on from the socket's control message, and that carries only the index.
+// net.InterfaceByIndex is a netlink dump on Linux, far too expensive to run
+// per packet, so the answer is kept for the life of the listener. An
+// interface renamed while the server runs keeps the name it had when it was
+// first seen: a stale label in the observer is a better trade than a syscall
+// on the packet path, and interfaces are not renamed under a running DHCP
+// server in practice.
+//
+// The cache is only ever consulted when an observer is attached.
+type ifaceCache struct {
+	names sync.Map // int index -> string name
+}
+
+// name resolves an interface index, empty for index 0 or an index that no
+// longer exists. A failed lookup is remembered too, so a packet from a
+// vanished interface does not retry the syscall on every datagram.
+func (c *ifaceCache) name(idx int) string {
+	if idx == 0 {
+		return ""
+	}
+	if cached, ok := c.names.Load(idx); ok {
+		return cached.(string)
+	}
+	var name string
+	if ifi, err := net.InterfaceByIndex(idx); err == nil {
+		name = ifi.Name
+	}
+	c.names.Store(idx, name)
+	return name
 }
 
 // The socket constructors are swappable so socket-setup error paths can be
@@ -71,6 +110,46 @@ type listener interface {
 type Servers struct {
 	listeners []listener
 	errors    chan error
+	observer  events.Observer
+}
+
+// Option configures Start.
+type Option func(*Servers)
+
+// WithObserver reports what the server does to o: one events.Listener per
+// socket it binds, one events.Plugin per plugin it loaded, and one
+// events.Request for every datagram it handles, whatever became of it. o must
+// be safe for concurrent use and must not block, see events.Observer.
+//
+// The default is no observer, which is what the server has always done and
+// costs a nil check per packet.
+func WithObserver(o events.Observer) Option {
+	return func(s *Servers) { s.observer = o }
+}
+
+// reportPlugins names the plugins in each chain, in chain order, DHCPv6 first
+// to match the order the listeners start in below. A plugin configured twice
+// is reported twice, since it is two links in the chain.
+func (s *Servers) reportPlugins(chains *plugins.Chains) {
+	if s.observer == nil {
+		return
+	}
+	for _, l := range chains.V6 {
+		s.observer.Plugin(events.Plugin{Family: events.FamilyV6, Name: l.Name, Args: l.Args})
+	}
+	for _, l := range chains.V4 {
+		s.observer.Plugin(events.Plugin{Family: events.FamilyV4, Name: l.Name, Args: l.Args})
+	}
+}
+
+// reportListener announces a socket the server just bound. zone is the
+// interface from the configured address, empty when the listener is not bound
+// to one.
+func (s *Servers) reportListener(family events.Family, addr net.Addr, zone string) {
+	if s.observer == nil {
+		return
+	}
+	s.observer.Listener(events.Listener{Family: family, Address: addr.String(), Interface: zone})
 }
 
 func listen4(a *net.UDPAddr) (*listener4, error) {
@@ -142,14 +221,18 @@ func listen6(a *net.UDPAddr) (*listener6, error) {
 
 // Start will start the server asynchronously. See `Wait` to wait until
 // the execution ends.
-func Start(config *config.Config) (*Servers, error) {
-	handlers4, handlers6, err := plugins.LoadPlugins(config)
+func Start(config *config.Config, opts ...Option) (*Servers, error) {
+	chains, err := plugins.LoadChains(config)
 	if err != nil {
 		return nil, err
 	}
 	srv := Servers{
 		errors: make(chan error),
 	}
+	for _, opt := range opts {
+		opt(&srv)
+	}
+	srv.reportPlugins(chains)
 
 	// listen
 	if config.Server6 != nil {
@@ -160,8 +243,10 @@ func Start(config *config.Config) (*Servers, error) {
 			if err != nil {
 				goto cleanup
 			}
-			l6.handlers = handlers6
+			l6.chain = chains.V6
+			l6.observer = srv.observer
 			srv.listeners = append(srv.listeners, l6)
+			srv.reportListener(events.FamilyV6, l6.LocalAddr(), addr.Zone)
 			go func() {
 				srv.errors <- l6.Serve()
 			}()
@@ -176,8 +261,10 @@ func Start(config *config.Config) (*Servers, error) {
 			if err != nil {
 				goto cleanup
 			}
-			l4.handlers = handlers4
+			l4.chain = chains.V4
+			l4.observer = srv.observer
 			srv.listeners = append(srv.listeners, l4)
+			srv.reportListener(events.FamilyV4, l4.LocalAddr(), addr.Zone)
 			go func() {
 				srv.errors <- l4.Serve()
 			}()

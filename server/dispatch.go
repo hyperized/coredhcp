@@ -14,7 +14,7 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
 
-	"github.com/coredhcp/coredhcp/handler"
+	"github.com/coredhcp/coredhcp/plugins"
 )
 
 // buildReply6 decapsulates a possibly-relayed request and builds the base
@@ -61,30 +61,33 @@ func buildReply4(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 	return resp, nil
 }
 
-// applyHandlers6 walks the plugin chain. A nil result means the request is
-// dropped.
-func applyHandlers6(handlers []handler.Handler6, req, resp dhcpv6.DHCPv6) dhcpv6.DHCPv6 {
-	for _, h := range handlers {
+// applyHandlers6 walks the plugin chain. A nil response means the request is
+// dropped. stoppedAt is the position of the link that stopped the chain, or
+// -1 when every plugin ran; the links are indexed rather than ranged over so
+// the loop does not copy a Link6 per plugin per packet.
+func applyHandlers6(chain []plugins.Link6, req, resp dhcpv6.DHCPv6) (_ dhcpv6.DHCPv6, stoppedAt int) {
+	for i := range chain {
 		var stop bool
-		resp, stop = h(req, resp)
+		resp, stop = chain[i].Handler(req, resp)
 		if stop {
-			break
+			return resp, i
 		}
 	}
-	return resp
+	return resp, -1
 }
 
-// applyHandlers4 walks the plugin chain. A nil result means the request is
-// dropped.
-func applyHandlers4(handlers []handler.Handler4, req, resp *dhcpv4.DHCPv4) *dhcpv4.DHCPv4 {
-	for _, h := range handlers {
+// applyHandlers4 walks the plugin chain. A nil response means the request is
+// dropped. stoppedAt is the position of the link that stopped the chain, or
+// -1 when every plugin ran.
+func applyHandlers4(chain []plugins.Link4, req, resp *dhcpv4.DHCPv4) (_ *dhcpv4.DHCPv4, stoppedAt int) {
+	for i := range chain {
 		var stop bool
-		resp, stop = h(req, resp)
+		resp, stop = chain[i].Handler(req, resp)
 		if stop {
-			break
+			return resp, i
 		}
 	}
-	return resp
+	return resp, -1
 }
 
 // encapsulateRelay6 re-wraps the response for the relay chain the request

@@ -6,18 +6,25 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"net"
+	"net/netip"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/insomniacslk/dhcp/iana"
+	"github.com/insomniacslk/dhcp/rfc1035label"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 
+	"github.com/coredhcp/coredhcp/events"
 	"github.com/coredhcp/coredhcp/handler"
+	"github.com/coredhcp/coredhcp/plugins"
 )
 
 var testMAC = net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}
@@ -213,9 +220,17 @@ func TestBuildReply4(t *testing.T) {
 func TestApplyHandlers4(t *testing.T) {
 	base := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
 
-	t.Run("empty chain returns resp unchanged", func(t *testing.T) {
-		resp := applyHandlers4(nil, base, base)
+	t.Run("empty chain returns resp unchanged and no stop position", func(t *testing.T) {
+		resp, stoppedAt := applyHandlers4(nil, base, base)
 		assert.Same(t, base, resp)
+		assert.Equal(t, -1, stoppedAt)
+	})
+
+	t.Run("chain that runs to the end reports no stop position", func(t *testing.T) {
+		pass := func(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) { return resp, false }
+		resp, stoppedAt := applyHandlers4(chain4(pass, pass), base, base)
+		assert.Same(t, base, resp)
+		assert.Equal(t, -1, stoppedAt)
 	})
 
 	t.Run("chain runs in order until stop", func(t *testing.T) {
@@ -232,18 +247,27 @@ func TestApplyHandlers4(t *testing.T) {
 			order = append(order, 3)
 			return resp, false
 		}
-		resp := applyHandlers4([]handler.Handler4{h1, h2, h3}, base, base)
+		resp, stoppedAt := applyHandlers4(chain4(h1, h2, h3), base, base)
 		assert.Nil(t, resp)
 		assert.Equal(t, []int{1, 2}, order)
+		assert.Equal(t, 1, stoppedAt)
 	})
 }
 
 func TestApplyHandlers6(t *testing.T) {
 	base := mustSolicit(t, false)
 
-	t.Run("empty chain returns resp unchanged", func(t *testing.T) {
-		resp := applyHandlers6(nil, base, base)
+	t.Run("empty chain returns resp unchanged and no stop position", func(t *testing.T) {
+		resp, stoppedAt := applyHandlers6(nil, base, base)
 		assert.Same(t, base, resp)
+		assert.Equal(t, -1, stoppedAt)
+	})
+
+	t.Run("chain that runs to the end reports no stop position", func(t *testing.T) {
+		pass := func(_, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) { return resp, false }
+		resp, stoppedAt := applyHandlers6(chain6(pass, pass), base, base)
+		assert.Same(t, base, resp)
+		assert.Equal(t, -1, stoppedAt)
 	})
 
 	t.Run("chain runs in order until stop", func(t *testing.T) {
@@ -260,9 +284,10 @@ func TestApplyHandlers6(t *testing.T) {
 			order = append(order, 3)
 			return resp, false
 		}
-		resp := applyHandlers6([]handler.Handler6{h1, h2, h3}, base, base)
+		resp, stoppedAt := applyHandlers6(chain6(h1, h2, h3), base, base)
 		assert.Nil(t, resp)
 		assert.Equal(t, []int{1, 2}, order)
+		assert.Equal(t, 1, stoppedAt)
 	})
 }
 
@@ -426,7 +451,26 @@ func TestOobIfIndex6(t *testing.T) {
 // --- HandleMsg4 ---
 
 func newTestListener4(handlers []handler.Handler4, conn *fakeConn4) *listener4 {
-	return &listener4{conn4: conn, handlers: handlers}
+	return &listener4{conn4: conn, chain: chain4(handlers...)}
+}
+
+// chain4 turns bare handlers into a chain, naming each link after its
+// position so a test can tell from an event which one stopped the chain.
+func chain4(handlers ...handler.Handler4) []plugins.Link4 {
+	chain := make([]plugins.Link4, 0, len(handlers))
+	for i, h := range handlers {
+		chain = append(chain, plugins.Link4{Name: fmt.Sprintf("plugin%d", i+1), Handler: h})
+	}
+	return chain
+}
+
+// chain6 is chain4 for the DHCPv6 chain.
+func chain6(handlers ...handler.Handler6) []plugins.Link6 {
+	chain := make([]plugins.Link6, 0, len(handlers))
+	for i, h := range handlers {
+		chain = append(chain, plugins.Link6{Name: fmt.Sprintf("plugin%d", i+1), Handler: h})
+	}
+	return chain
 }
 
 func TestHandleMsg4ParseError(t *testing.T) {
@@ -579,7 +623,7 @@ func TestHandleMsg4EthernetSendSuccessAndFailure(t *testing.T) {
 // --- HandleMsg6 ---
 
 func newTestListener6(handlers []handler.Handler6, conn *fakeConn6) *listener6 {
-	return &listener6{conn6: conn, handlers: handlers}
+	return &listener6{conn6: conn, chain: chain6(handlers...)}
 }
 
 func TestHandleMsg6ParseError(t *testing.T) {
@@ -762,4 +806,486 @@ func TestBufpoolNewAllocatesMaxDatagram(t *testing.T) {
 	b, ok := got.(*[]byte)
 	require.True(t, ok)
 	assert.Len(t, *b, MaxDatagram)
+}
+
+// --- observer reporting ---
+
+// recordObserver collects everything the server reports. Request runs on the
+// goroutine handling each packet, so the slices are guarded.
+type recordObserver struct {
+	mu        sync.Mutex
+	requests  []events.Request
+	listeners []events.Listener
+	plugins   []events.Plugin
+}
+
+func (o *recordObserver) Request(r events.Request) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.requests = append(o.requests, r)
+}
+
+func (o *recordObserver) Listener(l events.Listener) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.listeners = append(o.listeners, l)
+}
+
+func (o *recordObserver) Plugin(p events.Plugin) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.plugins = append(o.plugins, p)
+}
+
+// only returns the one request the observer saw. Every datagram must produce
+// exactly one event, whatever became of it, so anything else is a failure.
+func (o *recordObserver) only(t *testing.T) events.Request {
+	t.Helper()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	require.Len(t, o.requests, 1)
+	return o.requests[0]
+}
+
+// fixedDUID has no timestamp in it, unlike the DUID-LLT mustMessage6 builds,
+// so the hex an event carries is the same on every run.
+var fixedDUID = &dhcpv6.DUIDLL{HWType: iana.HWTypeEthernet, LinkLayerAddr: testMAC}
+
+// fixedDUIDHex is fixedDUID as the server renders it: DUID type 3, hardware
+// type 1, then the MAC.
+const fixedDUIDHex = "00030001001122334455"
+
+// message6 builds a DHCPv6 message of the given type carrying fixedDUID as
+// its client ID, plus any options the test needs.
+func message6(t *testing.T, mt dhcpv6.MessageType, opts ...dhcpv6.Option) *dhcpv6.Message {
+	t.Helper()
+	m, err := dhcpv6.NewMessage()
+	require.NoError(t, err)
+	m.MessageType = mt
+	m.AddOption(dhcpv6.OptClientID(fixedDUID))
+	for _, o := range opts {
+		m.AddOption(o)
+	}
+	return m
+}
+
+// observedListener4 is newTestListener4 with an observer attached.
+func observedListener4(handlers []handler.Handler4, conn *fakeConn4) (*listener4, *recordObserver) {
+	obs := &recordObserver{}
+	l := newTestListener4(handlers, conn)
+	l.observer = obs
+	return l, obs
+}
+
+// observedListener6 is newTestListener6 with an observer attached.
+func observedListener6(handlers []handler.Handler6, conn *fakeConn6) (*listener6, *recordObserver) {
+	obs := &recordObserver{}
+	l := newTestListener6(handlers, conn)
+	l.observer = obs
+	return l, obs
+}
+
+func TestHandleMsg4ObserverParseError(t *testing.T) {
+	l, obs := observedListener4(nil, &fakeConn4{})
+	l.Index, l.Name = 5, "eth0"
+	l.HandleMsg4(datagramBuf([]byte{0xff}), nil, &net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 68})
+
+	ev := obs.only(t)
+	assert.False(t, ev.Time.IsZero())
+	assert.Equal(t, events.FamilyV4, ev.Family)
+	assert.Equal(t, "eth0", ev.Interface)
+	assert.Equal(t, netip.MustParseAddrPort("192.0.2.1:68"), ev.Peer)
+	assert.Equal(t, events.OutcomeParseError, ev.Outcome)
+	assert.Equal(t, events.PathNone, ev.Path)
+	assert.NotEmpty(t, ev.Error)
+	// Nothing was decoded, so nothing about the client is known.
+	assert.Empty(t, ev.Type)
+	assert.Empty(t, ev.ClientID)
+	assert.Empty(t, ev.ReplyType)
+	assert.Zero(t, ev.Duration)
+}
+
+func TestHandleMsg4ObserverUnsupported(t *testing.T) {
+	req := mustRequest4(t,
+		dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover),
+		dhcpv4.WithOption(dhcpv4.OptHostName("client-1")),
+		dhcpv4.WithGatewayIP(net.ParseIP("10.0.0.1")),
+	)
+	req.OpCode = dhcpv4.OpcodeBootReply // buildReply4 rejects this
+
+	l, obs := observedListener4(nil, &fakeConn4{})
+	l.HandleMsg4(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 67})
+
+	ev := obs.only(t)
+	assert.Equal(t, events.OutcomeUnsupported, ev.Outcome)
+	assert.Equal(t, events.PathNone, ev.Path)
+	assert.Contains(t, ev.Error, "unsupported opcode")
+	// The packet parsed, so what it said about the client is reported.
+	assert.Equal(t, "DISCOVER", ev.Type)
+	assert.Equal(t, testMAC.String(), ev.ClientID)
+	assert.Equal(t, "client-1", ev.Hostname)
+	assert.Equal(t, netip.MustParseAddr("10.0.0.1"), ev.Relay)
+	assert.Empty(t, ev.ReplyType)
+}
+
+func TestHandleMsg4ObserverDropped(t *testing.T) {
+	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
+	pass := func(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) { return resp, false }
+	drop := func(_, _ *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) { return nil, true }
+
+	l, obs := observedListener4([]handler.Handler4{pass, drop, pass}, &fakeConn4{})
+	l.HandleMsg4(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("192.0.2.1")})
+
+	ev := obs.only(t)
+	assert.Equal(t, events.OutcomeDropped, ev.Outcome)
+	assert.Equal(t, events.PathNone, ev.Path)
+	assert.Equal(t, "plugin2", ev.Plugin)
+	assert.Equal(t, 2, ev.Position)
+	assert.Empty(t, ev.ReplyType)
+	assert.Empty(t, ev.Addresses)
+}
+
+func TestHandleMsg4ObserverRepliedBroadcast(t *testing.T) {
+	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
+	req.SetBroadcast()
+	lease := func(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+		resp.YourIPAddr = net.IP{192, 0, 2, 10}
+		resp.UpdateOption(dhcpv4.OptIPAddressLeaseTime(30 * time.Minute))
+		return resp, false
+	}
+
+	l, obs := observedListener4([]handler.Handler4{lease}, &fakeConn4{})
+	l.Index, l.Name = 5, "eth0"
+	l.HandleMsg4(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 68})
+
+	ev := obs.only(t)
+	assert.Equal(t, events.OutcomeReplied, ev.Outcome)
+	assert.Equal(t, events.PathBroadcast, ev.Path)
+	assert.Equal(t, "OFFER", ev.ReplyType)
+	assert.Equal(t, []netip.Prefix{netip.MustParsePrefix("192.0.2.10/32")}, ev.Addresses)
+	assert.Equal(t, 30*time.Minute, ev.LeaseTime)
+	// The whole chain ran, so no plugin is named.
+	assert.Empty(t, ev.Plugin)
+	assert.Zero(t, ev.Position)
+	assert.Empty(t, ev.Error)
+	assert.GreaterOrEqual(t, ev.Duration, time.Duration(0))
+}
+
+func TestHandleMsg4ObserverRepliedUnicastToRelay(t *testing.T) {
+	req := mustRequest4(t,
+		dhcpv4.WithMessageType(dhcpv4.MessageTypeRequest),
+		dhcpv4.WithGatewayIP(net.ParseIP("10.0.0.1")),
+	)
+	l, obs := observedListener4(nil, &fakeConn4{})
+	l.HandleMsg4(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 67})
+
+	ev := obs.only(t)
+	assert.Equal(t, events.OutcomeReplied, ev.Outcome)
+	assert.Equal(t, events.PathUnicast, ev.Path)
+	assert.Equal(t, "ACK", ev.ReplyType)
+	assert.Equal(t, netip.MustParseAddr("10.0.0.1"), ev.Relay)
+	// No plugin handed out an address.
+	assert.Empty(t, ev.Addresses)
+	assert.Zero(t, ev.LeaseTime)
+}
+
+func TestHandleMsg4ObserverSendError(t *testing.T) {
+	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
+	req.SetBroadcast()
+
+	l, obs := observedListener4(nil, &fakeConn4{writeErr: errors.New("write boom")})
+	l.Index, l.Name = 5, "eth0"
+	l.HandleMsg4(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("192.0.2.1")})
+
+	ev := obs.only(t)
+	assert.Equal(t, events.OutcomeSendError, ev.Outcome)
+	// Path and ReplyType say what the server tried to do.
+	assert.Equal(t, events.PathBroadcast, ev.Path)
+	assert.Equal(t, "OFFER", ev.ReplyType)
+	assert.Equal(t, "write boom", ev.Error)
+}
+
+func TestHandleMsg4ObserverLayer2(t *testing.T) {
+	loName := loopbackInterfaceName(t)
+	lo, err := net.InterfaceByName(loName)
+	require.NoError(t, err)
+
+	// The default reply destination is a raw frame: no gateway, no client
+	// address, no broadcast flag.
+	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
+
+	origSendEthernet := sendEthernetFn
+	defer func() { sendEthernetFn = origSendEthernet }()
+
+	cases := []struct {
+		name        string
+		boundIndex  int
+		sendErr     error
+		wantOutcome events.Outcome
+		wantErr     string
+	}{
+		{
+			name:        "sent",
+			boundIndex:  lo.Index,
+			wantOutcome: events.OutcomeReplied,
+		},
+		{
+			name:        "no interface to send on",
+			boundIndex:  0,
+			wantOutcome: events.OutcomeSendError,
+			wantErr:     errNoLayer2Interface.Error(),
+		},
+		{
+			name:        "interface lookup fails",
+			boundIndex:  999999,
+			wantOutcome: events.OutcomeSendError,
+			wantErr:     "no such network interface",
+		},
+		{
+			name:        "send fails",
+			boundIndex:  lo.Index,
+			sendErr:     errors.New("send boom"),
+			wantOutcome: events.OutcomeSendError,
+			wantErr:     "send boom",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sendEthernetFn = func(net.Interface, *dhcpv4.DHCPv4) error { return tc.sendErr }
+			l, obs := observedListener4(nil, &fakeConn4{})
+			l.Index = tc.boundIndex
+			l.HandleMsg4(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("192.0.2.1")})
+
+			ev := obs.only(t)
+			assert.Equal(t, tc.wantOutcome, ev.Outcome)
+			assert.Equal(t, events.PathLayer2, ev.Path)
+			assert.Equal(t, "OFFER", ev.ReplyType)
+			if tc.wantErr == "" {
+				assert.Empty(t, ev.Error)
+				return
+			}
+			assert.Contains(t, ev.Error, tc.wantErr)
+		})
+	}
+}
+
+// An unbound listener learns the interface from each packet's control
+// message. The name is resolved once and then remembered, so a second packet
+// from the same interface reports the same name without another lookup.
+func TestHandleMsg4ObserverInterfaceFromControlMessage(t *testing.T) {
+	loName := loopbackInterfaceName(t)
+	lo, err := net.InterfaceByName(loName)
+	require.NoError(t, err)
+
+	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeRequest), dhcpv4.WithGatewayIP(net.ParseIP("10.0.0.1")))
+	l, obs := observedListener4(nil, &fakeConn4{})
+	peer := &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 67}
+
+	l.HandleMsg4(datagramBuf(req.ToBytes()), &ipv4.ControlMessage{IfIndex: lo.Index}, peer)
+	l.HandleMsg4(datagramBuf(req.ToBytes()), &ipv4.ControlMessage{IfIndex: lo.Index}, peer)
+
+	obs.mu.Lock()
+	defer obs.mu.Unlock()
+	require.Len(t, obs.requests, 2)
+	assert.Equal(t, loName, obs.requests[0].Interface)
+	assert.Equal(t, loName, obs.requests[1].Interface)
+
+	cached, ok := l.ifaces.names.Load(lo.Index)
+	require.True(t, ok)
+	assert.Equal(t, loName, cached)
+}
+
+// An index that does not resolve leaves the interface empty rather than
+// guessing, and the failure is cached so the lookup is not retried per packet.
+func TestHandleMsg4ObserverUnknownInterfaceIndex(t *testing.T) {
+	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeRequest), dhcpv4.WithGatewayIP(net.ParseIP("10.0.0.1")))
+	l, obs := observedListener4(nil, &fakeConn4{})
+	l.HandleMsg4(datagramBuf(req.ToBytes()), &ipv4.ControlMessage{IfIndex: 999999}, &net.UDPAddr{IP: net.ParseIP("10.0.0.1")})
+
+	assert.Empty(t, obs.only(t).Interface)
+	cached, ok := l.ifaces.names.Load(999999)
+	require.True(t, ok)
+	assert.Empty(t, cached)
+}
+
+// A listener with no control message and no bound interface reports no
+// interface at all.
+func TestHandleMsg4ObserverNoInterfaceInformation(t *testing.T) {
+	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeRequest), dhcpv4.WithGatewayIP(net.ParseIP("10.0.0.1")))
+	l, obs := observedListener4(nil, &fakeConn4{})
+	l.HandleMsg4(datagramBuf(req.ToBytes()), nil, nil)
+
+	ev := obs.only(t)
+	assert.Empty(t, ev.Interface)
+	assert.False(t, ev.Peer.IsValid())
+}
+
+func TestHandleMsg6ObserverParseError(t *testing.T) {
+	l, obs := observedListener6(nil, &fakeConn6{})
+	l.Index, l.Name = 7, "eth1"
+	l.HandleMsg6(datagramBuf([]byte{0x01}), nil, &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 546})
+
+	ev := obs.only(t)
+	assert.Equal(t, events.FamilyV6, ev.Family)
+	assert.Equal(t, "eth1", ev.Interface)
+	assert.Equal(t, netip.MustParseAddrPort("[2001:db8::1]:546"), ev.Peer)
+	assert.Equal(t, events.OutcomeParseError, ev.Outcome)
+	assert.Equal(t, events.PathNone, ev.Path)
+	assert.NotEmpty(t, ev.Error)
+}
+
+func TestHandleMsg6ObserverUnsupported(t *testing.T) {
+	req := message6(t, dhcpv6.MessageTypeAdvertise) // never accepted as a request
+	l, obs := observedListener6(nil, &fakeConn6{})
+	l.HandleMsg6(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("2001:db8::1")})
+
+	ev := obs.only(t)
+	assert.Equal(t, events.OutcomeUnsupported, ev.Outcome)
+	assert.Equal(t, "ADVERTISE", ev.Type)
+	assert.Equal(t, fixedDUIDHex, ev.ClientID)
+	assert.Contains(t, ev.Error, "not supported")
+	assert.Empty(t, ev.ReplyType)
+}
+
+func TestHandleMsg6ObserverDropped(t *testing.T) {
+	req := message6(t, dhcpv6.MessageTypeRequest)
+	drop := func(_, _ dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) { return nil, true }
+
+	l, obs := observedListener6([]handler.Handler6{drop}, &fakeConn6{})
+	l.HandleMsg6(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("2001:db8::1")})
+
+	ev := obs.only(t)
+	assert.Equal(t, events.OutcomeDropped, ev.Outcome)
+	assert.Equal(t, "plugin1", ev.Plugin)
+	assert.Equal(t, 1, ev.Position)
+	assert.Equal(t, "REQUEST", ev.Type)
+	assert.Empty(t, ev.ReplyType)
+}
+
+// A relay-forward the server cannot answer with a relay-reply is reported as
+// unsupported, with nothing said about a reply, because none went out.
+func TestHandleMsg6ObserverEncapsulateError(t *testing.T) {
+	inner := message6(t, dhcpv6.MessageTypeRequest)
+	req, err := dhcpv6.EncapsulateRelay(inner, dhcpv6.MessageTypeRelayReply, net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"))
+	require.NoError(t, err)
+
+	l, obs := observedListener6(nil, &fakeConn6{})
+	l.HandleMsg6(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("2001:db8::1")})
+
+	ev := obs.only(t)
+	assert.Equal(t, events.OutcomeUnsupported, ev.Outcome)
+	assert.Equal(t, events.PathNone, ev.Path)
+	assert.NotEmpty(t, ev.Error)
+	assert.Equal(t, "REQUEST", ev.Type)
+	assert.Equal(t, netip.MustParseAddr("2001:db8::1"), ev.Relay)
+	assert.Empty(t, ev.ReplyType)
+}
+
+func TestHandleMsg6ObserverSendError(t *testing.T) {
+	req := message6(t, dhcpv6.MessageTypeRequest)
+	l, obs := observedListener6(nil, &fakeConn6{writeErr: errors.New("write boom")})
+	l.HandleMsg6(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("2001:db8::1")})
+
+	ev := obs.only(t)
+	assert.Equal(t, events.OutcomeSendError, ev.Outcome)
+	assert.Equal(t, events.PathUnicast, ev.Path)
+	assert.Equal(t, "REPLY", ev.ReplyType)
+	assert.Equal(t, "write boom", ev.Error)
+}
+
+func TestHandleMsg6ObserverReplied(t *testing.T) {
+	fqdn := &dhcpv6.OptFQDN{DomainName: &rfc1035label.Labels{Labels: []string{"client", "example", "com"}}}
+	req := message6(t, dhcpv6.MessageTypeRequest, fqdn)
+
+	assign := func(_, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
+		msg, ok := resp.(*dhcpv6.Message)
+		if !ok {
+			return resp, true
+		}
+		msg.AddOption(&dhcpv6.OptIANA{
+			IaId: [4]byte{1, 2, 3, 4},
+			Options: dhcpv6.IdentityOptions{Options: dhcpv6.Options{
+				&dhcpv6.OptIAAddress{
+					IPv6Addr:          net.ParseIP("2001:db8::10"),
+					PreferredLifetime: time.Hour,
+					ValidLifetime:     2 * time.Hour,
+				},
+			}},
+		})
+		return resp, false
+	}
+
+	l, obs := observedListener6([]handler.Handler6{assign}, &fakeConn6{})
+	l.HandleMsg6(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 546})
+
+	ev := obs.only(t)
+	assert.Equal(t, events.OutcomeReplied, ev.Outcome)
+	assert.Equal(t, events.PathUnicast, ev.Path)
+	assert.Equal(t, "REQUEST", ev.Type)
+	assert.Equal(t, "REPLY", ev.ReplyType)
+	assert.Equal(t, fixedDUIDHex, ev.ClientID)
+	assert.Equal(t, "client.example.com", ev.Hostname)
+	assert.Equal(t, []netip.Prefix{netip.MustParsePrefix("2001:db8::10/128")}, ev.Addresses)
+	assert.Equal(t, 2*time.Hour, ev.LeaseTime)
+	assert.False(t, ev.Relay.IsValid())
+}
+
+// A relayed request reports the client from the inner message and the relay
+// that forwarded it, and the reply is described after re-encapsulation.
+func TestHandleMsg6ObserverRelayed(t *testing.T) {
+	inner := message6(t, dhcpv6.MessageTypeRequest)
+	req, err := dhcpv6.EncapsulateRelay(inner, dhcpv6.MessageTypeRelayForward, net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"))
+	require.NoError(t, err)
+
+	l, obs := observedListener6(nil, &fakeConn6{})
+	l.HandleMsg6(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("2001:db8::1")})
+
+	ev := obs.only(t)
+	assert.Equal(t, events.OutcomeReplied, ev.Outcome)
+	assert.Equal(t, "REQUEST", ev.Type)
+	assert.Equal(t, "REPLY", ev.ReplyType)
+	assert.Equal(t, fixedDUIDHex, ev.ClientID)
+	assert.Equal(t, netip.MustParseAddr("2001:db8::1"), ev.Relay)
+}
+
+func TestHandleMsg6ObserverInterfaceFromControlMessage(t *testing.T) {
+	loName := loopbackInterfaceName(t)
+	lo, err := net.InterfaceByName(loName)
+	require.NoError(t, err)
+
+	req := message6(t, dhcpv6.MessageTypeRequest)
+	l, obs := observedListener6(nil, &fakeConn6{})
+	l.HandleMsg6(datagramBuf(req.ToBytes()), &ipv6.ControlMessage{IfIndex: lo.Index}, &net.UDPAddr{IP: net.ParseIP("2001:db8::1")})
+
+	assert.Equal(t, loName, obs.only(t).Interface)
+}
+
+// A SOLICIT asking for rapid commit is answered with a REPLY instead of an
+// ADVERTISE. Nothing in the chain hands out an address here, so the event
+// reports a reply with no addresses and no lease time rather than zeroes that
+// look like a lease.
+func TestHandleMsg6ObserverRapidCommit(t *testing.T) {
+	req := mustSolicit(t, true)
+	l, obs := observedListener6(nil, &fakeConn6{})
+	l.HandleMsg6(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("2001:db8::1")})
+
+	ev := obs.only(t)
+	assert.Equal(t, events.OutcomeReplied, ev.Outcome)
+	assert.Equal(t, "SOLICIT", ev.Type)
+	assert.Equal(t, "REPLY", ev.ReplyType)
+	assert.NotEmpty(t, ev.ClientID)
+	assert.Empty(t, ev.Addresses)
+	assert.Zero(t, ev.LeaseTime)
+}
+
+// Without rapid commit the same SOLICIT gets an ADVERTISE.
+func TestHandleMsg6ObserverSolicitAdvertise(t *testing.T) {
+	req := mustSolicit(t, false)
+	l, obs := observedListener6(nil, &fakeConn6{})
+	l.HandleMsg6(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("2001:db8::1")})
+
+	ev := obs.only(t)
+	assert.Equal(t, "SOLICIT", ev.Type)
+	assert.Equal(t, "ADVERTISE", ev.ReplyType)
 }

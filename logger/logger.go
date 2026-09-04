@@ -206,7 +206,15 @@ func WithFile(path string) error {
 
 // WithNoStdOutErr disables logging to stderr.
 func WithNoStdOutErr() {
+	WithConsole(nil)
+}
+
+// WithConsole replaces the console stream, the same one WithNoStdOutErr
+// disables. A nil w disables console output. The file writer set by
+// WithFile is unaffected and keeps receiving lines. Safe to call while the
+// server is logging.
+func WithConsole(w io.Writer) {
 	out.mu.Lock()
 	defer out.mu.Unlock()
-	out.console = nil
+	out.console = w
 }

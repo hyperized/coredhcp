@@ -14,40 +14,94 @@ import (
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
+
+	"github.com/coredhcp/coredhcp/events"
 )
 
 // sendEthernetFn is swappable so the layer-2 reply path can be exercised in
 // tests without a raw socket.
 var sendEthernetFn = sendEthernet
 
+// errNoLayer2Interface is what the observer is told when a raw frame has
+// nowhere to go. There is no error from the network stack to pass on here:
+// the server never found out which interface the request arrived on.
+var errNoLayer2Interface = errors.New("no interface information for a layer-2 reply")
+
+// ifaceName is the interface a packet arrived on: the one the listener is
+// bound to, or the one the socket reported for this packet.
+func (l *listener6) ifaceName(oobIdx int) string {
+	if l.Index != 0 {
+		return l.Name
+	}
+	return l.ifaces.name(oobIdx)
+}
+
+// ifaceName is the interface a packet arrived on: the one the listener is
+// bound to, or the one the socket reported for this packet.
+func (l *listener4) ifaceName(oobIdx int) string {
+	if l.Index != 0 {
+		return l.Name
+	}
+	return l.ifaces.name(oobIdx)
+}
+
+// startReport begins the event for one packet, or returns nil when no
+// observer is attached. Everything it would cost, the clock read and the
+// interface lookup included, sits behind that check.
+func (l *listener6) startReport(oob *ipv6.ControlMessage, peer *net.UDPAddr) *requestReport {
+	if l.observer == nil {
+		return nil
+	}
+	return newReport(l.observer, events.FamilyV6, l.ifaceName(oobIfIndex6(oob)), peer)
+}
+
+// startReport begins the event for one packet, or returns nil when no
+// observer is attached.
+func (l *listener4) startReport(oob *ipv4.ControlMessage, peer *net.UDPAddr) *requestReport {
+	if l.observer == nil {
+		return nil
+	}
+	return newReport(l.observer, events.FamilyV4, l.ifaceName(oobIfIndex4(oob)), peer)
+}
+
 // HandleMsg6 runs for every received DHCPv6 packet. It will run every
 // registered handler in sequence, and reply with the resulting response.
 // It will not reply if the resulting response is `nil`.
 func (l *listener6) HandleMsg6(buf []byte, oob *ipv6.ControlMessage, peer *net.UDPAddr) {
+	rep := l.startReport(oob, peer)
+
 	req, err := dhcpv6.FromBytes(buf)
 	bufpool.Put(&buf)
 	if err != nil {
 		log.Printf("Error parsing DHCPv6 request: %v", err)
+		rep.emit(events.OutcomeParseError, events.PathNone, err)
 		return
 	}
+	rep.request6(req)
 
 	resp, err := buildReply6(req)
 	if err != nil {
 		log.Warningf("MainHandler6: %v", err)
+		rep.emit(events.OutcomeUnsupported, events.PathNone, err)
 		return
 	}
 
-	resp = applyHandlers6(l.handlers, req, resp)
+	rep.chainStart()
+	resp, stoppedAt := applyHandlers6(l.chain, req, resp)
+	rep.chainDone6(l.chain, stoppedAt)
 	if resp == nil {
 		log.Print("MainHandler6: dropping request because response is nil")
+		rep.emit(events.OutcomeDropped, events.PathNone, nil)
 		return
 	}
 
 	resp, err = encapsulateRelay6(req, resp)
 	if err != nil {
 		log.Warningf("DHCPv6: cannot create relay-repl from relay-forw: %v", err)
+		rep.emit(events.OutcomeUnsupported, events.PathNone, err)
 		return
 	}
+	rep.reply6(resp)
 
 	var woob *ipv6.ControlMessage
 	if peer.IP.IsLinkLocalUnicast() {
@@ -61,31 +115,43 @@ func (l *listener6) HandleMsg6(buf []byte, oob *ipv6.ControlMessage, peer *net.U
 	}
 	if _, err := l.WriteTo(resp.ToBytes(), woob, peer); err != nil {
 		log.Printf("MainHandler6: conn.Write to %v failed: %v", peer, err)
+		rep.emit(events.OutcomeSendError, events.PathUnicast, err)
+		return
 	}
+	rep.emit(events.OutcomeReplied, events.PathUnicast, nil)
 }
 
 // HandleMsg4 runs for every received DHCPv4 packet. It will run every
 // registered handler in sequence, and reply with the resulting response.
 // It will not reply if the resulting response is `nil`.
 func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, src *net.UDPAddr) {
+	rep := l.startReport(oob, src)
+
 	req, err := dhcpv4.FromBytes(buf)
 	bufpool.Put(&buf)
 	if err != nil {
 		log.Printf("Error parsing DHCPv4 request: %v", err)
+		rep.emit(events.OutcomeParseError, events.PathNone, err)
 		return
 	}
+	rep.request4(req)
 
 	resp, err := buildReply4(req)
 	if err != nil {
 		log.Printf("MainHandler4: %v", err)
+		rep.emit(events.OutcomeUnsupported, events.PathNone, err)
 		return
 	}
 
-	resp = applyHandlers4(l.handlers, req, resp)
+	rep.chainStart()
+	resp, stoppedAt := applyHandlers4(l.chain, req, resp)
+	rep.chainDone4(l.chain, stoppedAt)
 	if resp == nil {
 		log.Print("MainHandler4: dropping request because response is nil")
+		rep.emit(events.OutcomeDropped, events.PathNone, nil)
 		return
 	}
+	rep.reply4(resp)
 
 	peer, useEthernet := replyDestination4(req, resp, src)
 
@@ -102,25 +168,39 @@ func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, src *net.UD
 	}
 
 	if useEthernet {
-		if woob == nil {
-			// Without an interface there is nothing to put the frame on;
-			// dereferencing woob here used to crash the server.
-			log.Errorf("MainHandler4: cannot send layer-2 reply without interface information")
-			return
-		}
-		intf, err := net.InterfaceByIndex(woob.IfIndex)
-		if err != nil {
-			log.Errorf("MainHandler4: Can not get Interface for index %d %v", woob.IfIndex, err)
-			return
-		}
-		if err := sendEthernetFn(*intf, resp); err != nil {
-			log.Errorf("MainHandler4: Cannot send Ethernet packet: %v", err)
-		}
+		sendLayer2(rep, woob, resp)
 		return
 	}
 	if _, err := l.WriteTo(resp.ToBytes(), woob, peer); err != nil {
 		log.Errorf("MainHandler4: conn.Write to %v failed: %v", peer, err)
+		rep.emit4(events.OutcomeSendError, peer, err)
+		return
 	}
+	rep.emit4(events.OutcomeReplied, peer, nil)
+}
+
+// sendLayer2 puts a DHCPv4 reply on the wire as a raw frame, for a client
+// that has no address to receive a datagram on yet.
+func sendLayer2(rep *requestReport, woob *ipv4.ControlMessage, resp *dhcpv4.DHCPv4) {
+	if woob == nil {
+		// Without an interface there is nothing to put the frame on;
+		// dereferencing woob here used to crash the server.
+		log.Errorf("MainHandler4: cannot send layer-2 reply without interface information")
+		rep.emit(events.OutcomeSendError, events.PathLayer2, errNoLayer2Interface)
+		return
+	}
+	intf, err := net.InterfaceByIndex(woob.IfIndex)
+	if err != nil {
+		log.Errorf("MainHandler4: Can not get Interface for index %d %v", woob.IfIndex, err)
+		rep.emit(events.OutcomeSendError, events.PathLayer2, err)
+		return
+	}
+	if err := sendEthernetFn(*intf, resp); err != nil {
+		log.Errorf("MainHandler4: Cannot send Ethernet packet: %v", err)
+		rep.emit(events.OutcomeSendError, events.PathLayer2, err)
+		return
+	}
+	rep.emit(events.OutcomeReplied, events.PathLayer2, nil)
 }
 
 // XXX: performance-wise, Pool may or may not be good (see https://github.com/golang/go/issues/23199)

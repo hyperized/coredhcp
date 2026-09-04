@@ -7,8 +7,12 @@ package plugins
 import (
 	"testing"
 
+	"github.com/insomniacslk/dhcp/dhcpv4"
+	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/coredhcp/coredhcp/config"
 )
 
 // registerCleanup registers plugin under a unique name and removes it from
@@ -46,4 +50,36 @@ func TestRegisterPluginDuplicatePanics(t *testing.T) {
 			_ = RegisterPlugin(plugin)
 		},
 	)
+}
+
+// newLink4 and newLink6 copy the configured arguments. The link is kept for
+// the life of the server, so it must not alias a slice the caller can still
+// write to.
+func TestNewLinkCopiesArgs(t *testing.T) {
+	args := []string{"first", "second"}
+
+	l4 := newLink4(config.PluginConfig{Name: "copy-4", Args: args}, func(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+		return resp, false
+	})
+	l6 := newLink6(config.PluginConfig{Name: "copy-6", Args: args}, func(_, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
+		return resp, false
+	})
+	args[0] = "mutated"
+
+	assert.Equal(t, "copy-4", l4.Name)
+	assert.Equal(t, []string{"first", "second"}, l4.Args)
+	assert.NotNil(t, l4.Handler)
+
+	assert.Equal(t, "copy-6", l6.Name)
+	assert.Equal(t, []string{"first", "second"}, l6.Args)
+	assert.NotNil(t, l6.Handler)
+}
+
+// A plugin configured without arguments gets a nil Args, not an empty slice,
+// so an observer can tell "no arguments" from "one empty argument".
+func TestNewLinkWithoutArgs(t *testing.T) {
+	l4 := newLink4(config.PluginConfig{Name: "no-args-4"}, nil)
+	l6 := newLink6(config.PluginConfig{Name: "no-args-6"}, nil)
+	assert.Nil(t, l4.Args)
+	assert.Nil(t, l6.Args)
 }

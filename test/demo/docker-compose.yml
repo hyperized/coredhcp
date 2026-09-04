@@ -1,0 +1,240 @@
+# Demo stack for the terminal UI: coredhcp built with its UI from
+# test/demo/Dockerfile, and busybox clients on a shared bridge that keep the
+# server busy while you watch it work.
+#
+# Drive it with `make demo` from the repo root. That starts the clients
+# detached and then runs the server in the foreground, so the UI draws in your
+# own terminal; q, Esc or Ctrl-C quits it and the stack comes down.
+#
+# The server is deliberately the last thing to start. The clients spend the
+# first few seconds retrying, which is traffic worth seeing too.
+#
+# Optional knobs, all with defaults: COMPOSE_PROJECT_NAME, DEMO_NET_PREFIX,
+# DHCP_LEASE_TIME, BUSYBOX_TAG, TERM, and COREDHCP_LOGLEVEL, which the UI's log
+# pane shows and which is worth setting to debug.
+
+name: ${COMPOSE_PROJECT_NAME:-coredhcp-demo}
+
+# The client MAC addresses are anchored here so that the addresses docker
+# programs onto the interfaces, the addresses written into the static lease
+# file and the address macfilter denies all come from one place. config-render
+# receives the same values.
+x-mac-client-a: &mac-client-a "02:00:00:d0:00:01"
+x-mac-client-b: &mac-client-b "02:00:00:d0:00:02"
+x-mac-client-c: &mac-client-c "02:00:00:d0:00:03"
+x-mac-client-renew: &mac-client-renew "02:00:00:d0:00:04"
+x-mac-client-dynamic: &mac-client-dynamic "02:00:00:d0:00:99"
+x-mac-client-denied: &mac-client-denied "02:00:00:d0:de:ad"
+# Only the starting address: client-churn rewrites it every few seconds, always
+# keeping the 02:00:00:cb prefix.
+x-mac-client-churn: &mac-client-churn "02:00:00:cb:00:00"
+
+x-dhcp-client: &dhcp-client
+  image: busybox:${BUSYBOX_TAG:-1.37.0}
+  # tini as PID 1, so the client scripts get their teardown signal instead of
+  # being killed after the ten second timeout.
+  init: true
+  # udhcpc needs an AF_PACKET socket and nothing else. The clients that keep an
+  # address on the interface, and the one that rewrites its own MAC, add
+  # NET_ADMIN to this and say why where they do it.
+  cap_drop: [ALL]
+  cap_add: [NET_RAW]
+  command: ["/bin/sh", "/src/scripts/run-client.sh"]
+  volumes:
+    - ./:/src:ro
+  networks: [dhcp]
+  # No depends_on the server: `docker compose run server` starts only that
+  # service's own dependencies, so a client that waited for the server would
+  # never be started by `make demo` at all.
+
+services:
+  # Renders the server config and the static lease file from the templates in
+  # config/ into the shared volume, substituting the network prefix, the lease
+  # time and the client MAC addresses.
+  #
+  # It idles after rendering and the server waits on its healthcheck: a failed
+  # render never writes the file, this service stays unhealthy, and the server
+  # refuses to start with that as the reason instead of a parse error on a
+  # half-written config.
+  config-render:
+    image: busybox:${BUSYBOX_TAG:-1.37.0}
+    init: true
+    # No network at all: it only writes files, and leaving it off the bridge
+    # keeps its address out of the demo.
+    network_mode: none
+    # The trailing idle exits 0 on the teardown signal; `;` not `&&` so a
+    # failed render idles unhealthy rather than exiting.
+    command: ["/bin/sh", "-c", "/src/scripts/render-config.sh; trap 'exit 0' TERM INT; sleep ${SERVICE_LINGER:-86400} & wait $$!"]
+    healthcheck:
+      test: ["CMD", "test", "-f", "/etc/coredhcp/config.yaml"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+    environment:
+      NET: ${DEMO_NET_PREFIX:-172.31.242}
+      LEASE_TIME: ${DHCP_LEASE_TIME:-60s}
+      MAC_A: *mac-client-a
+      MAC_B: *mac-client-b
+      MAC_C: *mac-client-c
+      MAC_DENIED: *mac-client-denied
+    volumes:
+      - ./:/src:ro
+      - coredhcp-conf:/etc/coredhcp
+
+  # The server and its UI in one process. `make demo` starts this one with
+  # `docker compose run --rm`, in the foreground, which is what puts the UI on
+  # the operator's terminal.
+  server:
+    build:
+      context: ../..
+      dockerfile: test/demo/Dockerfile
+    depends_on:
+      config-render:
+        condition: service_healthy
+    command: ["--conf", "/etc/coredhcp/config.yaml", "--loglevel", "${COREDHCP_LOGLEVEL:-info}"]
+    # A terminal to draw on and a keyboard to quit with.
+    tty: true
+    stdin_open: true
+    environment:
+      TERM: ${TERM:-xterm-256color}
+    # No privileged mode: binding udp/67 needs NET_BIND_SERVICE, and NET_RAW
+    # covers both SO_BINDTODEVICE for the interface-bound listener and the
+    # AF_PACKET socket used to unicast replies to clients that have no address
+    # yet. Both are in docker's default set; everything else is dropped.
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE, NET_RAW]
+    volumes:
+      - coredhcp-conf:/etc/coredhcp:ro
+      # The range plugin writes its lease database, so it gets its own
+      # writable volume rather than loosening the config mount.
+      - coredhcp-leasedb:/var/lib/coredhcp
+    networks:
+      dhcp:
+        # Fixed, because the server_id in the rendered config says .2 and the
+        # clients are told to expect it there.
+        ipv4_address: ${DEMO_NET_PREFIX:-172.31.242}.2
+
+  # Three clients with a static lease keyed on their MAC. Each takes a lease,
+  # holds it for a few seconds, releases it and comes back, at intervals that
+  # are coprime so their requests keep landing in a different order.
+  #
+  # They hold their address the way client-renew does, for the same reason: a
+  # release is sent from the leased address, so a client that does not own it
+  # cannot send one. That is what NET_ADMIN and udhcpc-hold.sh are for.
+  client-a:
+    <<: *dhcp-client
+    mac_address: *mac-client-a
+    cap_add: [NET_RAW, NET_ADMIN]
+    environment:
+      CLIENT_NAME: client-a
+      CLIENT_MODE: cycle
+      CLIENT_HOLD: 5
+      CLIENT_INTERVAL: 7
+      UDHCPC_SCRIPT: udhcpc-hold.sh
+
+  client-b:
+    <<: *dhcp-client
+    mac_address: *mac-client-b
+    cap_add: [NET_RAW, NET_ADMIN]
+    environment:
+      CLIENT_NAME: client-b
+      CLIENT_MODE: cycle
+      CLIENT_HOLD: 5
+      CLIENT_INTERVAL: 11
+      UDHCPC_SCRIPT: udhcpc-hold.sh
+      # Sets the broadcast flag, so this client's reply comes back as a UDP
+      # broadcast while the others exercise the layer-2 unicast path.
+      UDHCPC_EXTRA_ARGS: "-B"
+
+  client-c:
+    <<: *dhcp-client
+    mac_address: *mac-client-c
+    cap_add: [NET_RAW, NET_ADMIN]
+    environment:
+      CLIENT_NAME: client-c
+      CLIENT_MODE: cycle
+      CLIENT_HOLD: 5
+      CLIENT_INTERVAL: 13
+      UDHCPC_SCRIPT: udhcpc-hold.sh
+
+  # Holds its lease instead of releasing it, so the UI shows a client that
+  # renews: udhcpc asks again at half the lease time, every 30 seconds at the
+  # default lease.
+  client-renew:
+    <<: *dhcp-client
+    mac_address: *mac-client-renew
+    # NET_ADMIN for the same reason as the clients above, plus one of its own:
+    # a renewal is answered by unicast to the leased address, so a client that
+    # does not hold it never sees the reply and loses the lease every minute
+    # instead of renewing it. See scripts/udhcpc-hold.sh.
+    cap_add: [NET_RAW, NET_ADMIN]
+    environment:
+      CLIENT_NAME: client-renew
+      CLIENT_MODE: renew
+      UDHCPC_SCRIPT: udhcpc-hold.sh
+
+  # No static lease for this MAC, so it falls through to the range plugin and
+  # gets a pool address.
+  client-dynamic:
+    <<: *dhcp-client
+    mac_address: *mac-client-dynamic
+    cap_add: [NET_RAW, NET_ADMIN]
+    environment:
+      CLIENT_NAME: client-dynamic
+      CLIENT_MODE: cycle
+      CLIENT_HOLD: 5
+      CLIENT_INTERVAL: 9
+      UDHCPC_SCRIPT: udhcpc-hold.sh
+
+  # On the macfilter deny list, so every request it sends is dropped before any
+  # plugin looks at a lease. It asks often, but with a small retry budget, so
+  # the drops keep coming without drowning out everything else. Nothing to hold
+  # and nothing to release, so it keeps the plain event script and NET_RAW.
+  client-denied:
+    <<: *dhcp-client
+    mac_address: *mac-client-denied
+    environment:
+      CLIENT_NAME: client-denied
+      CLIENT_MODE: cycle
+      CLIENT_HOLD: 1
+      CLIENT_INTERVAL: 5
+      UDHCPC_TRIES: 2
+      UDHCPC_INTERVAL: 2
+      # -n so it gives up after those two tries instead of pausing and
+      # retrying on its own schedule.
+      UDHCPC_EXTRA_ARGS: "-n"
+
+  # A new MAC every few seconds and never a release, so the ten address pool
+  # fills up, the range plugin starts refusing, and the addresses only come
+  # back when the leases expire.
+  client-churn:
+    <<: *dhcp-client
+    mac_address: *mac-client-churn
+    # NET_ADMIN on top of the shared set: this is the one client that
+    # reprograms its own hardware address.
+    cap_add: [NET_RAW, NET_ADMIN]
+    environment:
+      CLIENT_NAME: client-churn
+      CLIENT_MODE: churn
+      CHURN_INTERVAL: 4
+      # Two tries is enough to show the refusal without a long wait.
+      UDHCPC_TRIES: 2
+      UDHCPC_INTERVAL: 2
+
+networks:
+  dhcp:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        # Docker's IPAM only allocates out of ip_range, which leaves the static
+        # leases (.11-.13), the pool (.100-.109) and the server's fixed address
+        # (.2) free of any accidental collision with container addressing.
+        # The prefix differs from the test stack's so both can run at once.
+        - subnet: ${DEMO_NET_PREFIX:-172.31.242}.0/24
+          ip_range: ${DEMO_NET_PREFIX:-172.31.242}.192/26
+          gateway: ${DEMO_NET_PREFIX:-172.31.242}.1
+
+volumes:
+  coredhcp-conf:
+  coredhcp-leasedb:

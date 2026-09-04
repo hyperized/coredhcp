@@ -7,6 +7,14 @@ updates:
     groups:
       go-deps:
         patterns: ["*"]
+  # The terminal UI is a module of its own; the root entry does not cover it.
+  - package-ecosystem: gomod
+    directory: /cmd/coredhcp-tui
+    schedule:
+      interval: weekly
+    groups:
+      go-deps:
+        patterns: ["*"]
   - package-ecosystem: github-actions
     directory: /
     schedule:

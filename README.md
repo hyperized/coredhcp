@@ -5,8 +5,8 @@ Fast, multithreaded, modular and extensible DHCP server written in Go.
 This is a maintained fork of [coredhcp/coredhcp](https://github.com/coredhcp/coredhcp).
 It diverges on purpose: standard library `log/slog` instead of logrus, a
 pure-Go sqlite driver (no cgo), per-instance plugin state instead of package
-globals, a strict golangci-lint config at zero issues, and near-total test
-coverage. Commits stay small and per-concern so changes can flow back
+globals, a strict golangci-lint config at zero issues, near-total test
+coverage, and a terminal UI that shows what the server is doing. Commits stay small and per-concern so changes can flow back
 upstream.
 
 [![Build](https://github.com/hyperized/coredhcp/actions/workflows/build.yml/badge.svg)](https://github.com/hyperized/coredhcp/actions/workflows/build.yml)
@@ -48,6 +48,7 @@ Day-to-day tasks are wrapped in the Makefile:
 
 ```
 $ make                  # build everything into bin/
+$ make generate         # re-render both main.go files from their templates
 $ make test             # unit tests with the race detector
 $ make test-linux       # the same suite on Linux, in a container
 $ make test-integration # DHCPv6 against a client in network namespaces
@@ -57,6 +58,7 @@ $ make lint             # golangci-lint, pinned version, in a container
 $ make cover            # coverage profile plus the total
 $ make bench            # benchmark suite with allocation counts
 $ make fuzz             # every fuzz target, 30s each (FUZZTIME=5m for longer)
+$ make demo             # the terminal UI against busy DHCP clients in compose
 ```
 
 To run the example server, put a working configuration in `config.yml` (start
@@ -81,6 +83,48 @@ time=2026-08-19T12:09:32.988+02:00 level=INFO msg="Listen [::]:547" prefix=serve
 
 The server shuts down cleanly on SIGINT/SIGTERM. `-h` lists the flags: config
 path, log level, log file and a `-P` that prints the built-in plugin list.
+
+## Terminal UI
+
+`coredhcp-tui` is the same server with a screen in front of it. It shows the
+sockets it bound, the plugin chain per family with how often each plugin
+answered or dropped a request, every request as it is handled with the reply
+that went out, the addresses that were offered and the ones that were
+confirmed, per-family counters, the request rate over the last minute, and the
+server's own log. It takes the flags `coredhcp` takes, minus `-N`: the console
+log goes into a pane instead.
+
+![coredhcp-tui on the demo stack: the traffic feed with offers, acks, releases and macfilter drops, the lease table, the plugin chain with per-plugin tallies, counters, the request rate and the server log](tui.png)
+
+```
+$ sudo ./bin/coredhcp-tui -c config.yml
+```
+
+`q` quits and stops the server with it. `p` freezes the traffic pane, `Tab`
+and `1` to `4` move focus, the arrow keys scroll, `c` clears the counters and
+`?` lists the keys. The lease table is read off the exchanges themselves, so it
+says what the server sent on the wire, not what a plugin stored; the details
+are in [cmd/coredhcp-tui/tui/](cmd/coredhcp-tui/tui/).
+
+To look at it without a network to serve, `make demo` builds the binary into
+a container and puts it on a docker bridge with busybox clients that keep
+asking: three with static leases, one from the pool, one that renews, one that
+is denied by `macfilter`, and one that changes its MAC address every few
+seconds until the pool runs dry and leases start expiring. The UI draws in
+your terminal; quitting it tears the stack down. See
+[test/demo/](test/demo/).
+
+The UI is a Go module of its own under `cmd/coredhcp-tui`, so the root
+`go.mod` does not carry tview and tcell, and the plain `coredhcp` binary and
+the container image do not link them. A generated server (see the generator
+below) can use it too: render `coredhcp-tui.go.template` instead of the
+default one.
+
+The hooks it runs on are exported, for anyone embedding the server:
+`server.WithObserver` reports every bound listener, every loaded plugin and
+every handled request, with its outcome and the plugin that ended the chain,
+to an [`events.Observer`](events/). With no observer attached the packet path
+pays a nil check and nothing else.
 
 Then try it with the test client in [cmd/client/](cmd/client), which runs one
 solicit/advertise exchange against `[::1]:547` and logs the whole
@@ -182,7 +226,10 @@ fills up forever: coredhcp/coredhcp#148).
 
 To build a server with a custom set of plugins you can use the
 [coredhcp-generator](/cmd/coredhcp-generator/) tool. Head there for
-documentation on how to use it.
+documentation on how to use it. Both `cmd/coredhcp/main.go` and
+`cmd/coredhcp-tui/main.go` are rendered by it from templates in that
+directory; edit the template, run `make generate`, and commit the result. CI
+regenerates them and fails when a committed file has drifted.
 
 # How to write a plugin
 
