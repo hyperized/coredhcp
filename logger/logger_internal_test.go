@@ -335,6 +335,62 @@ func TestWithNoStdOutErr(t *testing.T) {
 	assert.Nil(t, got)
 }
 
+func TestWithConsole(t *testing.T) {
+	resetLevel(t)
+	require.NoError(t, SetLevel("info"))
+
+	t.Run("replaces console with a new writer", func(t *testing.T) {
+		prevBuf := &bytes.Buffer{}
+		out.mu.Lock()
+		orig := out.console
+		out.console = prevBuf
+		out.mu.Unlock()
+		t.Cleanup(func() {
+			out.mu.Lock()
+			out.console = orig
+			out.mu.Unlock()
+		})
+
+		newBuf := &bytes.Buffer{}
+		WithConsole(newBuf)
+
+		out.mu.Lock()
+		got := out.console
+		out.mu.Unlock()
+		assert.Same(t, newBuf, got)
+
+		l := GetLogger("withconsoletest")
+		l.Info("only-in-new")
+
+		assert.Contains(t, newBuf.String(), "only-in-new")
+		assert.NotContains(t, prevBuf.String(), "only-in-new")
+	})
+
+	t.Run("nil disables console output", func(t *testing.T) {
+		buf := &bytes.Buffer{}
+		out.mu.Lock()
+		orig := out.console
+		out.console = buf
+		out.mu.Unlock()
+		t.Cleanup(func() {
+			out.mu.Lock()
+			out.console = orig
+			out.mu.Unlock()
+		})
+
+		WithConsole(nil)
+
+		out.mu.Lock()
+		got := out.console
+		out.mu.Unlock()
+		assert.Nil(t, got)
+
+		l := GetLogger("withconsoletest")
+		l.Info("should-not-appear")
+		assert.Empty(t, buf.String())
+	})
+}
+
 // TestFatalExits and TestFatalfExits cover Fatal/Fatalf's os.Exit(1) call by
 // re-executing this test binary in a child process: the guard env vars pick
 // the child out of the normal test run, and the parent inspects the child's

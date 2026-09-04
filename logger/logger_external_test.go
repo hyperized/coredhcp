@@ -5,6 +5,8 @@
 package logger_test
 
 import (
+	"bytes"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -69,4 +71,21 @@ func TestWithReturnsNewInstance(t *testing.T) {
 	require.NotNil(t, l2)
 	assert.NotSame(t, l, l2)
 	assert.NotPanics(t, func() { l2.Warningf("hi %d", 1) })
+}
+
+func TestWithConsoleRedirectsOutput(t *testing.T) {
+	t.Cleanup(func() {
+		// os.Stderr is what the package starts with (its console field is
+		// initialized to os.Stderr), so restoring it here puts things back
+		// the way every other test in this binary expects to find them.
+		logger.WithConsole(os.Stderr)
+	})
+
+	buf := &bytes.Buffer{}
+	logger.WithConsole(buf)
+
+	l := logger.GetLogger("test")
+	l.Info("hello-from-external-test")
+
+	assert.Contains(t, buf.String(), "hello-from-external-test")
 }
