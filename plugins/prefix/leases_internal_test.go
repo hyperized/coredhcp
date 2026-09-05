@@ -19,14 +19,12 @@ import (
 	"github.com/coredhcp/coredhcp/leases"
 )
 
-// duidKey is the map key the plugin uses: a DUID's wire form held in a string.
-// It is not text, which is why Leases hands it out as hex.
+// Raw DUID bytes, not text; Leases therefore hex-encodes it for the Client field.
 var duidKey = string([]byte{0x00, 0x03, 0x00, 0x01, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff})
 
 const duidHex = "00030001aabbccddeeff"
 
-// stateWithLeases builds an instance holding the given delegations, without an
-// allocator or a sweeper: Leases and Pools read the map and nothing else.
+// No allocator or sweeper: Leases and Pools only read the Records map.
 func stateWithLeases(records map[string][]lease) *pluginState {
 	return &pluginState{
 		name:       "prefix 2001:db8::/48",
@@ -36,7 +34,6 @@ func stateWithLeases(records map[string][]lease) *pluginState {
 	}
 }
 
-// mustIPNet parses a CIDR into the net.IPNet shape the allocator produces.
 func mustIPNet(t *testing.T, cidr string) net.IPNet {
 	t.Helper()
 	_, n, err := net.ParseCIDR(cidr)
@@ -67,8 +64,7 @@ func TestLeases(t *testing.T) {
 			records: map[string][]lease{
 				duidKey: {
 					{Prefix: mustIPNet(t, "2001:db8:0:1::/64"), Expire: live},
-					// Lapsed but not swept yet: reported all the same, with
-					// the expiry that has already passed.
+					// Not swept yet, so it's still reported despite being expired.
 					{Prefix: mustIPNet(t, "2001:db8:0:2::/64"), Expire: expired},
 				},
 			},

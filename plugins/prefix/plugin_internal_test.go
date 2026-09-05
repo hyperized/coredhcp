@@ -65,9 +65,8 @@ func TestRecordKey(t *testing.T) {
 	assert.NotEqual(t, recordKey(duid1), recordKey(duid2))
 }
 
-// fakeClock is a manually advanced clock, so lease lifetimes can be exercised
-// without sleeping. It is safe for concurrent use because the background
-// sweeper reads it from its own goroutine while the test advances it.
+// Manually advanced so lease lifetimes can be exercised without sleeping; the
+// mutex covers concurrent access between the test and the background sweeper.
 type fakeClock struct {
 	mu sync.Mutex
 	t  time.Time
@@ -89,19 +88,14 @@ func (c *fakeClock) Advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// testLeaseDuration is the term every expiry test runs on. The fake clock makes
-// the value itself arbitrary, so one shared term keeps the "advance past
-// expiry" arithmetic readable.
+// Arbitrary since the clock is fake; shared so "advance past expiry" arithmetic stays consistent.
 const testLeaseDuration = time.Hour
 
-// testAllocSize is the delegation size every test carves its pool into, so a
-// pool's CIDR length is all that says how many clients it can serve: a /62 is
-// four delegations, a /64 exactly one.
+// Every pool is carved into /64s, so its CIDR length alone says how many
+// clients it can serve (a /62 is four, a /64 one).
 const testAllocSize = 64
 
-// newTestPlugin builds an idle plugin instance over pool, carved into /64s, on
-// a fake clock. No sweeper is running: a test that wants one calls startSweeper
-// itself and owns its lifetime.
+// No sweeper runs by default; a test that wants one calls startSweeper and owns its lifetime.
 func newTestPlugin(t *testing.T, pool string) (*pluginState, *fakeClock) {
 	t.Helper()
 
@@ -122,8 +116,6 @@ func newTestPlugin(t *testing.T, pool string) (*pluginState, *fakeClock) {
 	}, clock
 }
 
-// duidFor builds a distinct client identifier per n, so a test can bring as
-// many clients to the pool as it needs.
 func duidFor(n byte) dhcpv6.DUID {
 	return &dhcpv6.DUIDLL{
 		HWType:        dhcpIana.HWTypeEthernet,
@@ -131,8 +123,6 @@ func duidFor(n byte) dhcpv6.DUID {
 	}
 }
 
-// solicit runs one SOLICIT carrying a single IA_PD with the given hints and
-// returns the prefixes the plugin offered, which is empty when it had none.
 func solicit(t *testing.T, h *pluginState, duid dhcpv6.DUID, hints ...*dhcpv6.OptIAPrefix) []*dhcpv6.OptIAPrefix {
 	t.Helper()
 
@@ -166,10 +156,7 @@ func TestTimeNowSeam(t *testing.T) {
 	})
 }
 
-// TestSweepReturnsExhaustedPool is the regression test for the pool that never
-// came back: every delegation was written with an expiry that nothing read, and
-// allocator.Free was never called anywhere. A pool that has served everyone it
-// can must serve again once the delegations have lapsed.
+// A pool that has served everyone it can must serve again once delegations lapse.
 func TestSweepReturnsExhaustedPool(t *testing.T) {
 	// A /62 carved into /64s is four prefixes.
 	h, clock := newTestPlugin(t, "2001:db8::/62")
@@ -187,10 +174,8 @@ func TestSweepReturnsExhaustedPool(t *testing.T) {
 	assert.Len(t, solicit(t, h, duidFor(9)), 1, "the pool serves again")
 }
 
-// TestReconcileGivesALateClientItsPrefixBack covers reclamation on the request
-// path rather than in the sweeper. The lapsed lease is not renewed and handed
-// back as if valid; it goes to the pool and is allocated again, hinting at the
-// prefix the client used to hold.
+// Reclamation on the request path, not the sweeper: the lapsed lease isn't
+// renewed as-is; it's freed and reallocated, incidentally landing on the same prefix.
 func TestReconcileGivesALateClientItsPrefixBack(t *testing.T) {
 	h, clock := newTestPlugin(t, "2001:db8::/62")
 
@@ -208,9 +193,8 @@ func TestReconcileGivesALateClientItsPrefixBack(t *testing.T) {
 	assert.Len(t, h.Records[recordKey(duidFor(1))], 1, "and holds exactly one lease, not two")
 }
 
-// TestReconcileDropsAPrefixSomebodyElseTook is the other half: once the lapsed
-// prefix is back in the pool it is fair game, and the late client gets whatever
-// is left rather than a prefix that is now somebody else's.
+// Counterpart to the above: once freed, the prefix is fair game, so a late
+// client may end up with a different one.
 func TestReconcileDropsAPrefixSomebodyElseTook(t *testing.T) {
 	h, clock := newTestPlugin(t, "2001:db8::/63")
 
@@ -221,7 +205,7 @@ func TestReconcileDropsAPrefixSomebodyElseTook(t *testing.T) {
 	clock.Advance(testLeaseDuration + time.Second)
 	h.sweepOnce()
 
-	// Two clients race for the freed prefix. The first one asking gets it.
+	// The first of the two clients to ask for the freed prefix gets it.
 	taken := solicit(t, h, duidFor(2), &dhcpv6.OptIAPrefix{Prefix: held})
 	require.Len(t, taken, 1)
 	require.True(t, held.IP.Equal(taken[0].Prefix.IP))
@@ -231,9 +215,8 @@ func TestReconcileDropsAPrefixSomebodyElseTook(t *testing.T) {
 	assert.False(t, held.IP.Equal(late[0].Prefix.IP), "the late client gets the other prefix")
 }
 
-// TestAllocationHintKeepsAClientNamedLength pins that a returning client which
-// asked for a particular prefix length is not quietly handed its old prefix
-// back instead: the length it named is what reaches the allocator.
+// The hinted length must reach the allocator, not shortcut back to the
+// client's old prefix.
 func TestAllocationHintKeepsAClientNamedLength(t *testing.T) {
 	h, clock := newTestPlugin(t, "2001:db8::/62")
 
@@ -274,9 +257,8 @@ func TestSweepOnceWithNothingExpired(t *testing.T) {
 	assert.Len(t, h.Records, 1, "a live delegation survives a sweep")
 }
 
-// TestSweeperReclaimsInBackground drives the real ticker at a very short
-// interval: with nobody asking for a prefix, a lapsed delegation must go back
-// to the pool on its own, and the goroutine must stop when told to.
+// Drives the real ticker at a short interval so a lapsed delegation is
+// reclaimed on its own, without any client re-asking.
 func TestSweeperReclaimsInBackground(t *testing.T) {
 	h, clock := newTestPlugin(t, "2001:db8::/64")
 
@@ -297,17 +279,16 @@ func TestSweeperReclaimsInBackground(t *testing.T) {
 	assert.Len(t, solicit(t, h, duidFor(2)), 1)
 }
 
-// freeErrAllocator refuses to take a prefix back, standing in for an allocator
-// that has already lost track of one.
+// Refuses to take a prefix back, standing in for an allocator that already
+// lost track of it.
 type freeErrAllocator struct {
 	allocators.Allocator
 }
 
 func (freeErrAllocator) Free(net.IPNet) error { return errors.New("simulated double free") }
 
-// TestFreeSurvivesAnAllocatorFailure pins that a lease we have stopped
-// honouring is dropped even when the allocator will not take the prefix back.
-// Keeping it would mean serving an expiry we have already advertised as past.
+// A lapsed lease must be dropped even if Free fails; keeping it would mean
+// serving an expiry already advertised as past.
 func TestFreeSurvivesAnAllocatorFailure(t *testing.T) {
 	h, clock := newTestPlugin(t, "2001:db8::/62")
 
@@ -367,10 +348,6 @@ func TestParseLeaseDuration(t *testing.T) {
 	}
 }
 
-// TestParseOptions pins parseOptions: the defaults it fills in, the two named
-// arguments accepted in either order, and the error paths shared by both -
-// an unknown key, a key given with no value, a key given twice, and a bad
-// value for either one.
 func TestParseOptions(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -466,8 +443,8 @@ func TestParseOptions(t *testing.T) {
 	}
 }
 
-// TestNewPluginStateStartsIdle pins that construction does not start the
-// sweeper: setupPrefix starts it only once every other step has succeeded.
+// Construction doesn't start the sweeper; setupPrefix does that only once
+// every other step succeeds.
 func TestNewPluginStateStartsIdle(t *testing.T) {
 	h, err := newPluginState("2001:db8::/48", "64", "30m", "sweep:45s")
 	require.NoError(t, err)
@@ -483,9 +460,6 @@ func TestNewPluginStateStartsIdle(t *testing.T) {
 	}
 }
 
-// TestNewPluginStateMaxPrefixes pins that the max-prefixes argument sets
-// pluginState.maxPrefixes, and that leaving it out falls back to
-// defaultMaxPrefixes.
 func TestNewPluginStateMaxPrefixes(t *testing.T) {
 	t.Run("defaults when absent", func(t *testing.T) {
 		h, err := newPluginState("2001:db8::/48", "64")
@@ -500,9 +474,7 @@ func TestNewPluginStateMaxPrefixes(t *testing.T) {
 	})
 }
 
-// buildIAPDMessage returns a message carrying n IA_PD options, one per IAID
-// from 1 to n, for exercising iapdsToAnswer without going through a full
-// SOLICIT or RELEASE.
+// Exists to exercise iapdsToAnswer directly, without a full SOLICIT or RELEASE round trip.
 func buildIAPDMessage(t *testing.T, n int) *dhcpv6.Message {
 	t.Helper()
 
@@ -514,10 +486,8 @@ func buildIAPDMessage(t *testing.T, n int) *dhcpv6.Message {
 	return msg
 }
 
-// TestIapdsToAnswer pins the per-message IA_PD cap: a message under or at the
-// limit is answered in full, and one over it is truncated to the first
-// maxIAPDsPerMessage IA_PDs, identified by IAID, so the reply cannot be made
-// to grow just by adding more IA_PDs to the request.
+// Under or at maxIAPDsPerMessage is answered in full; over it is truncated to
+// the first maxIAPDsPerMessage by IAID, so the reply can't be grown just by adding IA_PDs.
 func TestIapdsToAnswer(t *testing.T) {
 	t.Run("fewer than the limit returns them all", func(t *testing.T) {
 		msg := buildIAPDMessage(t, maxIAPDsPerMessage-1)

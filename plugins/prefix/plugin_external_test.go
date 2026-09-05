@@ -23,10 +23,8 @@ func testDUID() dhcpv6.DUID {
 	}
 }
 
-// solicitWith runs one SOLICIT, carrying a single IA_PD (IAID 1,2,3,4) with
-// the given prefix hints, through an already set-up handler. Reusing the same
-// handler across calls lets scenarios exercise several sequential exchanges
-// against the same pool/lease state.
+// Reuses the same handler across calls so scenarios can chain several
+// exchanges against the same pool/lease state.
 func solicitWith(t *testing.T, handle func(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool), duid dhcpv6.DUID, hints ...*dhcpv6.OptIAPrefix) *dhcpv6.Message {
 	t.Helper()
 
@@ -40,10 +38,8 @@ func solicitWith(t *testing.T, handle func(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCP
 	return result.(*dhcpv6.Message)
 }
 
-// solicitManyIAPDs runs one SOLICIT carrying n distinct IA_PDs, one per IAID
-// from 1 to n, none of them hinting at a particular prefix. It exists for the
-// per-message and per-client cap scenarios: solicitWith's single fixed IAID
-// cannot carry more than one IA_PD in a message.
+// Exists because solicitWith's single fixed IAID can't carry more than one
+// IA_PD per message, which the cap scenarios need.
 func solicitManyIAPDs(t *testing.T, handle func(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool), duid dhcpv6.DUID, n int) *dhcpv6.Message {
 	t.Helper()
 
@@ -60,10 +56,7 @@ func solicitManyIAPDs(t *testing.T, handle func(req, resp dhcpv6.DHCPv6) (dhcpv6
 	return result.(*dhcpv6.Message)
 }
 
-// releaseManyIAPDs runs one RELEASE carrying n distinct, empty IA_PDs, one per
-// IAID from 1 to n. It exists for the per-message cap scenario on the release
-// path: releaseWith answers a single IA_PD, and this needs many in one
-// message.
+// Exists because releaseWith only answers a single IA_PD per message.
 func releaseManyIAPDs(t *testing.T, handle func(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool), duid dhcpv6.DUID, n int) *dhcpv6.Message {
 	t.Helper()
 
@@ -82,10 +75,9 @@ func releaseManyIAPDs(t *testing.T, handle func(req, resp dhcpv6.DHCPv6) (dhcpv6
 	return result.(*dhcpv6.Message)
 }
 
-// duidOfLength returns a client DUID whose wire form (ToBytes) is exactly n
-// octets. DUIDOpaque serialises as a 2-octet type code followed by Data
-// verbatim, so Data needs n-2 octets; the arithmetic is verified here rather
-// than assumed, since the wire encoding is not this package's to guarantee.
+// DUIDOpaque serialises as a 2-octet type code plus Data verbatim, so Data
+// needs n-2 octets; verified here rather than assumed, since the wire encoding
+// isn't this package's to guarantee.
 func duidOfLength(t *testing.T, n int) dhcpv6.DUID {
 	t.Helper()
 
@@ -121,7 +113,6 @@ func TestRoundTrip(t *testing.T) {
 	}
 	t.Logf("%#v", result)
 
-	// Sanity checks on the response
 	success := result.GetOption(dhcpv6.OptionStatusCode)
 	var mo dhcpv6.MessageOptions
 	// No StatusCode option at all is an implicit success.
@@ -193,7 +184,6 @@ func TestHandleMissingClientID(t *testing.T) {
 	h, err := prefix.Plugin.Setup6("2001:db8::/48", "64")
 	require.NoError(t, err)
 
-	// A SOLICIT with an IA_PD but no Client ID option.
 	req, err := dhcpv6.NewMessage(dhcpv6.WithIAPD([4]byte{1, 2, 3, 4}))
 	require.NoError(t, err)
 	resp, err := dhcpv6.NewMessage()
@@ -227,9 +217,8 @@ func TestHandlePrefixNilOptionDefaultsToEmptyHint(t *testing.T) {
 }
 
 func TestHandleMultiHintRegression(t *testing.T) {
-	// Regression test for 7f79c14: a single SOLICIT carrying two hints that
-	// both require a fresh allocation must record (and return) two distinct
-	// leases. The bug kept only the last one allocated.
+	// Two hints requiring fresh allocation in the same SOLICIT must both be
+	// kept, not just the last one allocated.
 	h, err := prefix.Plugin.Setup6("2001:db8::/48", "64")
 	require.NoError(t, err)
 
@@ -247,8 +236,7 @@ func TestHandleMultiHintRegression(t *testing.T) {
 	require.Len(t, iapds, 1)
 	assert.Len(t, iapds[0].Options.Prefixes(), 2, "both hints should have produced a lease")
 
-	// A second SOLICIT re-requesting the exact same two prefixes must renew
-	// both as exact matches, proving both survived in the recorded lease set.
+	// Re-requesting the same two prefixes must renew both, confirming both survived.
 	resp2 := solicitWith(t, h, testDUID(),
 		&dhcpv6.OptIAPrefix{Prefix: hint1},
 		&dhcpv6.OptIAPrefix{Prefix: hint2},
@@ -259,8 +247,7 @@ func TestHandleMultiHintRegression(t *testing.T) {
 }
 
 func TestHandleAllocatorExhaustionMidRequest(t *testing.T) {
-	// A pool exactly the size of one allocation: two distinct hints in the
-	// same request means the second Allocate() call must fail.
+	// Pool sized for exactly one allocation, so the second hint's Allocate() must fail.
 	h, err := prefix.Plugin.Setup6("2001:db8::/64", "64")
 	require.NoError(t, err)
 
@@ -283,12 +270,9 @@ func TestHandleEmptyResponseWhenPoolExhausted(t *testing.T) {
 	h, err := prefix.Plugin.Setup6("2001:db8::/64", "64")
 	require.NoError(t, err)
 
-	// First client takes the only available prefix.
 	first := solicitWith(t, h, testDUID())
 	require.Len(t, first.Options.IAPD()[0].Options.Prefixes(), 1)
 
-	// A second, distinct client has no known leases and the pool is exhausted:
-	// the response must carry StatusNoPrefixAvail and no IAPrefix options.
 	secondDUID := &dhcpv6.DUIDLL{
 		HWType:        dhcpIana.HWTypeEthernet,
 		LinkLayerAddr: net.HardwareAddr{0x11, 0x22, 0x33, 0x44, 0x55, 0x66},
@@ -311,8 +295,6 @@ func TestHandleRenewsExactHintMatch(t *testing.T) {
 	require.Len(t, firstPrefixes, 1)
 	leased := firstPrefixes[0].Prefix
 
-	// Re-request the exact same prefix as an explicit hint: it must be
-	// recognised as an exact match and renewed, not re-allocated.
 	second := solicitWith(t, h, testDUID(), &dhcpv6.OptIAPrefix{Prefix: leased})
 	secondPrefixes := second.Options.IAPD()[0].Options.Prefixes()
 	require.Len(t, secondPrefixes, 1)
@@ -326,8 +308,7 @@ func TestHandleGivesOutRemainingLeaseForZeroIPHint(t *testing.T) {
 	first := solicitWith(t, h, testDUID())
 	require.Len(t, first.Options.IAPD()[0].Options.Prefixes(), 1)
 
-	// An explicit "any" hint (IP set to the zero address, no length) must
-	// still be matched against the already-known lease.
+	// net.IPv6zero with no length is the wire encoding for an unqualified "any" hint.
 	second := solicitWith(t, h, testDUID(), &dhcpv6.OptIAPrefix{Prefix: &net.IPNet{IP: net.IPv6zero}})
 	secondPrefixes := second.Options.IAPD()[0].Options.Prefixes()
 	require.Len(t, secondPrefixes, 1)
@@ -340,25 +321,15 @@ func TestHandleZeroIPHintLengthMismatchAllocatesNew(t *testing.T) {
 	first := solicitWith(t, h, testDUID())
 	require.Len(t, first.Options.IAPD()[0].Options.Prefixes(), 1)
 
-	// An "any" hint that requests a length no known lease has (the pool only
-	// ever hands out /64s) can't be satisfied by an existing lease, so a new
-	// one must be allocated instead.
+	// Requests a /70 while the pool only ever hands out /64s, so no known lease can match.
 	second := solicitWith(t, h, testDUID(), &dhcpv6.OptIAPrefix{
 		Prefix: &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(70, 128)},
 	})
 	secondPrefixes := second.Options.IAPD()[0].Options.Prefixes()
 	require.Len(t, secondPrefixes, 1, "a fresh /64 should have been allocated")
 
-	// The client now has two distinct known leases. Two more length-only
-	// "any" hints in one request: the give-out loop for a satisfied hint
-	// never breaks out early, so the *first* hint's inner loop walks every
-	// not-yet-given-out known lease and claims all of them (both existing
-	// leases end up attached to hintIdx 0), exercising the "already given
-	// out this exchange" skip (178-179) along the way. The second hint then
-	// finds nothing left to give out and falls through to a fresh
-	// allocation instead. This means a single unqualified hint can end up
-	// absorbing more than one existing lease - a quirk of the current
-	// no-break loop, pinned here rather than assumed away.
+	// A non-breaking give-out loop lets the first hint absorb both known leases,
+	// leaving the second to fall through to a fresh allocation - a quirk pinned here, not fixed.
 	third := solicitWith(t, h, testDUID(),
 		&dhcpv6.OptIAPrefix{Prefix: &net.IPNet{IP: net.IPv6zero}},
 		&dhcpv6.OptIAPrefix{Prefix: &net.IPNet{IP: net.IPv6zero}},
@@ -367,36 +338,28 @@ func TestHandleZeroIPHintLengthMismatchAllocatesNew(t *testing.T) {
 	require.Len(t, thirdPrefixes, 3, "both known leases plus one freshly allocated prefix")
 }
 
-// A client that already holds a lease and then sends an IA_PD hint whose
-// prefix is absent on the wire (the decoder yields Prefix == nil for a zero
-// prefix-length) used to crash the handler with a nil dereference in the
-// lease-matching pass. It must behave like an absent hint instead.
+// The decoder yields Prefix == nil for a zero-length hint on the wire; the
+// matcher must treat it like an absent hint rather than dereference it.
 func TestHandleNilHintPrefixWithExistingLease(t *testing.T) {
 	h, err := prefix.Plugin.Setup6("2001:db8::/48", "64")
 	require.NoError(t, err)
 
 	duid := testDUID()
 
-	// First exchange: acquire a lease so the matching passes have known
-	// leases to walk.
 	first := solicitWith(t, h, duid)
 	require.NotEmpty(t, first.Options.IAPD()[0].Options.Prefixes())
 
-	// Second exchange: same client, one nil-prefix hint.
 	var second *dhcpv6.Message
 	require.NotPanics(t, func() {
 		second = solicitWith(t, h, duid, &dhcpv6.OptIAPrefix{Prefix: nil})
 	})
 
-	// The reply carries a usable prefix rather than a status failure.
 	iapds := second.Options.IAPD()
 	require.Len(t, iapds, 1)
 	assert.NotEmpty(t, iapds[0].Options.Prefixes())
 }
 
-// TestSetupPrefixOptionalArguments covers the argument shapes that must be
-// accepted: the lease duration is positional and optional, and the sweep
-// argument may appear with or without it.
+// Lease duration is positional and optional; sweep may appear with or without it.
 func TestSetupPrefixOptionalArguments(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -415,10 +378,8 @@ func TestSetupPrefixOptionalArguments(t *testing.T) {
 	}
 }
 
-// releaseWith runs one RELEASE listing the given prefixes in a single IA_PD and
-// returns the Reply the plugin filled in. The server builds the Reply and sends
-// it whatever the chain returns, so the handler must hand it back rather than
-// ending the chain.
+// The plugin must hand the Reply back rather than ending the chain, since the
+// server sends whatever the chain ultimately returns.
 func releaseWith(t *testing.T, handle func(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool), duid dhcpv6.DUID, iaid [4]byte, prefixes ...*dhcpv6.OptIAPrefix) *dhcpv6.Message {
 	t.Helper()
 
@@ -436,7 +397,6 @@ func releaseWith(t *testing.T, handle func(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCP
 	return result.(*dhcpv6.Message)
 }
 
-// iapdStatus reads the status code option of the IA_PD answering iaid.
 func iapdStatus(t *testing.T, msg *dhcpv6.Message, iaid [4]byte) *dhcpv6.OptStatusCode {
 	t.Helper()
 
@@ -452,12 +412,10 @@ func iapdStatus(t *testing.T, msg *dhcpv6.Message, iaid [4]byte) *dhcpv6.OptStat
 	return nil
 }
 
-// TestHandleReleaseFreesAndAnswersSuccess covers RFC 8415 §18.3.7 for a
-// binding the server holds: the prefix goes back to the pool, the IA_PD is
-// answered with Success, and the Reply carries a message-level Success.
+// RFC 8415 §18.3.7: releasing a held binding frees the prefix and answers
+// Success at both IA_PD and message level.
 func TestHandleReleaseFreesAndAnswersSuccess(t *testing.T) {
-	// A pool of exactly one prefix, so the release is the only thing that can
-	// make the second allocation possible.
+	// Pool holds exactly one prefix, so only the release can free room for the second allocation.
 	h, err := prefix.Plugin.Setup6("2001:db8::/64", "64")
 	require.NoError(t, err)
 
@@ -474,7 +432,6 @@ func TestHandleReleaseFreesAndAnswersSuccess(t *testing.T) {
 	require.NotNil(t, status, "the Reply itself must carry a status code")
 	assert.Equal(t, dhcpIana.StatusSuccess, status.StatusCode)
 
-	// The prefix is genuinely back: a different client can take it.
 	other := &dhcpv6.DUIDLL{
 		HWType:        dhcpIana.HWTypeEthernet,
 		LinkLayerAddr: net.HardwareAddr{0x11, 0x22, 0x33, 0x44, 0x55, 0x66},
@@ -482,12 +439,8 @@ func TestHandleReleaseFreesAndAnswersSuccess(t *testing.T) {
 	assert.Len(t, solicitWith(t, h, other).Options.IAPD()[0].Options.Prefixes(), 1)
 }
 
-// TestHandleReleaseAnswersNoBinding covers the IA_PDs the server holds nothing
-// for. NoBinding is what tells the client to stop retrying, so every one of
-// these shapes has to produce it rather than a bare Success. NoBinding also
-// carries no message text: a sender can ask for it over and over just by
-// releasing prefixes it never held, and RFC 8415 §21.13 leaves the text
-// optional, so it must not become an amplification vector.
+// NoBinding tells the client to stop retrying; RFC 8415 §21.13 leaves its text
+// optional, and leaving it empty avoids an amplification vector for repeated releases of unheld prefixes.
 func TestHandleReleaseAnswersNoBinding(t *testing.T) {
 	_, someoneElses, err := net.ParseCIDR("2001:db8:0:ffff::/64")
 	require.NoError(t, err)
@@ -512,15 +465,14 @@ func TestHandleReleaseAnswersNoBinding(t *testing.T) {
 			assert.Equal(t, dhcpIana.StatusNoBinding, status.StatusCode)
 			assert.Empty(t, status.StatusMessage, "NoBinding must carry no message text")
 
-			// The lease the client did not release must survive.
+			// Confirms the release didn't free a lease it didn't actually match.
 			assert.Len(t, solicitWith(t, h, duid).Options.IAPD()[0].Options.Prefixes(), 1)
 		})
 	}
 }
 
-// TestHandleDeclineIsIgnored covers RFC 8415 §18.3.8: DECLINE is about IA_NA
-// and IA_TA addresses a client found in use on the link, so a delegating router
-// answers with no IA_PD at all rather than renewing what the client holds.
+// RFC 8415 §18.3.8: DECLINE concerns IA_NA/IA_TA addresses in use on the
+// link, not prefixes, so a delegating router returns no IA_PD at all.
 func TestHandleDeclineIsIgnored(t *testing.T) {
 	h, err := prefix.Plugin.Setup6("2001:db8::/48", "64")
 	require.NoError(t, err)
@@ -542,11 +494,8 @@ func TestHandleDeclineIsIgnored(t *testing.T) {
 	assert.Empty(t, result.(*dhcpv6.Message).Options.IAPD(), "a decline is not about prefixes")
 }
 
-// TestHandleCapsIAPDsAnsweredPerMessage pins the per-message IA_PD cap: a
-// SOLICIT carrying more IA_PDs than the plugin will answer for gets back at
-// most 8 IA_PD options, not one for every IA_PD it sent. The per-client cap
-// is raised well out of the way so this exercises the per-message limit
-// alone, not the pool or the per-client cap.
+// Per-message IA_PD cap is 8; max-prefixes:20 keeps the per-client cap out of
+// the way so only the message cap is exercised.
 func TestHandleCapsIAPDsAnsweredPerMessage(t *testing.T) {
 	h, err := prefix.Plugin.Setup6("2001:db8::/60", "64", "1h", "max-prefixes:20")
 	require.NoError(t, err)
@@ -555,9 +504,8 @@ func TestHandleCapsIAPDsAnsweredPerMessage(t *testing.T) {
 	assert.Len(t, resp.Options.IAPD(), 8, "the reply must not grow past the per-message cap")
 }
 
-// TestHandleReleaseCapsIAPDsAnsweredPerMessage is the RELEASE counterpart: the
-// per-message cap sits ahead of both message types, so a RELEASE listing more
-// IA_PDs than the cap allows is answered the same way.
+// The per-message cap applies before the SOLICIT/RELEASE branch, so RELEASE
+// is capped the same way.
 func TestHandleReleaseCapsIAPDsAnsweredPerMessage(t *testing.T) {
 	h, err := prefix.Plugin.Setup6("2001:db8::/48", "64")
 	require.NoError(t, err)
@@ -566,13 +514,10 @@ func TestHandleReleaseCapsIAPDsAnsweredPerMessage(t *testing.T) {
 	assert.Len(t, resp.Options.IAPD(), 8, "the reply must not grow past the per-message cap")
 }
 
-// TestHandleCapsNewAllocationsPerClient pins the per-client cap: with the
-// default of four, a client asking for eight fresh prefixes in one message
-// gets four of them and four NoPrefixAvail answers, not eight prefixes from a
-// pool that had room for all of them.
+// Default per-client cap is 4: 8 requested in one message yields 4 grants and
+// 4 NoPrefixAvail, despite pool room for all eight.
 func TestHandleCapsNewAllocationsPerClient(t *testing.T) {
-	// A /61 carved into /64s holds exactly eight prefixes, so the pool itself
-	// could serve every request; only the per-client cap should refuse any.
+	// A /61 of /64s holds exactly eight prefixes, so pool size can't be why any request is refused.
 	h, err := prefix.Plugin.Setup6("2001:db8::/61", "64")
 	require.NoError(t, err)
 
@@ -593,10 +538,8 @@ func TestHandleCapsNewAllocationsPerClient(t *testing.T) {
 	assert.Equal(t, 4, refused, "the rest should be refused with NoPrefixAvail")
 }
 
-// TestHandleCapsNewAllocationsAcrossMessages pins that the per-client cap
-// holds across separate exchanges, not just within one message: a client
-// that already holds the default maximum is refused a further prefix in a
-// later SOLICIT, while a different client is unaffected.
+// Confirms the per-client cap persists across separate exchanges, not just
+// within one message.
 func TestHandleCapsNewAllocationsAcrossMessages(t *testing.T) {
 	h, err := prefix.Plugin.Setup6("2001:db8::/59", "64")
 	require.NoError(t, err)
@@ -609,8 +552,8 @@ func TestHandleCapsNewAllocationsAcrossMessages(t *testing.T) {
 	}
 	require.Equal(t, 4, held, "the client must hold the default maximum before the second exchange")
 
-	// A hint naming a prefix the client does not hold cannot be satisfied by
-	// renewal, so it must go through allocateForUnsatisfied and hit the cap.
+	// A hint the client doesn't hold can't be satisfied by renewal, so it goes
+	// through allocateForUnsatisfied and hits the cap.
 	_, freshBlock, err := net.ParseCIDR("2001:db8:0:1f::/64")
 	require.NoError(t, err)
 	second := solicitWith(t, h, duid, &dhcpv6.OptIAPrefix{Prefix: freshBlock})
@@ -621,7 +564,6 @@ func TestHandleCapsNewAllocationsAcrossMessages(t *testing.T) {
 	require.NotNil(t, status)
 	assert.Equal(t, dhcpIana.StatusNoPrefixAvail, status.StatusCode)
 
-	// A different client, same pool, is not affected by the first one's cap.
 	other := &dhcpv6.DUIDLL{
 		HWType:        dhcpIana.HWTypeEthernet,
 		LinkLayerAddr: net.HardwareAddr{0x11, 0x22, 0x33, 0x44, 0x55, 0x66},
@@ -629,9 +571,7 @@ func TestHandleCapsNewAllocationsAcrossMessages(t *testing.T) {
 	assert.Len(t, solicitWith(t, h, other).Options.IAPD()[0].Options.Prefixes(), 1)
 }
 
-// TestHandleRenewalIsNotCapped pins that renewing prefixes already held is not
-// counted as a new allocation: a client at its maximum gets every one of them
-// back when it re-hints at exactly what it holds, rather than NoPrefixAvail.
+// Renewing already-held prefixes must not count against the cap, even at the maximum.
 func TestHandleRenewalIsNotCapped(t *testing.T) {
 	h, err := prefix.Plugin.Setup6("2001:db8::/59", "64", "1h", "max-prefixes:4")
 	require.NoError(t, err)
@@ -650,9 +590,7 @@ func TestHandleRenewalIsNotCapped(t *testing.T) {
 	assert.Len(t, iapds[0].Options.Prefixes(), 4, "renewing all four held prefixes must not be refused")
 }
 
-// TestHandleMaxPrefixesOneIsHonoured pins that an explicit max-prefixes:1 is
-// honoured end to end: the first prefix is granted, and a second is refused
-// even though the pool still has room.
+// Pool still has room for a second prefix; only the explicit max-prefixes:1 refuses it.
 func TestHandleMaxPrefixesOneIsHonoured(t *testing.T) {
 	h, err := prefix.Plugin.Setup6("2001:db8::/62", "64", "1h", "max-prefixes:1")
 	require.NoError(t, err)
@@ -672,12 +610,10 @@ func TestHandleMaxPrefixesOneIsHonoured(t *testing.T) {
 	assert.Equal(t, dhcpIana.StatusNoPrefixAvail, status.StatusCode)
 }
 
-// TestHandleDUIDLengthCap pins the client-DUID length cap: a DUID right at
-// the RFC 8415 §11.1 boundary is served normally, and one octet over it is
-// dropped before the message-type switch, for both a SOLICIT and a RELEASE.
+// RFC 8415 §11.1 DUID length boundary: at the limit is served normally; one
+// octet over is dropped before the message-type switch, for both SOLICIT and RELEASE.
 func TestHandleDUIDLengthCap(t *testing.T) {
-	// 130 mirrors the plugin's unexported maxDUIDLength: the 128 octets
-	// RFC 8415 §11.1 allows plus the 2-octet DUID type code.
+	// 130 = 128-octet RFC 8415 §11.1 limit + 2-octet DUID type code (mirrors maxDUIDLength).
 	const maxDUIDLength = 130
 
 	t.Run("at the boundary is served normally", func(t *testing.T) {
