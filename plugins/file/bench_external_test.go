@@ -5,6 +5,7 @@
 package file_test
 
 import (
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -70,6 +71,67 @@ func BenchmarkLoadDHCPv4Records(b *testing.B) {
 
 	for b.Loop() {
 		if _, err := file.LoadDHCPv4Records(path); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// benchLeaseFileClientID writes a 10k-record DHCPv4 lease file keyed on
+// option 61 client identifiers and returns its path together with the raw
+// identifier bytes in the order written.
+func benchLeaseFileClientID(b *testing.B) (string, [][]byte) {
+	b.Helper()
+
+	const n = 10_000
+	ids := make([][]byte, n)
+	var sb strings.Builder
+	for i := range ids {
+		id := []byte{0x01, byte(i >> 16), byte(i >> 8), byte(i), 0x00, 0x01}
+		ids[i] = id
+		fmt.Fprintf(&sb, "0x%s 10.%d.%d.%d\n", hex.EncodeToString(id), byte(i>>16), byte(i>>8), byte(i))
+	}
+
+	path := filepath.Join(b.TempDir(), "leases.txt")
+	if err := os.WriteFile(path, []byte(sb.String()), 0o600); err != nil {
+		b.Fatal(err)
+	}
+	return path, ids
+}
+
+// BenchmarkHandler4LookupClientID mirrors BenchmarkHandler4Lookup for the
+// key:client-id path, so the new lookup mode has its own numbers.
+func BenchmarkHandler4LookupClientID(b *testing.B) {
+	b.ReportAllocs()
+	logger.WithNoStdOutErr()
+
+	path, ids := benchLeaseFileClientID(b)
+	h4, err := file.Plugin.Setup4(path, "key:client-id")
+	if err != nil {
+		b.Fatal(err)
+	}
+	req := &dhcpv4.DHCPv4{}
+	req.UpdateOption(dhcpv4.OptClientIdentifier(ids[len(ids)/2]))
+
+	for b.Loop() {
+		resp := &dhcpv4.DHCPv4{}
+		h4(req, resp)
+	}
+}
+
+// BenchmarkLoadDHCPv4RecordsClientID mirrors BenchmarkLoadDHCPv4Records for
+// the key:client-id path. There is no exported per-mode loader, only
+// LoadDHCPv4Records's fixed MAC keying, so this goes through Setup4 instead;
+// Setup4's own overhead (arg parsing, one log line) is fixed cost paid once
+// per iteration by both benchmarks and negligible next to parsing 10k lines,
+// so it doesn't skew the mac-vs-client-id comparison.
+func BenchmarkLoadDHCPv4RecordsClientID(b *testing.B) {
+	b.ReportAllocs()
+	logger.WithNoStdOutErr()
+
+	path, _ := benchLeaseFileClientID(b)
+
+	for b.Loop() {
+		if _, err := file.Plugin.Setup4(path, "key:client-id"); err != nil {
 			b.Fatal(err)
 		}
 	}
