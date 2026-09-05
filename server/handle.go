@@ -5,8 +5,10 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"sync"
 
 	"golang.org/x/net/ipv4"
@@ -16,6 +18,7 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv6"
 
 	"github.com/coredhcp/coredhcp/events"
+	"github.com/coredhcp/coredhcp/handler"
 )
 
 // sendEthernetFn is swappable so the layer-2 reply path can be exercised in
@@ -43,6 +46,53 @@ func (l *listener4) ifaceName(oobIdx int) string {
 		return l.Name
 	}
 	return l.ifaces.name(oobIdx)
+}
+
+// infoAddrPort converts a socket address for handler.RequestInfo. Unlike
+// peerAddrPort, which feeds the events an operator reads, this drops the IPv6
+// zone: a plugin comparing a link-local peer against a configured address, or
+// keying a rate limiter on it, wants fe80::1 rather than fe80::1%eth0, and
+// the interface travels in its own field. A local address that is not UDP
+// comes back as the zero value; only a test double produces one.
+func infoAddrPort(a net.Addr) netip.AddrPort {
+	ua, ok := a.(*net.UDPAddr)
+	if !ok {
+		return netip.AddrPort{}
+	}
+	ap := peerAddrPort(ua)
+	return netip.AddrPortFrom(ap.Addr().WithZone(""), ap.Port())
+}
+
+// requestContext is what the DHCPv6 plugin chain is called with: a context
+// carrying the request's handler.RequestInfo, or a background one when no
+// plugin in the chain reads it. Filling the RequestInfo costs an interface
+// lookup and a couple of allocations per packet, so a chain of plain handlers
+// does not pay for it.
+func (l *listener6) requestContext(oob *ipv6.ControlMessage, peer *net.UDPAddr) context.Context {
+	if !l.wantsCtx {
+		return context.Background()
+	}
+	idx := oobIfIndex6(oob)
+	return handler.WithRequestInfo(context.Background(), handler.RequestInfo{
+		Interface: l.ifaceName(idx),
+		IfIndex:   replyIfIndex(l.Index, idx),
+		Peer:      infoAddrPort(peer),
+		Local:     infoAddrPort(l.LocalAddr()),
+	})
+}
+
+// requestContext is the DHCPv4 counterpart.
+func (l *listener4) requestContext(oob *ipv4.ControlMessage, src *net.UDPAddr) context.Context {
+	if !l.wantsCtx {
+		return context.Background()
+	}
+	idx := oobIfIndex4(oob)
+	return handler.WithRequestInfo(context.Background(), handler.RequestInfo{
+		Interface: l.ifaceName(idx),
+		IfIndex:   replyIfIndex(l.Index, idx),
+		Peer:      infoAddrPort(src),
+		Local:     infoAddrPort(l.LocalAddr()),
+	})
 }
 
 // startReport begins the event for one packet, or returns nil when no
@@ -87,7 +137,7 @@ func (l *listener6) HandleMsg6(buf []byte, oob *ipv6.ControlMessage, peer *net.U
 	}
 
 	rep.chainStart()
-	resp, stoppedAt := applyHandlers6(l.chain, req, resp)
+	resp, stoppedAt := applyHandlers6(l.requestContext(oob, peer), l.chain, req, resp)
 	rep.chainDone6(l.chain, stoppedAt)
 	if resp == nil {
 		log.Print("MainHandler6: dropping request because response is nil")
@@ -144,7 +194,7 @@ func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, src *net.UD
 	}
 
 	rep.chainStart()
-	resp, stoppedAt := applyHandlers4(l.chain, req, resp)
+	resp, stoppedAt := applyHandlers4(l.requestContext(oob, src), l.chain, req, resp)
 	rep.chainDone4(l.chain, stoppedAt)
 	if takesNoReply4(req.MessageType()) {
 		// The chain has had its say; whatever it built goes nowhere. This
