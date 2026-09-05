@@ -27,8 +27,7 @@ import (
 
 var log = logger.GetLogger("server")
 
-// conn6 is the subset of *ipv6.PacketConn the dispatch path uses, split out
-// so it can be exercised without a real socket.
+// The subset of *ipv6.PacketConn the dispatch path uses, so a test needs no socket.
 type conn6 interface {
 	ReadFrom(b []byte) (int, *ipv6.ControlMessage, net.Addr, error)
 	WriteTo(b []byte, cm *ipv6.ControlMessage, dst net.Addr) (int, error)
@@ -36,8 +35,7 @@ type conn6 interface {
 	Close() error
 }
 
-// conn4 is the subset of *ipv4.PacketConn the dispatch path uses, split out
-// so it can be exercised without a real socket.
+// The subset of *ipv4.PacketConn the dispatch path uses, so a test needs no socket.
 type conn4 interface {
 	ReadFrom(b []byte) (int, *ipv4.ControlMessage, net.Addr, error)
 	WriteTo(b []byte, cm *ipv4.ControlMessage, dst net.Addr) (int, error)
@@ -51,9 +49,8 @@ type listener6 struct {
 	chain    []plugins.Link6
 	observer events.Observer
 	ifaces   ifaceCache
-	// wantsCtx records, once at startup, whether any plugin in the chain
-	// reads the request context. Answering it per packet would mean walking
-	// the whole chain before running any of it.
+	// Answered once at startup: per packet it would mean walking the whole
+	// chain before running any of it.
 	wantsCtx bool
 }
 
@@ -67,24 +64,13 @@ type listener4 struct {
 }
 
 // ifaceCache maps interface indexes to names for one listener.
-//
-// A listener that is not bound to an interface learns which one a packet came
-// in on from the socket's control message, and that carries only the index.
-// net.InterfaceByIndex is a netlink dump on Linux, far too expensive to run
-// per packet, so the answer is kept for the life of the listener. An
-// interface renamed while the server runs keeps the name it had when it was
-// first seen: a stale label in the observer is a better trade than a syscall
-// on the packet path, and interfaces are not renamed under a running DHCP
-// server in practice.
-//
-// The cache is only ever consulted when an observer is attached.
+// net.InterfaceByIndex is a netlink dump on Linux, too expensive per packet, so
+// an interface renamed under a running server keeps the name it was first seen with.
 type ifaceCache struct {
 	names sync.Map // int index -> string name
 }
 
-// name resolves an interface index, empty for index 0 or an index that no
-// longer exists. A failed lookup is remembered too, so a packet from a
-// vanished interface does not retry the syscall on every datagram.
+// A failed lookup is cached too, so a vanished interface is not retried per packet.
 func (c *ifaceCache) name(idx int) string {
 	if idx == 0 {
 		return ""
@@ -100,9 +86,8 @@ func (c *ifaceCache) name(idx int) string {
 	return name
 }
 
-// The socket constructors are swappable so socket-setup error paths can be
-// reached in tests without privileges. They hand back a net.PacketConn rather
-// than the *net.UDPConn the dhcp library returns, which is what lets a test
+// Swappable so socket-setup error paths are reachable without privileges. The
+// net.PacketConn return, not the library's *net.UDPConn, is what lets a test
 // substitute a socket whose Close it can observe.
 var (
 	newUDP4 = newIPv4UDPConn
@@ -110,8 +95,8 @@ var (
 )
 
 func newIPv4UDPConn(zone string, a *net.UDPAddr) (net.PacketConn, error) {
-	// Returning server4.NewIPv4UDPConn's result directly would put a typed
-	// nil pointer in the interface on the error path, and that is not nil.
+	// Returning the result directly would put a typed nil in the interface on
+	// the error path, and a typed nil is not nil.
 	c, err := server4.NewIPv4UDPConn(zone, a)
 	if err != nil {
 		return nil, err
@@ -127,18 +112,15 @@ func newIPv6UDPConn(zone string, a *net.UDPAddr) (net.PacketConn, error) {
 	return c, nil
 }
 
-// listener is one bound socket: a read loop that runs until the socket is
-// closed, and the Close that ends it.
+// listener is one bound socket: a read loop, and the Close that ends it.
 type listener interface {
 	io.Closer
 
 	Serve() error
 }
 
-// errNoListeners is what Start reports when the configuration asks for no
-// socket at all, which `listen: []` does. Binding nothing and then sitting in
-// Wait looks like a running server from the outside, so it is refused here
-// instead.
+// `listen: []` binds nothing, and a server that binds nothing then sits in
+// Wait looks alive from the outside, so it is refused up front.
 var errNoListeners = errors.New("no listen addresses configured for DHCPv6 or DHCPv4")
 
 // Servers contains state for a running server (with possibly multiple interfaces/listeners)
@@ -146,32 +128,21 @@ type Servers struct {
 	listeners []listener
 	errors    chan error
 	observer  events.Observer
-	// running counts the Serve goroutines that have been started, so a
-	// failed Start can wait for the ones it already launched.
+	// Counts started Serve goroutines, so a failed Start can join them.
 	running sync.WaitGroup
 }
 
 // Option configures Start.
 type Option func(*Servers)
 
-// WithObserver reports what the server does to o: one events.Listener per
-// socket it binds, one events.Plugin per plugin it loaded, and one
-// events.Request for every datagram it handles, whatever became of it. o must
-// be safe for concurrent use and must not block, see events.Observer.
-//
-// The default is no observer, which is what the server has always done and
-// costs a nil check per packet.
+// WithObserver reports every listener, plugin and handled datagram to o, which
+// must be safe for concurrent use and must not block. See events.Observer.
 func WithObserver(o events.Observer) Option {
 	return func(s *Servers) { s.observer = o }
 }
 
-// reportPlugins names the plugins in each chain, in chain order, DHCPv6 first
-// to match the order the listeners start in below. A plugin configured twice
-// is reported twice, since it is two links in the chain.
-//
-// The arguments go through config.RedactArgs first: an observer such as the
-// terminal UI puts them on screen, and a plugin's argument list is where a
-// Redis password or a NetBox token is written.
+// Arguments go through config.RedactArgs first: an observer puts them on
+// screen, and that list is where a Redis password or NetBox token is written.
 func (s *Servers) reportPlugins(chains *plugins.Chains) {
 	if s.observer == nil {
 		return
@@ -184,9 +155,7 @@ func (s *Servers) reportPlugins(chains *plugins.Chains) {
 	}
 }
 
-// reportListener announces a socket the server just bound. zone is the
-// interface from the configured address, empty when the listener is not bound
-// to one.
+// zone is empty when the listener is not bound to an interface.
 func (s *Servers) reportListener(family events.Family, addr net.Addr, zone string) {
 	if s.observer == nil {
 		return
@@ -200,10 +169,8 @@ func listen4(a *net.UDPAddr) (*listener4, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The bind succeeded, so from here on this socket is ours and nothing
-	// else holds a reference to it: every error path below has to close it or
-	// the descriptor stays open for the life of the process. Disarmed once
-	// the listener reaches the caller, who owns it from then on.
+	// Nothing else holds this socket yet, so every error path below has to
+	// close it. Disarmed once the caller takes ownership of the listener.
 	handedOver := false
 	defer func() {
 		if !handedOver {
@@ -220,8 +187,7 @@ func listen4(a *net.UDPAddr) (*listener4, error) {
 		}
 		l4.Interface = *ifi
 	} else {
-		// When not bound to an interface, we need the information in each
-		// packet to know which interface it came on
+		// Unbound, so each packet has to say which interface it came in on.
 		err = pc.SetControlMessage(ipv4.FlagInterface, true)
 		if err != nil {
 			return nil, err
@@ -244,8 +210,7 @@ func listen6(a *net.UDPAddr) (*listener6, error) {
 	if err != nil {
 		return nil, err
 	}
-	// See listen4: the socket is ours the moment the bind returns, and only
-	// the caller that receives the listener takes it off our hands.
+	// See listen4.
 	handedOver := false
 	defer func() {
 		if !handedOver {
@@ -262,8 +227,7 @@ func listen6(a *net.UDPAddr) (*listener6, error) {
 		}
 		l6.Interface = *ifi
 	} else {
-		// When not bound to an interface, we need the information in each
-		// packet to know which interface it came on
+		// Unbound, so each packet has to say which interface it came in on.
 		err = pc.SetControlMessage(ipv6.FlagInterface, true)
 		if err != nil {
 			return nil, err
@@ -280,9 +244,8 @@ func listen6(a *net.UDPAddr) (*listener6, error) {
 	return &l6, nil
 }
 
-// countAddresses is how many sockets Start will try to bind, across both
-// families. It sizes the errors channel, which has to hold one result per
-// Serve goroutine so none of them can block on the send.
+// Sizes the errors channel, which needs one slot per Serve goroutine so that
+// none of them can block on the send.
 func countAddresses(c *config.Config) int {
 	n := 0
 	if c.Server6 != nil {
@@ -294,14 +257,8 @@ func countAddresses(c *config.Config) int {
 	return n
 }
 
-// Start will start the server asynchronously. See `Wait` to wait until
-// the execution ends.
-//
-// It returns an error when the configuration names no address to listen on,
-// and when any single socket fails to bind: a server that came up on half the
-// addresses it was told about is not what the operator asked for. Sockets that
-// were already open are closed and their read loops joined before Start
-// returns, so nothing outlives a failed call.
+// Start starts the server asynchronously; see Wait for the end of it. Binding
+// is all or nothing, and a failed call leaves no socket or goroutine behind.
 func Start(config *config.Config, opts ...Option) (*Servers, error) {
 	chains, err := plugins.LoadChains(config)
 	if err != nil {
@@ -312,10 +269,8 @@ func Start(config *config.Config, opts ...Option) (*Servers, error) {
 		return nil, errNoListeners
 	}
 	srv := Servers{
-		// One slot per socket. An unbuffered channel used to strand every
-		// Serve goroutine that had already been started when a later bind
-		// failed: cleanup closed its socket, Serve returned nil, and the
-		// send had nobody to hand it to.
+		// One slot per socket, so no Serve goroutine can block on the send
+		// when a later bind fails and cleanup closes its socket.
 		errors: make(chan error, total),
 	}
 	for _, opt := range opts {
@@ -334,9 +289,8 @@ func Start(config *config.Config, opts ...Option) (*Servers, error) {
 	return &srv, nil
 }
 
-// start6 binds every configured DHCPv6 address and serves on it, stopping at
-// the first one that fails. Sockets opened before that stay in s.listeners so
-// the caller can close them.
+// Stops at the first bind that fails; sockets opened before it stay in
+// s.listeners for the caller to close.
 func (s *Servers) start6(c *config.Config, chains *plugins.Chains) error {
 	if c.Server6 == nil {
 		return nil
@@ -359,7 +313,6 @@ func (s *Servers) start6(c *config.Config, chains *plugins.Chains) error {
 	return nil
 }
 
-// start4 is start6 for the DHCPv4 chain.
 func (s *Servers) start4(c *config.Config, chains *plugins.Chains) error {
 	if c.Server4 == nil {
 		return nil
@@ -382,8 +335,6 @@ func (s *Servers) start4(c *config.Config, chains *plugins.Chains) error {
 	return nil
 }
 
-// serve runs one listener's read loop until its socket closes and reports how
-// it ended.
 func (s *Servers) serve(l listener) {
 	s.running.Add(1)
 	go func() {
@@ -392,31 +343,23 @@ func (s *Servers) serve(l listener) {
 	}()
 }
 
-// shutdown closes every listener and returns once all their read loops have.
-// Start uses it on the way out of a failed bind, which is why it is
-// synchronous: the goroutines must be gone by the time the caller sees the
-// error, not shortly after.
+// Synchronous on purpose: a failed Start must not leave a read loop running
+// after the caller has the error.
 func (s *Servers) shutdown() {
 	s.Close()
 	s.running.Wait()
 }
 
-// Wait waits until the end of the execution of the server. It returns nil
-// when every listener was closed on purpose, and the joined errors of the
-// ones that failed otherwise.
-//
-// With no listeners there is nothing to wait for and it returns immediately.
-// Start never produces such a Servers, but Wait is exported and must not be a
-// way to hang or to panic.
+// Wait blocks until the server stops. It returns nil when every listener was
+// closed on purpose, and the joined errors of the ones that failed otherwise.
 func (s *Servers) Wait() error {
 	log.Debug("Waiting")
 	if len(s.listeners) == 0 {
 		return nil
 	}
 	errs := make([]error, 0, len(s.listeners))
-	// The first listener to stop, for whatever reason, takes the rest with
-	// it: a server missing one of its sockets is not serving the network it
-	// was configured for.
+	// The first listener to stop takes the rest with it: a server missing one
+	// socket is not serving the network it was configured for.
 	errs = append(errs, <-s.errors)
 	s.Close()
 	for i := 1; i < len(s.listeners); i++ {
@@ -425,9 +368,8 @@ func (s *Servers) Wait() error {
 	return errors.Join(errs...)
 }
 
-// Close closes all listening connections. It is safe to call more than once:
-// a shutdown signal and Wait both close the listeners, and the second close
-// of a connection is not an error worth reporting.
+// Close closes all listening connections. Safe to call more than once: a
+// signal and Wait both close the listeners.
 func (s *Servers) Close() {
 	for _, srv := range s.listeners {
 		if srv != nil {

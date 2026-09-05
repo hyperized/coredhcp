@@ -22,10 +22,8 @@ import (
 	"github.com/coredhcp/coredhcp/plugins"
 )
 
-// ctxChain4 turns context-aware handlers into a DHCPv4 chain that declares
-// itself as reading the request context, named the way chain4 names its
-// links. chain4 cannot be reused here: it wraps a plain handler.Handler4 in
-// an adapter that throws the context away before the handler ever sees it.
+// ctxChain4 exists because chain4 wraps a plain handler.Handler4 and drops
+// the context before the handler ever sees it.
 func ctxChain4(handlers ...handler.Handler4Ctx) []plugins.Link4 {
 	chain := make([]plugins.Link4, 0, len(handlers))
 	for i, h := range handlers {
@@ -34,7 +32,6 @@ func ctxChain4(handlers ...handler.Handler4Ctx) []plugins.Link4 {
 	return chain
 }
 
-// ctxChain6 is ctxChain4 for the DHCPv6 chain.
 func ctxChain6(handlers ...handler.Handler6Ctx) []plugins.Link6 {
 	chain := make([]plugins.Link6, 0, len(handlers))
 	for i, h := range handlers {
@@ -43,10 +40,8 @@ func ctxChain6(handlers ...handler.Handler6Ctx) []plugins.Link6 {
 	return chain
 }
 
-// A listener bound to an interface is authoritative about it: whatever the
-// handler sees has to match l.Index/l.Name, not anything a control message
-// might claim, and the peer/local addresses it sees have to be the ones the
-// packet actually carried.
+// A bound listener is authoritative about its interface: whatever the
+// handler sees must match l.Index/l.Name, not any control message claim.
 func TestRequestContextBoundListener(t *testing.T) {
 	t.Run("dhcpv4", func(t *testing.T) {
 		req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
@@ -96,9 +91,8 @@ func TestRequestContextBoundListener(t *testing.T) {
 	})
 }
 
-// An unbound listener has no interface of its own, so it has to resolve the
-// one the packet arrived on from the control message index, through its
-// ifaceCache.
+// An unbound listener resolves the interface per packet from the control
+// message index, through its ifaceCache.
 func TestRequestContextUnboundListenerResolvesOobIndex(t *testing.T) {
 	loName := loopbackInterfaceName(t)
 	lo, err := net.InterfaceByName(loName)
@@ -138,9 +132,8 @@ func TestRequestContextUnboundListenerResolvesOobIndex(t *testing.T) {
 	})
 }
 
-// An index the host does not recognise, or no longer does, still travels to
-// the plugin as a bare number. Only the name lookup fails; the request is not
-// dropped for it.
+// An unresolvable index still reaches the plugin as a bare number: only the
+// name lookup fails, the request is not dropped for it.
 func TestRequestContextUnresolvableOobIndex(t *testing.T) {
 	t.Run("dhcpv4", func(t *testing.T) {
 		req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
@@ -180,12 +173,8 @@ func TestRequestContextUnresolvableOobIndex(t *testing.T) {
 	})
 }
 
-// A chain loaded the way a plain (non-context) plugin always has keeps
-// working exactly as before. What requestContext hands such a chain cannot be
-// observed through a handler.Handler4/Handler6, since that signature has no
-// context parameter at all: chain4/chain6 wrap one in an adapter that drops
-// whatever it is given. So the context itself is checked directly, the one
-// case in this file a packet cannot reach.
+// A legacy (non-context) chain works unchanged; requestContext's effect on
+// it can't be observed via Handler4/6, so the context itself is checked directly.
 func TestRequestContextLegacyChain(t *testing.T) {
 	t.Run("dhcpv4", func(t *testing.T) {
 		req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
@@ -219,12 +208,8 @@ func TestRequestContextLegacyChain(t *testing.T) {
 	})
 }
 
-// The interface a request arrived on and the zone on the peer's address are
-// two different things. A plugin comparing a link-local peer against a
-// configured address, or keying a map on it, wants it the same way from every
-// interface; Interface is where the interface itself still travels.
-// infoAddrPort's unmapping of a 4-in-6 source belongs to the same code path,
-// so it is covered alongside the zone stripping rather than in its own test.
+// Interface carries interface identity because a peer's zone differs by
+// interface; 4-in-6 unmapping shares this test since it's the same code path.
 func TestRequestContextZoneAndMappedAddresses(t *testing.T) {
 	t.Run("dhcpv6 link-local peer loses its zone", func(t *testing.T) {
 		req := mustMessage6(t, dhcpv6.MessageTypeRequest)
@@ -267,9 +252,8 @@ func TestRequestContextZoneAndMappedAddresses(t *testing.T) {
 	})
 }
 
-// infoAddrPort's own two branches: an address that is not UDP at all, and a
-// UDP address that carries nothing (the typed-nil case: a *net.UDPAddr is
-// still the dynamic type, but there is no address behind it).
+// The nil-UDP case is a typed nil: *net.UDPAddr is still the dynamic type,
+// so infoAddrPort must not just check for a nil interface.
 func TestInfoAddrPort(t *testing.T) {
 	tests := []struct {
 		name string
@@ -285,10 +269,8 @@ func TestInfoAddrPort(t *testing.T) {
 	}
 }
 
-// A connection double whose LocalAddr answers with something other than a
-// *net.UDPAddr is not a real scenario (every real conn4/conn6 is UDP), but it
-// proves Local degrades to the zero value rather than assuming the type,
-// while Peer, built the normal way, is unaffected.
+// No real conn4/conn6 has a non-UDP LocalAddr; this proves Local degrades to
+// the zero value instead of assuming the type, while Peer is unaffected.
 func TestRequestContextNonUDPLocalAddr(t *testing.T) {
 	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
 	req.SetBroadcast()
@@ -309,10 +291,8 @@ func TestRequestContextNonUDPLocalAddr(t *testing.T) {
 	assert.Equal(t, netip.MustParseAddrPort("192.0.2.5:68"), got.Peer)
 }
 
-// The stop/drop contract applyHandlers4/6 already honour for a plain
-// chain holds just as well for a context-aware one: a handler that drops the
-// request still runs, whatever comes after it does not, and nothing reaches
-// the wire.
+// The stop/drop contract applyHandlers4/6 honour for plain chains holds for
+// context-aware ones too: this proves it rather than assuming it.
 func TestContextAwareChainStopAndDrop(t *testing.T) {
 	t.Run("dhcpv4", func(t *testing.T) {
 		req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))

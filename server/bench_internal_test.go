@@ -17,9 +17,8 @@ import (
 	"github.com/coredhcp/coredhcp/handler"
 )
 
-// discardConn4 is a conn4 double whose WriteTo drops every reply instead of
-// recording it, so a benchmark measures HandleMsg4's own cost rather than
-// the bookkeeping fakeConn4 does for assertions.
+// discardConn4 is a conn4 double whose WriteTo drops replies, so a
+// benchmark measures HandleMsg4's own cost, not fakeConn4's bookkeeping.
 type discardConn4 struct{}
 
 func (discardConn4) ReadFrom([]byte) (int, *ipv4.ControlMessage, net.Addr, error) {
@@ -29,7 +28,6 @@ func (discardConn4) WriteTo([]byte, *ipv4.ControlMessage, net.Addr) (int, error)
 func (discardConn4) LocalAddr() net.Addr                                         { return &net.UDPAddr{} }
 func (discardConn4) Close() error                                                { return nil }
 
-// discardConn6 mirrors discardConn4 for the conn6 interface.
 type discardConn6 struct{}
 
 func (discardConn6) ReadFrom([]byte) (int, *ipv6.ControlMessage, net.Addr, error) {
@@ -43,14 +41,10 @@ func (discardConn6) Close() error                                               
 // unchanged, giving HandleMsg4 the shortest realistic plugin path.
 func passthrough4(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) { return resp, false }
 
-// passthrough6 mirrors passthrough4 for the DHCPv6 chain.
 func passthrough6(_, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) { return resp, false }
 
-// BenchmarkHandleMsg4Discover dispatches a broadcast DHCPDISCOVER through
-// HandleMsg4 end to end: parse, plugin chain, destination decision, and
-// write. HandleMsg4 always returns its input buffer to bufpool, so each
-// iteration takes a fresh Get-derived buffer exactly the way Serve() does -
-// that pool round trip is part of the real per-packet cost being measured.
+// BenchmarkHandleMsg4Discover measures full dispatch including the bufpool
+// round trip HandleMsg4 does every packet, the same way Serve() does.
 func BenchmarkHandleMsg4Discover(b *testing.B) {
 	b.ReportAllocs()
 
@@ -73,9 +67,8 @@ func BenchmarkHandleMsg4Discover(b *testing.B) {
 	}
 }
 
-// passthroughCtx4 is passthrough4 for a context-aware chain: it actually
-// reads the RequestInfo, so the benchmark below pays for building one instead
-// of measuring a handler that would ignore it anyway.
+// passthroughCtx4 reads RequestInfo, so the benchmark pays for building one
+// instead of measuring a handler that would just ignore it.
 func passthroughCtx4(ctx context.Context, _, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	if info, ok := handler.RequestInfoFrom(ctx); ok {
 		_ = info.Interface
@@ -83,10 +76,8 @@ func passthroughCtx4(ctx context.Context, _, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv
 	return resp, false
 }
 
-// BenchmarkHandleMsg4DiscoverWithContext is BenchmarkHandleMsg4Discover with
-// one difference: the listener wants a context, so every packet pays for a
-// RequestInfo before the chain sees it. Next to the legacy chain above, which
-// builds none, this is what that per-packet cost looks like.
+// BenchmarkHandleMsg4DiscoverWithContext isolates the RequestInfo cost the
+// legacy benchmark above doesn't pay, by setting wantsCtx.
 func BenchmarkHandleMsg4DiscoverWithContext(b *testing.B) {
 	b.ReportAllocs()
 
@@ -111,9 +102,6 @@ func BenchmarkHandleMsg4DiscoverWithContext(b *testing.B) {
 	}
 }
 
-// BenchmarkHandleMsg6Solicit is BenchmarkHandleMsg4Discover's DHCPv6
-// counterpart: a SOLICIT dispatched through HandleMsg6 to a global-unicast
-// peer, becoming an ADVERTISE.
 func BenchmarkHandleMsg6Solicit(b *testing.B) {
 	b.ReportAllocs()
 
@@ -134,8 +122,7 @@ func BenchmarkHandleMsg6Solicit(b *testing.B) {
 	}
 }
 
-// BenchmarkBuildReply4 isolates buildReply4's request validation and reply
-// construction, without any dispatch overhead around it.
+// BenchmarkBuildReply4 isolates buildReply4 from dispatch overhead.
 func BenchmarkBuildReply4(b *testing.B) {
 	b.ReportAllocs()
 

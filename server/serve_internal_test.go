@@ -23,9 +23,8 @@ import (
 	"github.com/coredhcp/coredhcp/plugins"
 )
 
-// testConfig builds a *config.Config with the given v6/v4 listen addresses.
-// A nil slice omits that protocol's ServerConfig entirely; a non-nil
-// (possibly empty) slice includes it with no plugins configured.
+// testConfig builds a *config.Config from v6/v4 addresses; a nil slice
+// omits that protocol's ServerConfig, a non-nil empty slice includes it with no plugins.
 func testConfig(t *testing.T, v6addrs, v4addrs []net.UDPAddr) *config.Config {
 	t.Helper()
 	cfg := &config.Config{}
@@ -37,8 +36,6 @@ func testConfig(t *testing.T, v6addrs, v4addrs []net.UDPAddr) *config.Config {
 	}
 	return cfg
 }
-
-// --- test doubles for conn4/conn6, shared with handle_internal_test.go ---
 
 type fakeReadResult4 struct {
 	data []byte
@@ -53,10 +50,8 @@ type fakeWriteCall4 struct {
 	dst net.Addr
 }
 
-// fakeConn4 is a test double for conn4 that serves a queue of reads and
-// records every write. Not safe for concurrent ReadFrom calls, but WriteTo
-// is safe to call from a HandleMsg4 goroutine while the test goroutine reads
-// back through writeCh.
+// fakeConn4 serves queued reads and records writes. ReadFrom isn't
+// concurrency-safe, but WriteTo is, so a handler goroutine can write while the test reads writeCh.
 type fakeConn4 struct {
 	reads    []fakeReadResult4
 	readIdx  int
@@ -115,7 +110,6 @@ type fakeWriteCall6 struct {
 	dst net.Addr
 }
 
-// fakeConn6 mirrors fakeConn4 for the conn6 interface.
 type fakeConn6 struct {
 	reads    []fakeReadResult6
 	readIdx  int
@@ -161,8 +155,6 @@ func (f *fakeConn6) LocalAddr() net.Addr {
 
 func (f *fakeConn6) Close() error { return f.closeErr }
 
-// loopbackInterfaceName returns the name of a loopback interface on this
-// host, skipping the test if none is found.
 func loopbackInterfaceName(t *testing.T) string {
 	t.Helper()
 	ifaces, err := net.Interfaces()
@@ -176,7 +168,6 @@ func loopbackInterfaceName(t *testing.T) string {
 	return ""
 }
 
-// withNewUDP4 swaps the newUDP4 package var for the duration of the test.
 func withNewUDP4(t *testing.T, fn func(string, *net.UDPAddr) (net.PacketConn, error)) {
 	t.Helper()
 	orig := newUDP4
@@ -184,7 +175,6 @@ func withNewUDP4(t *testing.T, fn func(string, *net.UDPAddr) (net.PacketConn, er
 	t.Cleanup(func() { newUDP4 = orig })
 }
 
-// withNewUDP6 swaps the newUDP6 package var for the duration of the test.
 func withNewUDP6(t *testing.T, fn func(string, *net.UDPAddr) (net.PacketConn, error)) {
 	t.Helper()
 	orig := newUDP6
@@ -192,7 +182,6 @@ func withNewUDP6(t *testing.T, fn func(string, *net.UDPAddr) (net.PacketConn, er
 	t.Cleanup(func() { newUDP6 = orig })
 }
 
-// openUDPConn binds a socket and closes it when the test ends.
 func openUDPConn(t *testing.T, network string, addr *net.UDPAddr) *net.UDPConn {
 	t.Helper()
 	c, err := net.ListenUDP(network, addr)
@@ -211,13 +200,9 @@ func closedUDPConn(t *testing.T, network string, addr *net.UDPAddr) *net.UDPConn
 	return c
 }
 
-// countingConn is a socket that counts how often it was closed, so a test can
-// tell a leak from a close and a close from a double close. It embeds the
-// real *net.UDPConn because golang.org/x/net/ipv4.NewPacketConn asserts its
-// argument to net.Conn, and because the setup calls listen4 makes have to
-// reach a genuine socket to succeed or fail for the right reason.
-//
-// listen4 and listen6 are synchronous, so the counter needs no lock.
+// countingConn counts closes to distinguish leak vs. close vs. double close.
+// Embeds *net.UDPConn because NewPacketConn asserts net.Conn, and needs no
+// lock because listen4/6 are synchronous.
 type countingConn struct {
 	*net.UDPConn
 	closes int
@@ -231,10 +216,8 @@ func (c *countingConn) Close() error {
 	return nil
 }
 
-// The wrappers around the dhcp library's constructors exist to keep a failed
-// bind from arriving as a typed nil pointer inside a non-nil net.PacketConn,
-// which every later nil check would wave through. A zone naming an interface
-// that does not exist fails the same way on every platform.
+// The wrappers keep a failed bind from returning a typed-nil net.PacketConn,
+// which nil checks would wave through; a bad zone fails identically on every platform.
 func TestNewUDPConnWrappersReturnANilInterfaceOnFailure(t *testing.T) {
 	const zone = "nonexistent-zzz-iface"
 
@@ -310,10 +293,8 @@ func TestListen4MulticastJoinGroup(t *testing.T) {
 	assert.Equal(t, iface, l4.Name)
 }
 
-// Every listen4 error path after the bind owns the socket: nothing else holds
-// a reference to it, so it has to be closed exactly once before the error goes
-// back to the caller. The success path must leave it open, because the
-// listener it returns is what closes it later.
+// Every listen4 error path after the bind must close the socket exactly
+// once; the success path must leave it open since the returned listener closes it later.
 func TestListen4ClosesSocketOnlyOnFailure(t *testing.T) {
 	iface := loopbackInterfaceName(t)
 	local := net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0}
@@ -440,7 +421,6 @@ func TestListen6MulticastJoinGroup(t *testing.T) {
 	assert.Equal(t, iface, l6.Name)
 }
 
-// The DHCPv6 half of TestListen4ClosesSocketOnlyOnFailure.
 func TestListen6ClosesSocketOnlyOnFailure(t *testing.T) {
 	iface := loopbackInterfaceName(t)
 	local := net.UDPAddr{IP: net.ParseIP("::1"), Port: 0}
@@ -507,9 +487,8 @@ func TestListen6ClosesSocketOnlyOnFailure(t *testing.T) {
 	}
 }
 
-// A configuration naming no address at all, which `listen: []` produces, is
-// refused rather than quietly starting a server with no sockets. Wait on such
-// a Servers used to panic in make([]error, 1, 0).
+// A config naming no address at all, which `listen: []` produces, is
+// refused rather than quietly starting a server with no sockets.
 func TestStartWithoutAddresses(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -529,19 +508,15 @@ func TestStartWithoutAddresses(t *testing.T) {
 	}
 }
 
-// Wait has nothing to wait for when no listener was bound, and must neither
-// block nor panic. Start does not produce such a Servers any more, but Wait is
-// exported and callers can build one.
+// Wait must handle a Servers with no listeners without blocking or
+// panicking, since it's exported and callers can construct one directly.
 func TestWaitWithoutListeners(t *testing.T) {
 	s := &Servers{}
 	assert.NoError(t, s.Wait())
 }
 
-// TestStartCleanupJoinsServeGoroutines opens a real DHCPv6 socket and then
-// fails the DHCPv4 bind. The v6 read loop has to be finished by the time Start
-// returns: with an unbuffered errors channel and no join, cleanup closed the
-// socket, Serve returned nil, and the send had nobody to hand it to, leaking
-// one goroutine per socket that had already come up.
+// TestStartCleanupJoinsServeGoroutines fails the DHCPv4 bind after a real
+// DHCPv6 socket is open; Start must join the v6 read loop before returning or it leaks a goroutine.
 func TestStartCleanupJoinsServeGoroutines(t *testing.T) {
 	withNewUDP4(t, func(string, *net.UDPAddr) (net.PacketConn, error) {
 		return nil, errors.New("v4 listen boom")
@@ -560,8 +535,6 @@ func TestStartCleanupJoinsServeGoroutines(t *testing.T) {
 	assert.LessOrEqual(t, runtime.NumGoroutine(), before)
 }
 
-// TestStartCleanupOnV6ListenFailure drives Start's cleanup path via
-// the DHCPv6 listen loop, with no listeners ever successfully opened.
 func TestStartCleanupOnV6ListenFailure(t *testing.T) {
 	withNewUDP6(t, func(string, *net.UDPAddr) (net.PacketConn, error) {
 		return nil, errors.New("v6 listen boom")
@@ -573,9 +546,8 @@ func TestStartCleanupOnV6ListenFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), "v6 listen boom")
 }
 
-// TestStartCleanupOnV4ListenFailureClosesV6 drives the DHCPv4 listen
-// failure branch after a real DHCPv6 listener has already been opened, to
-// exercise the cleanup path closing a non-empty listeners slice.
+// TestStartCleanupOnV4ListenFailureClosesV6 opens a real DHCPv6 listener
+// first, so the cleanup path exercised here closes a non-empty listeners slice.
 func TestStartCleanupOnV4ListenFailureClosesV6(t *testing.T) {
 	withNewUDP4(t, func(string, *net.UDPAddr) (net.PacketConn, error) {
 		return nil, errors.New("v4 listen boom")
@@ -602,8 +574,6 @@ func TestServersCloseErrorPaths(_ *testing.T) {
 	s.Close()
 }
 
-// --- observer reporting at startup ---
-
 // registerTestPlugin registers a plugin for the lifetime of the test and
 // removes it again, so the shared registry is left as it was found.
 func registerTestPlugin(t *testing.T, plugin *plugins.Plugin) {
@@ -612,9 +582,6 @@ func registerTestPlugin(t *testing.T, plugin *plugins.Plugin) {
 	t.Cleanup(func() { delete(plugins.RegisteredPlugins, plugin.Name) })
 }
 
-// TestStartWithObserverReportsPluginsAndListeners checks the two things the
-// observer learns before any packet arrives: which plugins ended up in each
-// chain, and which sockets the server bound.
 func TestStartWithObserverReportsPluginsAndListeners(t *testing.T) {
 	registerTestPlugin(t, &plugins.Plugin{
 		Name: "server-observer-test",
@@ -693,7 +660,6 @@ func TestStartPassesObserverToListeners(t *testing.T) {
 	require.NoError(t, plain.Wait())
 }
 
-// Reporting is skipped entirely when nobody is watching.
 func TestReportWithoutObserver(t *testing.T) {
 	s := &Servers{}
 	s.reportPlugins(&plugins.Chains{
@@ -704,9 +670,9 @@ func TestReportWithoutObserver(t *testing.T) {
 	assert.Nil(t, s.observer)
 }
 
-// The observer gets the plugin arguments with the credential forms replaced:
-// the terminal UI puts them on screen, and a plugin argument list is where a
-// Redis password or a NetBox token is written. See config.RedactArgs.
+// Plugin args reach the observer already redacted, since the terminal UI
+// displays them, and a plugin's argument list is where a password or token
+// lands. See config.RedactArgs.
 func TestReportPluginsRedactsArgs(t *testing.T) {
 	obs := &recordObserver{}
 	s := &Servers{observer: obs}

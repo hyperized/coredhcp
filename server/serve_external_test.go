@@ -59,8 +59,8 @@ func TestStartBothV4AndV6(t *testing.T) {
 	assert.NoError(t, srv.Wait())
 }
 
-// TestWaitReturnsAfterClose checks that Wait unblocks once every listener's
-// Serve loop has observed net.ErrClosed and returned, without any sleeps.
+// TestWaitReturnsAfterClose checks Wait unblocks once every listener's
+// Serve loop has observed net.ErrClosed and returned.
 func TestWaitReturnsAfterClose(t *testing.T) {
 	cfg := &config.Config{
 		Server6: &config.ServerConfig{Addresses: []net.UDPAddr{loopbackUDPAddr6(t)}},

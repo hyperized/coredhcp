@@ -19,8 +19,7 @@ import (
 	"github.com/coredhcp/coredhcp/plugins"
 )
 
-// buildReply6 decapsulates a possibly-relayed request and builds the base
-// response that the plugin chain will decorate.
+// buildReply6 decapsulates a relayed request and builds the base response.
 func buildReply6(d dhcpv6.DHCPv6) (dhcpv6.DHCPv6, error) {
 	msg, err := d.GetInnerMessage()
 	if err != nil {
@@ -44,13 +43,8 @@ func buildReply6(d dhcpv6.DHCPv6) (dhcpv6.DHCPv6, error) {
 	}
 }
 
-// replyToDecline6 builds the base Reply for a DHCPv6 Decline.
-//
-// dhcpv6.NewReplyFromMessage will not build one: its switch lists every
-// request type except Decline, and returns "cannot create REPLY from the
-// passed message type set" for it (dhcpv6/dhcpv6message.go). The reply it
-// would produce for a Release is just the transaction ID and the client's
-// DUID, so that is what this makes. Drop it once upstream accepts Decline.
+// dhcpv6.NewReplyFromMessage refuses a Decline, so the Release-shaped reply
+// it would build (transaction ID plus client DUID) is assembled here instead.
 func replyToDecline6(msg *dhcpv6.Message) (dhcpv6.DHCPv6, error) {
 	cid := msg.GetOneOption(dhcpv6.OptionClientID)
 	if cid == nil {
@@ -64,8 +58,7 @@ func replyToDecline6(msg *dhcpv6.Message) (dhcpv6.DHCPv6, error) {
 	return rep, nil
 }
 
-// buildReply4 validates the request and builds the base response that the
-// plugin chain will decorate.
+// buildReply4 validates the request and builds the base response.
 func buildReply4(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 	if req.OpCode != dhcpv4.OpcodeBootRequest {
 		return nil, fmt.Errorf("unsupported opcode %d, only BootRequest (%d) is supported", req.OpCode, dhcpv4.OpcodeBootRequest)
@@ -80,33 +73,22 @@ func buildReply4(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 	case dhcpv4.MessageTypeRequest, dhcpv4.MessageTypeInform:
 		resp.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeAck))
 	case dhcpv4.MessageTypeRelease, dhcpv4.MessageTypeDecline:
-		// Neither takes a reply (RFC 2131 section 4.4), so no message
-		// type is set here and HandleMsg4 sends nothing. The base reply
-		// still exists because the chain runs: plugins free or
-		// quarantine the lease, and some carry state on the response.
+		// No message type set: RFC 2131 section 4.4 answers neither, but the
+		// chain still runs so a plugin can free or quarantine the lease.
 	default:
 		return nil, fmt.Errorf("unhandled message type: %v", mt)
 	}
 	return resp, nil
 }
 
-// takesNoReply4 reports whether a DHCPv4 message type is one the server never
-// answers. RFC 2131 section 4.4: a client sends RELEASE to hand an address
-// back and DECLINE to say the address it was offered is already in use, and
-// neither exchange contains a message from the server. The chain still runs
-// for both so a plugin can free or quarantine the lease; whatever it hands
-// back is discarded.
+// takesNoReply4 reports the types the server never answers, RFC 2131 section
+// 4.4. The chain still runs for both; whatever it returns is discarded.
 func takesNoReply4(mt dhcpv4.MessageType) bool {
 	return mt == dhcpv4.MessageTypeRelease || mt == dhcpv4.MessageTypeDecline
 }
 
-// applyHandlers6 walks the plugin chain. A nil response means the request is
-// dropped. stoppedAt is the position of the link that stopped the chain, or
-// -1 when every plugin ran; the links are indexed rather than ranged over so
-// the loop does not copy a Link6 per plugin per packet.
-//
-// Every handler is called with ctx, which describes the request when any
-// plugin in the chain asked for it and is a background context otherwise.
+// applyHandlers6 walks the chain, returning -1 when every plugin ran and a nil
+// response when it is dropped. Indexed, so no Link6 is copied per packet.
 func applyHandlers6(ctx context.Context, chain []plugins.Link6, req, resp dhcpv6.DHCPv6) (_ dhcpv6.DHCPv6, stoppedAt int) {
 	for i := range chain {
 		var stop bool
@@ -118,9 +100,7 @@ func applyHandlers6(ctx context.Context, chain []plugins.Link6, req, resp dhcpv6
 	return resp, -1
 }
 
-// applyHandlers4 walks the plugin chain. A nil response means the request is
-// dropped. stoppedAt is the position of the link that stopped the chain, or
-// -1 when every plugin ran.
+// applyHandlers4 walks the chain, returning -1 when every plugin ran.
 func applyHandlers4(ctx context.Context, chain []plugins.Link4, req, resp *dhcpv4.DHCPv4) (_ *dhcpv4.DHCPv4, stoppedAt int) {
 	for i := range chain {
 		var stop bool
@@ -132,9 +112,7 @@ func applyHandlers4(ctx context.Context, chain []plugins.Link4, req, resp *dhcpv
 	return resp, -1
 }
 
-// encapsulateRelay6 re-wraps the response for the relay chain the request
-// came through. Responses that are not plain messages pass through
-// unchanged.
+// encapsulateRelay6 re-wraps the response for the relay chain it came through.
 func encapsulateRelay6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, error) {
 	if !req.IsRelay() {
 		return resp, nil
@@ -147,10 +125,8 @@ func encapsulateRelay6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, error) {
 	return dhcpv6.NewRelayReplFromRelayForw(req.(*dhcpv6.RelayMessage), rmsg)
 }
 
-// replyDestination4 decides where a DHCPv4 response goes. src is the address
-// the request arrived from (may be nil when unknown). useEthernet is set when
-// the client has no usable IP yet and the reply must leave as a raw layer-2
-// unicast.
+// replyDestination4 decides where a DHCPv4 response goes. useEthernet is set
+// when the client has no address yet and the reply has to leave at layer 2.
 func replyDestination4(req, resp *dhcpv4.DHCPv4, src *net.UDPAddr) (peer *net.UDPAddr, useEthernet bool) {
 	switch {
 	case !req.GatewayIPAddr.IsUnspecified():
@@ -168,14 +144,12 @@ func replyDestination4(req, resp *dhcpv4.DHCPv4, src *net.UDPAddr) (peer *net.UD
 	case req.IsBroadcast():
 		return &net.UDPAddr{IP: net.IPv4bcast, Port: dhcpv4.ClientPort}, false
 	default:
-		// send a layer-2 frame so that we can define the destination MAC address
+		// Layer 2, so the destination MAC can be set explicitly.
 		return &net.UDPAddr{IP: resp.YourIPAddr, Port: dhcpv4.ClientPort}, true
 	}
 }
 
-// replyIfIndex picks the interface a reply leaves through: the listener's
-// bound interface if any, otherwise the interface the request came in on,
-// otherwise 0 (unknown, use the routing table).
+// replyIfIndex returns 0 when neither is known, meaning use the routing table.
 func replyIfIndex(bound, oob int) int {
 	if bound != 0 {
 		return bound
@@ -183,8 +157,6 @@ func replyIfIndex(bound, oob int) int {
 	return oob
 }
 
-// oobIfIndex6 extracts the incoming interface index from per-packet control
-// data, 0 if absent.
 func oobIfIndex6(oob *ipv6.ControlMessage) int {
 	if oob != nil {
 		return oob.IfIndex
@@ -192,8 +164,6 @@ func oobIfIndex6(oob *ipv6.ControlMessage) int {
 	return 0
 }
 
-// oobIfIndex4 extracts the incoming interface index from per-packet control
-// data, 0 if absent.
 func oobIfIndex4(oob *ipv4.ControlMessage) int {
 	if oob != nil {
 		return oob.IfIndex

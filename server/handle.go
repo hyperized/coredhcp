@@ -21,17 +21,13 @@ import (
 	"github.com/coredhcp/coredhcp/handler"
 )
 
-// sendEthernetFn is swappable so the layer-2 reply path can be exercised in
-// tests without a raw socket.
+// Swappable so the layer-2 reply path can be tested without a raw socket.
 var sendEthernetFn = sendEthernet
 
-// errNoLayer2Interface is what the observer is told when a raw frame has
-// nowhere to go. There is no error from the network stack to pass on here:
-// the server never found out which interface the request arrived on.
+// There is no network-stack error to pass on: the server never learned which
+// interface the request arrived on.
 var errNoLayer2Interface = errors.New("no interface information for a layer-2 reply")
 
-// ifaceName is the interface a packet arrived on: the one the listener is
-// bound to, or the one the socket reported for this packet.
 func (l *listener6) ifaceName(oobIdx int) string {
 	if l.Index != 0 {
 		return l.Name
@@ -39,8 +35,6 @@ func (l *listener6) ifaceName(oobIdx int) string {
 	return l.ifaces.name(oobIdx)
 }
 
-// ifaceName is the interface a packet arrived on: the one the listener is
-// bound to, or the one the socket reported for this packet.
 func (l *listener4) ifaceName(oobIdx int) string {
 	if l.Index != 0 {
 		return l.Name
@@ -48,12 +42,8 @@ func (l *listener4) ifaceName(oobIdx int) string {
 	return l.ifaces.name(oobIdx)
 }
 
-// infoAddrPort converts a socket address for handler.RequestInfo. Unlike
-// peerAddrPort, which feeds the events an operator reads, this drops the IPv6
-// zone: a plugin comparing a link-local peer against a configured address, or
-// keying a rate limiter on it, wants fe80::1 rather than fe80::1%eth0, and
-// the interface travels in its own field. A local address that is not UDP
-// comes back as the zero value; only a test double produces one.
+// Drops the IPv6 zone that peerAddrPort keeps: a plugin matching a link-local
+// peer against a configured address wants fe80::1, not fe80::1%eth0.
 func infoAddrPort(a net.Addr) netip.AddrPort {
 	ua, ok := a.(*net.UDPAddr)
 	if !ok {
@@ -63,11 +53,8 @@ func infoAddrPort(a net.Addr) netip.AddrPort {
 	return netip.AddrPortFrom(ap.Addr().WithZone(""), ap.Port())
 }
 
-// requestContext is what the DHCPv6 plugin chain is called with: a context
-// carrying the request's handler.RequestInfo, or a background one when no
-// plugin in the chain reads it. Filling the RequestInfo costs an interface
-// lookup and a couple of allocations per packet, so a chain of plain handlers
-// does not pay for it.
+// The RequestInfo is only filled when a plugin asks for it: it costs an
+// interface lookup and allocations on every packet.
 func (l *listener6) requestContext(oob *ipv6.ControlMessage, peer *net.UDPAddr) context.Context {
 	if !l.wantsCtx {
 		return context.Background()
@@ -81,7 +68,6 @@ func (l *listener6) requestContext(oob *ipv6.ControlMessage, peer *net.UDPAddr) 
 	})
 }
 
-// requestContext is the DHCPv4 counterpart.
 func (l *listener4) requestContext(oob *ipv4.ControlMessage, src *net.UDPAddr) context.Context {
 	if !l.wantsCtx {
 		return context.Background()
@@ -95,9 +81,8 @@ func (l *listener4) requestContext(oob *ipv4.ControlMessage, src *net.UDPAddr) c
 	})
 }
 
-// startReport begins the event for one packet, or returns nil when no
-// observer is attached. Everything it would cost, the clock read and the
-// interface lookup included, sits behind that check.
+// Nil when nobody is watching, so the clock read and the interface lookup
+// stay behind that check.
 func (l *listener6) startReport(oob *ipv6.ControlMessage, peer *net.UDPAddr) *requestReport {
 	if l.observer == nil {
 		return nil
@@ -105,8 +90,6 @@ func (l *listener6) startReport(oob *ipv6.ControlMessage, peer *net.UDPAddr) *re
 	return newReport(l.observer, events.FamilyV6, l.ifaceName(oobIfIndex6(oob)), peer)
 }
 
-// startReport begins the event for one packet, or returns nil when no
-// observer is attached.
 func (l *listener4) startReport(oob *ipv4.ControlMessage, peer *net.UDPAddr) *requestReport {
 	if l.observer == nil {
 		return nil
@@ -114,9 +97,7 @@ func (l *listener4) startReport(oob *ipv4.ControlMessage, peer *net.UDPAddr) *re
 	return newReport(l.observer, events.FamilyV4, l.ifaceName(oobIfIndex4(oob)), peer)
 }
 
-// HandleMsg6 runs for every received DHCPv6 packet. It will run every
-// registered handler in sequence, and reply with the resulting response.
-// It will not reply if the resulting response is `nil`.
+// HandleMsg6 runs the chain for one DHCPv6 packet. A nil response sends nothing.
 func (l *listener6) HandleMsg6(buf []byte, oob *ipv6.ControlMessage, peer *net.UDPAddr) {
 	rep := l.startReport(oob, peer)
 
@@ -155,8 +136,8 @@ func (l *listener6) HandleMsg6(buf []byte, oob *ipv6.ControlMessage, peer *net.U
 
 	var woob *ipv6.ControlMessage
 	if peer.IP.IsLinkLocalUnicast() {
-		// LL need to be directed to the correct interface. Globally reachable
-		// addresses should use the default route, in case of asymetric routing.
+		// Link-local has to name the interface; a global address uses the
+		// routing table, which is what asymmetric routing needs.
 		if idx := replyIfIndex(l.Index, oobIfIndex6(oob)); idx != 0 {
 			woob = &ipv6.ControlMessage{IfIndex: idx}
 		} else {
@@ -171,9 +152,7 @@ func (l *listener6) HandleMsg6(buf []byte, oob *ipv6.ControlMessage, peer *net.U
 	rep.emit(events.OutcomeReplied, events.PathUnicast, nil)
 }
 
-// HandleMsg4 runs for every received DHCPv4 packet. It will run every
-// registered handler in sequence, and reply with the resulting response.
-// It will not reply if the resulting response is `nil`.
+// HandleMsg4 runs the chain for one DHCPv4 packet. A nil response sends nothing.
 func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, src *net.UDPAddr) {
 	rep := l.startReport(oob, src)
 
@@ -197,11 +176,8 @@ func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, src *net.UD
 	resp, stoppedAt := applyHandlers4(l.requestContext(oob, src), l.chain, req, resp)
 	rep.chainDone4(l.chain, stoppedAt)
 	if takesNoReply4(req.MessageType()) {
-		// The chain has had its say; whatever it built goes nowhere. This
-		// check sits before the nil test on purpose: a RELEASE a plugin
-		// stopped is not a drop, it is a message that was never going to
-		// be answered. Before this existed, a RELEASE that survived the
-		// chain left the server as a reply carrying no option 53 at all.
+		// Ahead of the nil test on purpose: a RELEASE a plugin stopped is not a
+		// drop, it was never going to be answered.
 		log.Debugf("MainHandler4: %s takes no reply, sending nothing", req.MessageType())
 		rep.emit(events.OutcomeNoReply, events.PathNone, nil)
 		return
@@ -217,9 +193,8 @@ func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, src *net.UD
 
 	var woob *ipv4.ControlMessage
 	if peer.IP.Equal(net.IPv4bcast) || peer.IP.IsLinkLocalUnicast() || useEthernet {
-		// Direct broadcasts, link-local and layer2 unicasts to the interface
-		// the request was received on. Other packets should use the normal
-		// routing table in case of asymetric routing.
+		// Broadcast, link-local and layer-2 name the arrival interface; the
+		// rest use the routing table, which is what asymmetric routing needs.
 		if idx := replyIfIndex(l.Index, oobIfIndex4(oob)); idx != 0 {
 			woob = &ipv4.ControlMessage{IfIndex: idx}
 		} else {
@@ -239,12 +214,9 @@ func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, src *net.UD
 	rep.emit4(events.OutcomeReplied, peer, nil)
 }
 
-// sendLayer2 puts a DHCPv4 reply on the wire as a raw frame, for a client
-// that has no address to receive a datagram on yet.
+// sendLayer2 sends a raw frame, for a client with no address to receive on.
 func sendLayer2(rep *requestReport, woob *ipv4.ControlMessage, resp *dhcpv4.DHCPv4) {
 	if woob == nil {
-		// Without an interface there is nothing to put the frame on;
-		// dereferencing woob here used to crash the server.
 		log.Errorf("MainHandler4: cannot send layer-2 reply without interface information")
 		rep.emit(events.OutcomeSendError, events.PathLayer2, errNoLayer2Interface)
 		return
@@ -263,8 +235,7 @@ func sendLayer2(rep *requestReport, woob *ipv4.ControlMessage, resp *dhcpv4.DHCP
 	rep.emit(events.OutcomeReplied, events.PathLayer2, nil)
 }
 
-// XXX: performance-wise, Pool may or may not be good (see https://github.com/golang/go/issues/23199)
-// Interface is good for what we want. Maybe "just" trust the GC and we'll be fine ?
+// XXX: Pool may not pay for itself here, see golang/go#23199.
 var bufpool = sync.Pool{New: func() any { r := make([]byte, MaxDatagram); return &r }}
 
 // MaxDatagram is the maximum length of message that can be received.
@@ -272,8 +243,7 @@ const MaxDatagram = 1 << 16
 
 // XXX: investigate using RecvMsgs to batch messages and reduce syscalls
 
-// serve is the shared read loop: hand each datagram to handle on its own
-// goroutine until the connection closes.
+// serve hands each datagram to handle on its own goroutine until the socket closes.
 func serve[M any](localAddr net.Addr, readFrom func([]byte) (int, M, net.Addr, error), handle func([]byte, M, *net.UDPAddr)) error {
 	log.Printf("Listen %s", localAddr)
 	for {
@@ -292,14 +262,12 @@ func serve[M any](localAddr net.Addr, readFrom func([]byte) (int, M, net.Addr, e
 	}
 }
 
-// Serve handles datagrams received on the DHCPv6 connection and passes them
-// to the plugin chain.
+// Serve reads DHCPv6 datagrams until the socket closes.
 func (l *listener6) Serve() error {
 	return serve(l.LocalAddr(), l.ReadFrom, l.HandleMsg6)
 }
 
-// Serve handles datagrams received on the DHCPv4 connection and passes them
-// to the plugin chain.
+// Serve reads DHCPv4 datagrams until the socket closes.
 func (l *listener4) Serve() error {
 	return serve(l.LocalAddr(), l.ReadFrom, l.HandleMsg4)
 }

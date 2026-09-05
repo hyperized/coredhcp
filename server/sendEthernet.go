@@ -17,10 +17,8 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv4"
 )
 
-// this function sends an unicast to the hardware address defined in resp.ClientHWAddr,
-// the layer3 destination address is still the broadcast address;
-// iface: the interface where the DHCP message should be sent;
-// resp: DHCPv4 struct, which should be sent;
+// sendEthernet unicasts resp to resp.ClientHWAddr at layer 2. The layer-3
+// destination stays the broadcast address.
 func sendEthernet(iface net.Interface, resp *dhcpv4.DHCPv4) error {
 
 	eth := layers.Ethernet{
@@ -52,13 +50,11 @@ func sendEthernet(iface net.Interface, resp *dhcpv4.DHCPv4) error {
 		FixLengths:       true,
 	}
 
-	// Decode a packet
 	packet := gopacket.NewPacket(resp.ToBytes(), layers.LayerTypeDHCPv4, gopacket.NoCopy)
 	dhcpLayer := packet.Layer(layers.LayerTypeDHCPv4)
 	dhcp, ok := dhcpLayer.(gopacket.SerializableLayer)
 	if !ok {
-		// dhcpLayer is nil when the payload does not decode as DHCPv4;
-		// calling LayerType on it here used to panic inside the error path.
+		// dhcpLayer is nil here, so the error must not name the layer.
 		return errors.New("cannot re-decode DHCPv4 payload for serialization")
 	}
 	err = gopacket.SerializeLayers(buf, opts, &eth, &ip, &udp, dhcp)
