@@ -63,8 +63,7 @@ func TestParseArgs(t *testing.T) {
 	}
 }
 
-// TestKeySource covers the per-family allow-lists, including remote-id being
-// the one name both families accept.
+// remote-id is the one key name both families accept.
 func TestKeySource(t *testing.T) {
 	t.Run("DHCPv4", func(t *testing.T) {
 		for _, name := range []string{"circuit-id", "remote-id", "subscriber-id"} {
@@ -203,8 +202,7 @@ func TestParseRecords(t *testing.T) {
 	}
 }
 
-// errReader fails on the first read, which is how a mapping file on a failing
-// disk reaches the scanner's error path.
+// Simulates a mapping file on a failing disk, reaching the scanner's error path.
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, errors.New("simulated read failure") }
@@ -235,8 +233,8 @@ func TestKeyText(t *testing.T) {
 	}
 }
 
-// TestMatch covers the three ways a key fails to resolve, which the handlers
-// share and which are otherwise only visible as a debug log line.
+// The three failure modes are shared by both handlers and otherwise only
+// visible as a debug log line.
 func TestMatch(t *testing.T) {
 	s := &pluginState{
 		keyName: "circuit-id",
@@ -263,11 +261,8 @@ func TestMatch(t *testing.T) {
 	}
 }
 
-// These two cases substitute the fsnotifyNewWatcher/watcherAdd seams to
-// simulate autorefresh setup failures. Real filesystem operations cannot
-// deterministically fail fsnotify.NewWatcher (an fd exhaustion condition) or
-// Watcher.Add on a file that was just read successfully, so the production
-// code exposes these as indirections purely for this test.
+// Substitutes the fsnotifyNewWatcher/watcherAdd seams: real filesystem calls
+// can't deterministically fail NewWatcher or Add on a file just read successfully.
 
 func TestSetupStateWatcherCreateError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ports.txt")
