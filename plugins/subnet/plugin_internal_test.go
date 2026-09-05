@@ -29,10 +29,6 @@ func writeYAML(t *testing.T, body string) string {
 	return path
 }
 
-// -----------------------------------------------------------------------
-// config.go
-// -----------------------------------------------------------------------
-
 func TestParseFile(t *testing.T) {
 	t.Run("missing file", func(t *testing.T) {
 		_, err := parseFile(filepath.Join(t.TempDir(), "missing.yml"))
@@ -706,10 +702,6 @@ func TestFamilyName(t *testing.T) {
 	assert.Equal(t, "IPv6", familyName(false))
 }
 
-// -----------------------------------------------------------------------
-// plugin.go
-// -----------------------------------------------------------------------
-
 func TestFilePath(t *testing.T) {
 	t.Run("zero arguments", func(t *testing.T) {
 		_, err := filePath(nil)
@@ -1075,8 +1067,7 @@ func TestSelectorSelect6(t *testing.T) {
 		{"relayed, link-address in match.relays", relayedReq(t, "2001:db8:9::1"), context.Background(), relayed1},
 		{"relayed, link-address inside a relay-less subnet's cidr", relayedReq(t, "2001:db8:2::50"), context.Background(), relayed2},
 		{
-			// Deliberate design decision: a relayed request that matches
-			// nothing goes straight to the default, never to the interface
+			// Deliberate: falls straight to default, never to the interface
 			// rule, even though the context names a matching interface.
 			"relayed matching nothing falls to default, not to the interface rule",
 			relayedReq(t, "2001:db8:ffff::1"),

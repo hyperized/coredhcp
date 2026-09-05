@@ -11,10 +11,8 @@ import (
 	"github.com/coredhcp/coredhcp/events"
 )
 
-// Preferred widths of the traffic columns, and the floors the two that hold
-// wire data are allowed to shrink to. The reply column has to hold ADVERTISE,
-// so the error outcomes are shortened to fit next to it: the full reason
-// follows on the same row anyway.
+// The reply column has to hold ADVERTISE, so the error outcomes are shortened
+// to fit beside it: the full reason follows on the same row anyway.
 const (
 	trafficTimeW      = 12
 	trafficShortT     = 8
@@ -33,15 +31,12 @@ const (
 	trafficWideAddr   = 40
 )
 
-// trafficCols is how wide each column is on this terminal. A zero width means
-// the column is not shown: a narrow pane gives up the columns an operator can
-// live without before it starts cutting into the addresses.
+// A zero width means the column is dropped rather than narrowed.
 type trafficCols struct {
 	time, fam, iface, typ, reply, client, addr, plugin, path, dur int
 }
 
-// width is what the row costs, single spaces between columns included. The
-// arrow between the request and the reply is always there.
+// The lone 1 is the arrow between request and reply, which is always drawn.
 func (c trafficCols) width() int {
 	total, gaps := 0, -1
 
@@ -55,10 +50,8 @@ func (c trafficCols) width() int {
 	return total + max(gaps, 0)
 }
 
-// trafficColumns fits the columns into width. The reply path and the chain
-// duration go first because the counters pane already has them in aggregate,
-// then the interface, then the plugin; after that the timestamp loses its
-// milliseconds and only then do the address and client columns give ground.
+// Dropped in the order the operator can spare them: path and duration are in
+// the counters pane already, and the addresses give ground last.
 func trafficColumns(width int) trafficCols {
 	c := trafficCols{
 		time: trafficTimeW, fam: trafficFamW, iface: trafficIfaceW, typ: trafficTypeW,
@@ -84,9 +77,8 @@ func trafficColumns(width int) trafficCols {
 	return fillTraffic(c, width)
 }
 
-// fillTraffic spends whatever room is left over: first by bringing back the
-// columns that were dropped, most useful first, then by widening the client
-// and address columns, which is where a wide terminal earns its keep.
+// Client and address take the leftovers: they are where a wide terminal earns
+// its keep.
 func fillTraffic(c trafficCols, width int) trafficCols {
 	for _, col := range []struct {
 		field *int
@@ -108,7 +100,6 @@ func fillTraffic(c trafficCols, width int) trafficCols {
 	return c
 }
 
-// shrink takes up to over columns off a field, never below floor.
 func shrink(field *int, floor, over int) {
 	if over <= 0 {
 		return
@@ -117,8 +108,6 @@ func shrink(field *int, floor, over int) {
 	*field -= min(over, max(*field-floor, 0))
 }
 
-// replyTags grades the reply that went out. Anything that hands a client an
-// address or an answer is good; a NAK is the server saying no.
 var replyTags = map[string]string{
 	"OFFER":     tagGood,
 	"ACK":       tagGood,
@@ -127,7 +116,6 @@ var replyTags = map[string]string{
 	"NAK":       tagWarn,
 }
 
-// familyShort is the two character family marker in the traffic pane.
 func familyShort(f events.Family) string {
 	switch f {
 	case events.FamilyV4:
@@ -139,8 +127,6 @@ func familyShort(f events.Family) string {
 	return "v?"
 }
 
-// outcomeWord is what the reply column says about a request, and how it is
-// graded.
 func outcomeWord(r events.Request) (tag, word string) {
 	switch r.Outcome {
 	case events.OutcomeReplied:
@@ -165,8 +151,7 @@ func outcomeWord(r events.Request) (tag, word string) {
 	return tagDim, "?"
 }
 
-// trafficTitle names the pane, says how much history it keeps and whether the
-// operator froze it. Titles are ASCII: see newPane for why.
+// Titles are ASCII: see newPane for why.
 func trafficTitle(s snapshot) string {
 	if s.paused {
 		return " traffic (last " + strconv.Itoa(s.history) + ", paused) "
@@ -175,7 +160,6 @@ func trafficTitle(s snapshot) string {
 	return " traffic (last " + strconv.Itoa(s.history) + ") "
 }
 
-// trafficLines renders the traffic ring, oldest first, one row per request.
 func trafficLines(s snapshot, width int) []string {
 	if len(s.traffic) == 0 {
 		return []string{newDim(width, "waiting for the first request")}
@@ -189,9 +173,6 @@ func trafficLines(s snapshot, width int) []string {
 	return lines
 }
 
-// trafficLine renders one request: when it arrived, what came in, what went
-// out and who decided that. Rows that ended in an error give up the path and
-// duration columns to say what went wrong instead.
 func trafficLine(r events.Request, width int) string {
 	cols := trafficColumns(width)
 	stamp := "15:04:05.000"
@@ -219,8 +200,8 @@ func trafficLine(r events.Request, width int) string {
 	tag, word := outcomeWord(r)
 	l.col(tag, word, cols.reply)
 
-	// A packet that never parsed has no client and no address, so the reason
-	// it failed gets those columns instead of padding them out.
+	// A packet that never parsed has no client and no address, so the reason takes
+	// those columns instead of padding them out.
 	if r.Error != "" && r.ClientID == "" && len(r.Addresses) == 0 {
 		l.space(1)
 		l.text(tagDim, r.Error)

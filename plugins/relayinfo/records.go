@@ -2,9 +2,6 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// Mapping-file parsing: the plain-text record format shared by the DHCPv4 and
-// DHCPv6 variants, and the loader that reads it from disk.
-
 package relayinfo
 
 import (
@@ -20,29 +17,21 @@ import (
 )
 
 const (
-	// hexPrefix marks a key written as raw bytes rather than as text.
 	hexPrefix = "0x"
 
-	// defaultLease is the lease time and the DHCPv6 lifetimes used for a
-	// mapping whose line does not give one. An hour is short enough that a
-	// re-provisioned port is picked up the same day, and long enough not to
-	// make every port renew constantly.
+	// An hour is short enough a re-provisioned port is picked up the same day,
+	// and long enough not to make every port renew constantly.
 	defaultLease = time.Hour
 
-	// leaseResolution is the granularity of a lease on the wire: DHCPv4
-	// option 51 and the DHCPv6 lifetimes are both a whole number of seconds.
+	// DHCPv4 option 51 and the DHCPv6 lifetimes are both a whole number of seconds.
 	leaseResolution = time.Second
 )
 
-// record is one mapping: the address handed to whoever shows up on that port,
-// and the lease time or lifetimes it comes with.
 type record struct {
 	addr  netip.Addr
 	lease time.Duration
 }
 
-// loadRecords reads the mapping file at filename. v6 selects which address
-// family the file has to contain.
 func loadRecords(filename string, v6 bool) (map[string]record, error) {
 	family := familyOf(v6)
 	log.Infof("reading %s relay mappings from %s", family, filename)
@@ -60,7 +49,6 @@ func loadRecords(filename string, v6 bool) (map[string]record, error) {
 	return records, nil
 }
 
-// parseRecords parses the key -> address mappings out of r, one per line.
 func parseRecords(r io.Reader, v6 bool) (map[string]record, error) {
 	records := make(map[string]record)
 	keyCounts := make(map[string]int)
@@ -89,7 +77,6 @@ func parseRecords(r io.Reader, v6 bool) (map[string]record, error) {
 	return records, nil
 }
 
-// parseRecord parses one non-empty, comment-free line.
 func parseRecord(line string, v6 bool) ([]byte, record, error) {
 	tokens := strings.Fields(line)
 	if len(tokens) < 2 || len(tokens) > 3 {
@@ -114,10 +101,8 @@ func parseRecord(line string, v6 bool) ([]byte, record, error) {
 	return key, record{addr: addr, lease: lease}, nil
 }
 
-// parseKey turns one key token into the bytes it has to match on the wire,
-// either as text or as 0x-prefixed hex. The hex form is case-insensitive in
-// both the prefix and the digits, so that a key starting with "0X" is never
-// mistaken for text.
+// The hex form is case-insensitive in both prefix and digits, so a key
+// starting with "0X" is never mistaken for text.
 func parseKey(token string) ([]byte, error) {
 	var key []byte
 	if hasHexPrefix(token) {
@@ -143,14 +128,11 @@ func parseKey(token string) ([]byte, error) {
 	return key, nil
 }
 
-// hasHexPrefix reports whether token is written in the hex form.
 func hasHexPrefix(token string) bool {
 	return len(token) >= len(hexPrefix) && strings.EqualFold(token[:len(hexPrefix)], hexPrefix)
 }
 
-// parseAddr parses the address of a mapping and rejects one from the wrong
-// family, which would otherwise only fail once a client showed up on that
-// port.
+// Rejects the wrong family here, rather than failing only once a client shows up on that port.
 func parseAddr(token string, v6 bool) (netip.Addr, error) {
 	family := familyOf(v6)
 	addr, err := netip.ParseAddr(token)
@@ -165,7 +147,6 @@ func parseAddr(token string, v6 bool) (netip.Addr, error) {
 	return addr, nil
 }
 
-// parseLease parses the optional per-line lease time.
 func parseLease(token string) (time.Duration, error) {
 	lease, err := time.ParseDuration(token)
 	if err != nil {
@@ -177,7 +158,6 @@ func parseLease(token string) (time.Duration, error) {
 	return lease.Round(leaseResolution), nil
 }
 
-// familyOf names a protocol family for error messages and log lines.
 func familyOf(v6 bool) string {
 	if v6 {
 		return "IPv6"
@@ -185,7 +165,6 @@ func familyOf(v6 bool) string {
 	return "IPv4"
 }
 
-// stripComment drops a trailing comment and the whitespace around a line.
 func stripComment(line string) string {
 	if i := strings.IndexRune(line, '#'); i >= 0 {
 		line = line[:i]
@@ -193,10 +172,7 @@ func stripComment(line string) string {
 	return strings.TrimSpace(line)
 }
 
-// keyText renders a key value the way the mapping file would have to spell
-// it: as text when every byte is printable ASCII, and as hex otherwise. Log
-// lines go through it so that a binary circuit-id can be pasted straight into
-// the file.
+// Log lines go through this so a binary circuit-id can be pasted straight into the mapping file.
 func keyText(key string) string {
 	for i := 0; i < len(key); i++ {
 		if key[i] < '!' || key[i] > '~' {
@@ -206,9 +182,8 @@ func keyText(key string) string {
 	return key
 }
 
-// duplicatesWarning logs whatever appears in the file more than once. It is
-// not an error: the last line wins, and an operator moving a subscriber
-// between ports may well have two lines in flight.
+// Not an error: the last line wins, and an operator moving a subscriber
+// between ports may have two lines in flight.
 func duplicatesWarning(what string, counts map[string]int) {
 	var duplicates []string
 	for value, count := range counts {

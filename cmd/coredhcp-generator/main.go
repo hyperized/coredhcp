@@ -88,9 +88,6 @@ func run() error {
 	return nil
 }
 
-// collectPlugins merges the plugin import paths given as arguments with, when
-// -from is set, those listed in the file. The result is deduplicated and
-// sorted.
 func collectPlugins() ([]string, error) {
 	plugins := make(map[string]bool)
 	for _, pl := range flag.Args() {
@@ -99,11 +96,8 @@ func collectPlugins() ([]string, error) {
 			continue
 		}
 		if !strings.ContainsRune(pl, '/') {
-			// A bare name was specified, not a full import path.
-			// Coredhcp plugins aren't in the standard library, and it's unlikely someone
-			// would put them at the base of $GOPATH/src.
-			// Assume this is one of the builtin plugins. If needed, use the -from option
-			// which always requires (and uses) exact paths
+			// A bare name is assumed to be a builtin plugin. -from always takes
+			// exact import paths, for anything this guess would get wrong.
 			pl = importBase + "plugins/" + pl
 		}
 		plugins[pl] = true
@@ -124,8 +118,6 @@ func collectPlugins() ([]string, error) {
 	return pluginList, nil
 }
 
-// pluginsFromFile adds plugin import paths read from fname, one per line, to
-// plugins.
 func pluginsFromFile(fname string, plugins map[string]bool) error {
 	fd, err := os.Open(fname)
 	if err != nil {
@@ -150,8 +142,6 @@ func pluginsFromFile(fname string, plugins map[string]bool) error {
 	return nil
 }
 
-// resolveOutfile returns the -o path, or coredhcp.go in a fresh temporary
-// directory when none was given.
 func resolveOutfile() (string, error) {
 	if *flagOutfile != "" {
 		return *flagOutfile, nil
@@ -163,7 +153,6 @@ func resolveOutfile() (string, error) {
 	return path.Join(tmpdir, "coredhcp.go"), nil
 }
 
-// render executes the template into outfile.
 func render(t *template.Template, outfile string, pluginList []string) error {
 	outFD, err := os.OpenFile(outfile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {

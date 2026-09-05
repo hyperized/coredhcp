@@ -43,9 +43,7 @@ func ipPageBody(t *testing.T, addrs ...string) []byte {
 	return mustJSON(t, ipAddressPage{Results: results})
 }
 
-// checkRequest fails the test (via t.Errorf, so it is safe to call from the
-// server's own goroutine) when r does not match what the plugin is
-// documented to send.
+// checkRequest uses t.Errorf rather than Fatalf/require, since it runs on the server's own goroutine.
 func checkRequest(t *testing.T, r *http.Request, wantPath string, wantQuery url.Values, wantAuth string) {
 	t.Helper()
 	if r.URL.Path != wantPath {
@@ -524,8 +522,7 @@ func TestLookupMalformedJSON(t *testing.T) {
 }
 
 func TestLookupOversizedBody(t *testing.T) {
-	// The content does not need to be valid JSON: the size check runs before
-	// decoding, so a body over the limit fails there regardless of shape.
+	// The size check runs before decoding, so a body over the limit fails there regardless of shape.
 	body := []byte(strings.Repeat("a", maxBodyBytes+1))
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -552,8 +549,7 @@ func TestLookupTimeout(t *testing.T) {
 }
 
 func TestLookupTransportError(t *testing.T) {
-	// A server that is already closed makes the transport itself fail,
-	// rather than the request being answered with an error status.
+	// An already-closed server fails the transport itself, not the request with an error status.
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	srv.Close()
 
@@ -564,9 +560,8 @@ func TestLookupTransportError(t *testing.T) {
 }
 
 func TestGetRequestBuildFailure(t *testing.T) {
-	// A control character in the base URL makes http.NewRequestWithContext
-	// itself fail, which parseBaseURL would normally have caught first; this
-	// bypasses it by constructing the client directly.
+	// Bypasses parseBaseURL (which would normally catch this) by constructing the client directly,
+	// so the control character reaches http.NewRequestWithContext and fails there instead.
 	c := &client{
 		base: "http://exa\x7fmple.com",
 		auth: authHeader("secret"),
@@ -579,15 +574,13 @@ func TestGetRequestBuildFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), "building request")
 }
 
-// errReadCloser is an io.ReadCloser whose Read always fails with something
-// other than io.EOF, to exercise the io.ReadAll error path in c.get.
+// errReadCloser fails with something other than io.EOF, to exercise the io.ReadAll error path in c.get.
 type errReadCloser struct{}
 
 func (errReadCloser) Read([]byte) (int, error) { return 0, errors.New("simulated read failure") }
 func (errReadCloser) Close() error             { return nil }
 
-// stubTransport hands back a 200 response whose body cannot be read, without
-// touching the network at all.
+// stubTransport hands back a 200 response whose body cannot be read, without touching the network.
 type stubTransport struct{}
 
 func (stubTransport) RoundTrip(*http.Request) (*http.Response, error) {
@@ -636,8 +629,7 @@ func TestLookupParentNameFallback(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret", time.Second)
-	// parentName only feeds a log line; the lookup itself must still succeed
-	// when the response has neither a device nor a virtual machine.
+	// parentName only feeds a log line; lookup must still succeed with neither device nor VM set.
 	result, err := c.lookup(context.Background(), "aa:bb:cc:dd:ee:ff")
 	require.NoError(t, err)
 	assert.True(t, result.found)

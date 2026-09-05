@@ -20,75 +20,53 @@ import (
 )
 
 const (
-	// contentType is what every body this package writes is.
 	contentType = "application/json; charset=utf-8"
 
-	// familyParam and sourceParam are the only query parameters accepted, on
-	// either collection endpoint.
+	// The only query parameters accepted, on either collection endpoint.
 	familyParam = "family"
 	sourceParam = "source"
 
-	// leasesField and poolsField name the array in each response. The
-	// payload is an object rather than a bare array so that a later version
+	// The payload is an object rather than a bare array so a later version
 	// can add a field beside it without breaking a client.
 	leasesField = "leases"
 	poolsField  = "pools"
 )
 
-// The three errors a request can be rejected with. They are sentinels so a
-// test can match them, and they describe the allow list instead of quoting
-// what was asked for: an API that echoes its input back is one more place for
-// something downstream to render it.
+// Sentinels so a test can match them. They describe the allow list instead
+// of quoting what was asked for, so a client's input never gets echoed back.
 var (
 	ErrUnknownParameter = errors.New("unknown query parameter, want family or source")
 	ErrUnknownFamily    = errors.New("family must be 4 or 6")
 	ErrUnknownSource    = errors.New("no such source")
 )
 
-// streamThreshold is how many entries a response may hold before it is written
-// straight to the connection instead of being built in memory first.
-//
-// Under it, the body is encoded into a buffer, which keeps a failed encode
-// from producing half a response. Over it, a server with a large pool would be
-// holding tens of megabytes per concurrent request for no reason, so the
-// entries go out one at a time. It is a var only so tests can lower it; the
-// configuration cannot.
+// A var, not a const, only so tests can lower it; the configuration cannot.
 var streamThreshold = 100_000
 
-// families is the allow list for the family parameter.
 var families = map[string]uint8{"4": 4, "6": 6}
 
-// filter is what a request asked to narrow the answer to. The zero filter
-// matches everything.
+// The zero filter matches everything.
 type filter struct {
-	// family is 4 or 6, or 0 for either.
+	// 4, 6, or 0 for either.
 	family uint8
 
-	// source is the source name to match, and bySource says whether it was
-	// given at all. A source name is never empty, so the two could be one
-	// field; keeping them apart means a request for a source that does not
-	// exist can be rejected rather than read as "any".
+	// Kept apart from an empty source, which is never valid, so a
+	// nonexistent source is rejected rather than read as "any".
 	source   string
 	bySource bool
 }
 
-// matchesFamily reports whether a lease of this family is wanted.
 func (f filter) matchesFamily(family uint8) bool {
 	return f.family == 0 || f.family == family
 }
 
-// matchesSource reports whether a source of this name is wanted.
 func (f filter) matchesSource(name string) bool {
 	return !f.bySource || f.source == name
 }
 
-// parseFilter reads the query parameters.
-//
-// Both parameters are checked against an allow list, the source against the
-// names actually registered, so nothing a client sends reaches the sources as
-// anything but an equality test. Anything else is a 400: a mistyped filter
-// that silently returned everything would be read as the truth about the
-// network.
+// Both parameters are checked against an allow list, source against the
+// names actually registered, so nothing a client sends reaches a source as
+// more than an equality test — a mistyped filter must 400, not silently return everything.
 func parseFilter(q url.Values) (filter, error) {
 	for key := range q {
 		if key != familyParam && key != sourceParam {
@@ -113,7 +91,6 @@ func parseFilter(q url.Values) (filter, error) {
 	return f, nil
 }
 
-// registeredName reports whether any registered source goes by this name.
 func registeredName(name string) bool {
 	for _, s := range leases.Sources() {
 		if s.Name() == name {
@@ -133,9 +110,8 @@ func serveLeases(w http.ResponseWriter, r *http.Request) {
 	respond(w, leasesField, collectLeases(f))
 }
 
-// servePools answers GET /v1/pools. It takes the same filters as the lease
-// endpoint, since a reader showing one pool's utilisation wants the pool as
-// well as its leases.
+// servePools answers GET /v1/pools, with the same filters as /v1/leases: a
+// reader showing one pool's utilisation wants the pool and its leases both.
 func servePools(w http.ResponseWriter, r *http.Request) {
 	f, err := parseFilter(r.URL.Query())
 	if err != nil {
@@ -147,14 +123,12 @@ func servePools(w http.ResponseWriter, r *http.Request) {
 
 // health is the body of GET /v1/health.
 type health struct {
-	// OK is always true: this endpoint answering at all is the health check.
-	// It is there so a monitor can assert on the body rather than only on
-	// the status code.
+	// Always true: answering at all is the health check. Present so a
+	// monitor can assert on the body, not just the status code.
 	OK bool `json:"ok"`
 
-	// Sources is how many lease-holding plugin instances registered. Zero
-	// means the API is up and has nothing to serve, which is a
-	// configuration mistake rather than a failure.
+	// Lease-holding plugin instances registered. Zero means the API is up
+	// with nothing to serve — a configuration mistake, not a failure.
 	Sources int `json:"sources"`
 }
 
@@ -168,13 +142,8 @@ func serveHealth(w http.ResponseWriter, _ *http.Request) {
 	report(err)
 }
 
-// collectLeases gathers the leases matching f from every source.
-//
-// Every source is asked in turn and answers under its own lock, so this is a
-// set of snapshots taken at slightly different moments rather than one
-// consistent view of the whole server. Making it consistent would mean holding
-// every plugin's lock at once, which would let an API request stall the packet
-// path.
+// Each source answers under its own lock: a set of snapshots from slightly
+// different moments, not one view — that would mean holding every lock at once.
 func collectLeases(f filter) []leases.Lease {
 	var out []leases.Lease
 	for _, s := range leases.Sources() {
@@ -191,7 +160,6 @@ func collectLeases(f filter) []leases.Lease {
 	return out
 }
 
-// collectPools gathers the pools matching f from every source.
 func collectPools(f filter) []leases.Pool {
 	var out []leases.Pool
 	for _, s := range leases.Sources() {
@@ -208,12 +176,8 @@ func collectPools(f filter) []leases.Pool {
 	return out
 }
 
-// compareLeases orders leases by source, then by address.
-//
-// The order is total, down to the client, so that two requests answered from
-// unchanged state return byte-identical bodies. Map iteration inside the
-// sources is random, and a UI diffing two answers would otherwise see every
-// lease move.
+// Total down to the client, so two requests against unchanged state return
+// byte-identical bodies despite each source's map iteration being random.
 func compareLeases(a, b leases.Lease) int {
 	return cmp.Or(
 		strings.Compare(a.Source, b.Source),
@@ -223,7 +187,6 @@ func compareLeases(a, b leases.Lease) int {
 	)
 }
 
-// comparePools orders pools by source, then by range.
 func comparePools(a, b leases.Pool) int {
 	return cmp.Or(
 		strings.Compare(a.Source, b.Source),
@@ -231,11 +194,8 @@ func comparePools(a, b leases.Pool) int {
 	)
 }
 
-// respond writes items as a JSON object holding one named array.
-//
-// A small answer is encoded into a buffer first, so that the connection sees
-// either a whole body or none of it. A large one goes out entry by entry: see
-// streamThreshold.
+// Below streamThreshold, encoded into a buffer first so the connection sees
+// a whole body or none of it; above it, entries go out one at a time.
 func respond[T any](w http.ResponseWriter, field string, items []T) {
 	setJSONHeaders(w)
 	if len(items) > streamThreshold {
@@ -250,8 +210,8 @@ func respond[T any](w http.ResponseWriter, field string, items []T) {
 	report(err)
 }
 
-// encodeList writes {"<field>":[...]} with one entry per Encode call, so that
-// the whole list is never held in memory in its encoded form.
+// Writes {"<field>":[...]} with one Encode call per entry, so the list is
+// never held in memory in its encoded form.
 func encodeList[T any](w io.Writer, field string, items []T) error {
 	if _, err := fmt.Fprintf(w, "{%q:[", field); err != nil {
 		return err
@@ -278,9 +238,8 @@ type apiError struct {
 	Error string `json:"error"`
 }
 
-// badRequest rejects a request, naming the allow list it failed rather than
-// what it asked for. What it asked for goes to the debug log, where the
-// operator can see it and a client cannot.
+// Names the allow list a request failed, not what it asked for; what it
+// asked for goes only to the debug log, which a client cannot read.
 func badRequest(w http.ResponseWriter, r *http.Request, err error) {
 	// RequestURI is the raw, still percent-encoded form, so nothing a client
 	// sends can put a newline in a log line.
@@ -295,15 +254,13 @@ func badRequest(w http.ResponseWriter, r *http.Request, err error) {
 	report(werr)
 }
 
-// setJSONHeaders declares the body type. Cache-Control is set for every
-// response, this one included, by the noStore middleware.
+// Cache-Control is set separately, for every response, by the noStore middleware.
 func setJSONHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", contentType)
 }
 
-// report logs a response that could not be written. There is nothing else to
-// do with it: the status line is long gone, and a client hanging up mid-body
-// is its own problem.
+// Nothing else to do with a write failure here: the status line is long
+// gone, and a client hanging up mid-body is its own problem.
 func report(err error) {
 	if err != nil {
 		log.Debugf("writing the response body: %v", err)

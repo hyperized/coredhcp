@@ -20,8 +20,7 @@ import (
 	"github.com/coredhcp/coredhcp/handler"
 )
 
-// poisonedContext panics the instant any of its methods run, so passing one
-// to a handler proves the handler never touches its context argument at all,
+// poisonedContext proves a handler never touches its context argument at all,
 // rather than merely surviving a nil one.
 type poisonedContext struct{}
 
@@ -30,9 +29,8 @@ func (poisonedContext) Done() <-chan struct{}       { panic("context was touched
 func (poisonedContext) Err() error                  { panic("context was touched") }
 func (poisonedContext) Value(any) any               { panic("context was touched") }
 
-// registerCleanup registers plugin under a unique name and removes it from
-// RegisteredPlugins once the test completes, so tests stay order-independent
-// without having to save and restore the whole registry.
+// registerCleanup keeps tests order-independent without having to save and
+// restore the whole registry.
 func registerCleanup(t *testing.T, plugin *Plugin) {
 	t.Helper()
 	require.NoError(t, RegisterPlugin(plugin))
@@ -67,9 +65,8 @@ func TestRegisterPluginDuplicatePanics(t *testing.T) {
 	)
 }
 
-// newLink4 and newLink6 copy the configured arguments. The link is kept for
-// the life of the server, so it must not alias a slice the caller can still
-// write to.
+// The link is kept for the life of the server, so newLink4/6 must not alias
+// a slice the caller can still write to.
 func TestNewLinkCopiesArgs(t *testing.T) {
 	args := []string{"first", "second"}
 
@@ -99,9 +96,8 @@ func TestNewLinkWithoutArgs(t *testing.T) {
 	assert.Nil(t, l6.Args)
 }
 
-// newLink4 and newLink6 just store whatever wantsCtx they are handed; this
-// pins that down so a future refactor of the loadHandlers plumbing cannot
-// silently drop it.
+// Pins down that newLink4/6 store whatever wantsCtx they're handed, so a
+// future refactor of the loadHandlers plumbing cannot silently drop it.
 func TestNewLinkCarriesWantsContext(t *testing.T) {
 	h4 := func(_ context.Context, _, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) { return resp, false }
 	h6 := func(_ context.Context, _, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) { return resp, false }
@@ -124,11 +120,8 @@ func TestNewLinkCarriesWantsContext(t *testing.T) {
 	}
 }
 
-// funcPointer identifies which underlying function a func value wraps, since
-// Go func values cannot be compared with == or assert.Equal. It only
-// distinguishes distinct top-level functions and closures, which is exactly
-// what these tests need: proof that setup4Of/setup6Of returned the plugin's
-// own function rather than a new one.
+// funcPointer exists because Go func values can't be compared with == or
+// assert.Equal; it only needs to distinguish distinct top-level functions.
 func funcPointer(f any) uintptr {
 	return reflect.ValueOf(f).Pointer()
 }
@@ -181,17 +174,12 @@ func TestCheckSetupFuncs(t *testing.T) {
 	}
 }
 
-// TestSetup4OfNeitherForm covers the plugin that does not handle DHCPv4 at
-// all: no accessor to call, and it should not be mistaken for a context-aware
-// one.
 func TestSetup4OfNeitherForm(t *testing.T) {
 	got, wantsCtx := setup4Of(&Plugin{Name: "no-v4"})
 	assert.Nil(t, got)
 	assert.False(t, wantsCtx)
 }
 
-// TestSetup4OfContextForm checks that a plugin declaring Setup4Ctx gets that
-// exact function back, unwrapped, with wantsCtx true.
 func TestSetup4OfContextForm(t *testing.T) {
 	stub := func(_ ...string) (handler.Handler4Ctx, error) { return nil, nil }
 	p := &Plugin{Name: "ctx-v4", Setup4Ctx: stub}
@@ -202,11 +190,6 @@ func TestSetup4OfContextForm(t *testing.T) {
 	assert.Equal(t, funcPointer(stub), funcPointer(got))
 }
 
-// TestSetup4OfPlainFormAdapts exercises the three behaviours the adapter
-// around a plain Setup4 has to get right: an error from the wrapped setup
-// function must reach the caller unchanged, a (nil, nil) result must map to a
-// nil handler rather than a handler that panics on first use, and a real
-// handler must reach the caller with the context stripped away.
 func TestSetup4OfPlainFormAdapts(t *testing.T) {
 	t.Run("setup error passes through unchanged", func(t *testing.T) {
 		wantErr := errors.New("setup4 boom")
@@ -256,14 +239,12 @@ func TestSetup4OfPlainFormAdapts(t *testing.T) {
 	})
 }
 
-// TestSetup6OfNeitherForm is TestSetup4OfNeitherForm's DHCPv6 counterpart.
 func TestSetup6OfNeitherForm(t *testing.T) {
 	got, wantsCtx := setup6Of(&Plugin{Name: "no-v6"})
 	assert.Nil(t, got)
 	assert.False(t, wantsCtx)
 }
 
-// TestSetup6OfContextForm is TestSetup4OfContextForm's DHCPv6 counterpart.
 func TestSetup6OfContextForm(t *testing.T) {
 	stub := func(_ ...string) (handler.Handler6Ctx, error) { return nil, nil }
 	p := &Plugin{Name: "ctx-v6", Setup6Ctx: stub}
@@ -274,8 +255,6 @@ func TestSetup6OfContextForm(t *testing.T) {
 	assert.Equal(t, funcPointer(stub), funcPointer(got))
 }
 
-// TestSetup6OfPlainFormAdapts is TestSetup4OfPlainFormAdapts's DHCPv6
-// counterpart.
 func TestSetup6OfPlainFormAdapts(t *testing.T) {
 	t.Run("setup error passes through unchanged", func(t *testing.T) {
 		wantErr := errors.New("setup6 boom")

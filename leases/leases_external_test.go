@@ -17,8 +17,6 @@ import (
 	"github.com/coredhcp/coredhcp/leases"
 )
 
-// source is a Source built from fixed data, used to exercise the registry
-// without dragging a plugin in.
 type source struct {
 	name   string
 	leases []leases.Lease

@@ -26,10 +26,8 @@ import (
 // not a default anywhere in the generator, so the tests name it themselves.
 const tuiTemplateFile = "coredhcp-tui.go.template"
 
-// withGeneratorFlags sets the package-level pflag values run() reads,
-// restoring the previous values afterwards. Positional plugin names can
-// only be set through flag.CommandLine.Parse (there is no pointer for
-// them), so pluginArgs must contain plain tokens with no leading dashes.
+// withGeneratorFlags sets the pflag values run() reads, restoring them after.
+// pluginArgs must be plain tokens with no dashes: that's the only way to set positional names.
 func withGeneratorFlags(t *testing.T, tmpl, outfile, fromFile string, pluginArgs []string) {
 	t.Helper()
 	origTmpl, origOut, origFrom := *flagTemplate, *flagOutfile, *flagFromFile
@@ -45,10 +43,8 @@ func withGeneratorFlags(t *testing.T, tmpl, outfile, fromFile string, pluginArgs
 	})
 }
 
-// captureStdout redirects os.Stdout for the duration of fn and returns
-// everything written to it. run() prints the generated file's directory
-// with fmt.Println when -o is not given, and that is the only way to learn
-// where a tempdir-derived output file landed.
+// The only way to learn where a tempdir output file landed: run() prints just
+// the directory.
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	orig := os.Stdout
@@ -87,20 +83,8 @@ func TestRunNoPluginsSpecified(t *testing.T) {
 	assert.EqualError(t, err, "no plugin specified")
 }
 
-// TestRunBarePluginNamesAndFullImportPaths covers, for every template that
-// ships with the generator: bare plugin names getting the importBase prefix,
-// full import paths passed through unchanged, an explicit -o outfile, and the
-// template rendering imports for both.
-//
-// A bare builtin name like "serverid" expands to the real package path
-// "github.com/coredhcp/coredhcp/plugins/serverid". This shortcut was broken
-// until recently (it expanded to .../coredhcp/serverid), which is why every
-// documented usage only ever passed full paths.
-//
-// The render is also parsed and compared against gofmt's own output. The
-// generator neither formats nor compiles what it writes, and CI regenerates
-// both mains and fails on any diff, so a template that renders invalid or
-// unformatted Go breaks the build here first.
+// The render is also compared against gofmt's own output: the generator neither
+// formats nor compiles what it writes, and CI regenerates both mains and fails on any diff.
 func TestRunBarePluginNamesAndFullImportPaths(t *testing.T) {
 	for _, tc := range []struct{ name, template string }{
 		{name: "coredhcp", template: defaultTemplateFile},
@@ -108,8 +92,7 @@ func TestRunBarePluginNamesAndFullImportPaths(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			outPath := filepath.Join(t.TempDir(), "generated.go")
-			// The blank and whitespace-only entries exercise the
-			// strings.TrimSpace + skip-if-empty branch for positional args.
+			// Blank and whitespace-only entries exercise the TrimSpace + skip-if-empty branch.
 			withGeneratorFlags(t, tc.template, outPath, "", []string{"", "   ", "serverid", "github.com/example/custom"})
 
 			err := run()
@@ -152,10 +135,8 @@ func TestRunFromFileMissing(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to read file")
 }
 
-// TestRunFromFileScannerError drives bufio.Scanner past its default token
-// limit so sc.Err() returns non-nil after the scan loop. The fixture is
-// generated rather than committed to testdata/, since it must exceed
-// bufio.MaxScanTokenSize (64KiB) on a single line.
+// The fixture is generated rather than committed to testdata/, since it must
+// exceed bufio.MaxScanTokenSize (64KiB) on a single line.
 func TestRunFromFileScannerError(t *testing.T) {
 	dir := t.TempDir()
 	fromPath := filepath.Join(dir, "huge-line.txt")
@@ -175,8 +156,6 @@ func TestRunTemplateExecutionError(t *testing.T) {
 	assert.Contains(t, err.Error(), "template execution failed")
 }
 
-// TestRunOutfileDefaultsToTempdir covers the -o-omitted path: run() creates
-// its own tempdir and prints its path to stdout.
 func TestRunOutfileDefaultsToTempdir(t *testing.T) {
 	withGeneratorFlags(t, defaultTemplateFile, "", "", []string{"serverid"})
 
@@ -195,8 +174,6 @@ func TestRunOutfileDefaultsToTempdir(t *testing.T) {
 	assert.Contains(t, string(content), "pl_serverid")
 }
 
-// TestRunTempdirCreationError drives the os.MkdirTemp error branch by
-// pointing TMPDIR at a path that does not exist.
 func TestRunTempdirCreationError(t *testing.T) {
 	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "does-not-exist"))
 	withGeneratorFlags(t, defaultTemplateFile, "", "", []string{"serverid"})
@@ -206,8 +183,6 @@ func TestRunTempdirCreationError(t *testing.T) {
 	assert.Contains(t, err.Error(), "cannot create temporary directory")
 }
 
-// TestRunOutfileOpenError drives the os.OpenFile error branch: the parent
-// directory of the requested -o path does not exist.
 func TestRunOutfileOpenError(t *testing.T) {
 	outPath := filepath.Join(t.TempDir(), "no-such-subdir", "generated.go")
 	withGeneratorFlags(t, defaultTemplateFile, outPath, "", []string{"serverid"})
@@ -217,9 +192,8 @@ func TestRunOutfileOpenError(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to create output file")
 }
 
-// TestUsageDoesNotPanic covers usage(), which is otherwise only reached via
-// flag.Usage on a parse error (e.g. -h), a path this suite never exercises
-// because it would exit the process.
+// usage() is otherwise reached only via flag.Usage on a parse error, which would
+// exit the process, so this test calls it directly instead.
 func TestUsageDoesNotPanic(t *testing.T) {
 	assert.NotPanics(t, usage)
 }

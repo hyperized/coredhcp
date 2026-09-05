@@ -4,10 +4,8 @@
 
 //go:build integration
 
-// These tests drive the plugin's handlers against a real Redis server. Set
-// REDIS_ADDR to a host:port or a redis:// URL, and REDIS_PASSWORD when the
-// server wants one. `make test-redis` brings both up in compose and runs
-// them; without REDIS_ADDR they skip.
+// Set REDIS_ADDR (host:port or a redis:// URL) and REDIS_PASSWORD if needed; `make test-redis`
+// brings up a server and runs these, or they skip without REDIS_ADDR.
 
 package redis
 
@@ -24,19 +22,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// integrationPlugin builds an instance against REDIS_ADDR under a key prefix
-// nothing else is using. extra carries any config arguments beyond the
-// address, credentials and per-run prefix, such as key:duid.
+// integrationPlugin's extra carries config arguments beyond the address, credentials and
+// per-run prefix, such as key:duid.
 func integrationPlugin(t *testing.T, v6 bool, extra ...string) *pluginState {
 	t.Helper()
 	addr := os.Getenv("REDIS_ADDR")
 	if addr == "" {
 		t.Skip("REDIS_ADDR is not set, skipping: this test needs a real redis server")
 	}
-	// Keys are namespaced per run, so a shared server or a run that left
-	// something behind cannot decide the outcome of this one. The prefix is
-	// explicit, so it wins over whatever default the key mode in extra would
-	// otherwise pick.
+	// Namespaced per run so a shared server or leftover data from another run can't affect
+	// this one; passed explicitly so it wins over any default the key mode in extra would pick.
 	prefix := fmt.Sprintf("coredhcp-itest:%d:%d:", os.Getpid(), time.Now().UnixNano())
 	args := []string{addr, "prefix:" + prefix, "timeout:5s"}
 	if os.Getenv("REDIS_PASSWORD") != "" {
@@ -48,14 +43,11 @@ func integrationPlugin(t *testing.T, v6 bool, extra ...string) *pluginState {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = p.client.Close() })
 
-	// setupState only warns when the server stays quiet. Here the server is
-	// the point of the test, so it has to answer.
+	// setupState only warns on a quiet server; here the server is the point of the test.
 	require.NoError(t, p.client.ping())
 	return p
 }
 
-// writeFixture stores one client's hash, keyed by ident under p's prefix,
-// through the plugin's own client, and removes it again afterwards.
 func writeFixture(t *testing.T, p *pluginState, ident string, fields map[string]string) {
 	t.Helper()
 	key := p.prefix + ident
@@ -111,8 +103,7 @@ func TestIntegrationHandler6(t *testing.T) {
 	assert.Equal(t, "2001:db8::2", dns[0].String())
 }
 
-// TestIntegrationUnknownMAC checks the pass-through against a real server:
-// an empty hash has to look different from a failed lookup.
+// TestIntegrationUnknownMAC checks an empty hash looks different from a failed lookup on a real server.
 func TestIntegrationUnknownMAC(t *testing.T) {
 	p := integrationPlugin(t, false)
 
@@ -123,9 +114,7 @@ func TestIntegrationUnknownMAC(t *testing.T) {
 	assert.True(t, got.YourIPAddr.IsUnspecified())
 }
 
-// TestIntegrationPoolReuse runs enough lookups to be sure the pooled
-// connection survives being handed back and picked up again, which the unit
-// tests only prove against a server of our own making.
+// TestIntegrationPoolReuse proves connection reuse against a real server, not just the fake one the unit tests use.
 func TestIntegrationPoolReuse(t *testing.T) {
 	p := integrationPlugin(t, false)
 	writeFixture(t, p, testMAC.String(), map[string]string{fieldIPv4: "10.0.0.5"})
@@ -140,9 +129,8 @@ func TestIntegrationPoolReuse(t *testing.T) {
 	assert.Equal(t, 1, p.client.idleCount(), "one connection should serve them all")
 }
 
-// TestIntegrationHandler6DUIDKey covers key:duid against a real server. The
-// fixture ident matches v6Exchange's default client ID, a DUID-LL over
-// testMAC, hex encoded the way the package doc's key:duid example shows it.
+// TestIntegrationHandler6DUIDKey's fixture ident matches v6Exchange's default client ID, a DUID-LL
+// over testMAC, hex encoded as the package doc's key:duid example shows.
 func TestIntegrationHandler6DUIDKey(t *testing.T) {
 	p := integrationPlugin(t, true, "key:duid")
 	writeFixture(t, p, "00030001aabbccddeeff", map[string]string{fieldIPv6: "2001:db8::10:1"})
@@ -159,8 +147,7 @@ func TestIntegrationHandler6DUIDKey(t *testing.T) {
 	assert.Equal(t, "2001:db8::10:1", addr.IPv6Addr.String())
 }
 
-// TestIntegrationHandler4ClientIDKey covers key:client-id against a real
-// server. The fixture ident is the package doc's own example: an RFC 2132
+// TestIntegrationHandler4ClientIDKey's fixture ident is the package doc's own example: an RFC 2132
 // type 1 (hardware address) client identifier carrying testMAC.
 func TestIntegrationHandler4ClientIDKey(t *testing.T) {
 	p := integrationPlugin(t, false, "key:client-id")

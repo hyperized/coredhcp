@@ -47,10 +47,8 @@ var desiredPlugins = []*plugins.Plugin{
 {{- end}}
 }
 
-// terminal is what run needs from the interface: it observes the server, it
-// takes the console log stream, and it owns the screen until the operator
-// quits. tui.UI implements all of it. Tests replace newUI with something that
-// needs no terminal.
+// terminal is what run needs of the interface, kept an interface so a test
+// can drive run without a terminal.
 type terminal interface {
 	events.Observer
 
@@ -59,15 +57,12 @@ type terminal interface {
 	Stop()
 }
 
-// newUI builds the interface run draws on. It is a variable so tests can
-// swap it for a fake.
+// A variable so tests can swap in a fake.
 var newUI = func(version string) terminal {
 	return tui.New(tui.WithVersion(version))
 }
 
-// readBuildInfo is debug.ReadBuildInfo, as a variable so both branches of
-// version() can be tested: a test binary has one build info and no way to
-// change it.
+// A variable: a test binary has one build info and no way to change it.
 var readBuildInfo = debug.ReadBuildInfo
 
 func main() {
@@ -77,9 +72,8 @@ func main() {
 	}
 }
 
-// version reports what the interface shows in its header. Only a binary the
-// go tool built from a module knows its version; a build from a checkout says
-// "(devel)", the same string the go tool uses for it.
+// A build from a checkout has no module version and says "(devel)", the same
+// string the go tool uses for it.
 func version() string {
 	info, ok := readBuildInfo()
 	if !ok || info.Main.Version == "" {
@@ -88,10 +82,8 @@ func version() string {
 	return info.Main.Version
 }
 
-// run starts the server and draws the interface until the operator quits or
-// the server stops, whichever happens first. The plugin listing, the one
-// thing this command prints outside the interface, goes to w. Split from main
-// so it can be tested.
+// run draws the interface until the operator quits or the server stops.
+// Split from main so it can be tested; w takes the plugin listing.
 func run(w io.Writer) error {
 	if *flagPlugins {
 		for _, p := range desiredPlugins {
@@ -117,48 +109,37 @@ func run(w io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
-	// register plugins
 	for _, plugin := range desiredPlugins {
 		if err := plugins.RegisterPlugin(plugin); err != nil {
-			// The plugin is not named here because the only error
-			// RegisterPlugin returns is for a nil entry, which has no name
-			// to read.
+			// Unnamed: RegisterPlugin only errors on a nil entry.
 			return fmt.Errorf("failed to register plugin: %w", err)
 		}
 	}
 
 	ui := newUI(version())
-	// The interface owns the terminal from here on, so the console stream
-	// goes to its log pane instead of stderr. Put stderr back before
-	// returning: anything logged while shutting down has to land somewhere
-	// once the screen is gone.
+	// The interface owns the terminal from here on. Put stderr back before
+	// returning, so shutdown logging still lands somewhere.
 	logger.WithConsole(ui.LogWriter())
 	defer logger.WithConsole(os.Stderr)
 
-	// start server
 	srv, err := server.Start(config, server.WithObserver(ui))
 	if err != nil {
 		return err
 	}
 
-	// shut down cleanly on SIGINT/SIGTERM. Ctrl-C typed into the interface
-	// never gets here: the screen is in raw mode and reads it as a key, so
-	// this is for signals sent from outside, such as a service manager
-	// stopping the unit.
+	// Ctrl-C never gets here: the screen is in raw mode and reads it as a key,
+	// so this is only for signals sent from outside.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sig)
 
-	// waitErr is written by the goroutine below and read after waitDone is
-	// closed, which is what orders the two.
+	// waitErr is ordered by waitDone: written before the close, read after.
 	var waitErr error
 	waitDone := make(chan struct{})
 	go func() {
 		defer close(waitDone)
 		waitErr = srv.Wait()
-		// The listeners are gone, so there is nothing left to draw. This is
-		// what ends the interface after a signal, and also when a listener
-		// dies on its own.
+		// Listeners gone, nothing left to draw.
 		ui.Stop()
 	}()
 	go func() {
@@ -167,23 +148,20 @@ func run(w io.Writer) error {
 			log.Infof("received %s, shutting down", s)
 			srv.Close()
 		case <-waitDone:
-			// The server stopped without us asking. Leave, so this goroutine
-			// does not outlive the run waiting for a signal.
+			// Server stopped on its own; leave rather than outlive the run.
 		}
 	}()
 
 	runErr := ui.Run(context.Background())
-	// Reached either because the operator quit, in which case the listeners
-	// are still up and this is what stops them, or because the server is
-	// already down, in which case closing again is a no-op.
+	// Either the operator quit and this stops the listeners, or the server is
+	// already down and closing again is a no-op.
 	srv.Close()
 	<-waitDone
 
 	if runErr != nil {
 		return runErr
 	}
-	// Wait reports nil for listeners that were closed on purpose, so this is
-	// only non-nil when a listener failed. That has to reach the exit status:
-	// nothing else is left to say the server stopped serving.
+	// Wait is nil for listeners closed on purpose, so an error here has to
+	// reach the exit status; nothing else says the server stopped serving.
 	return waitErr
 }

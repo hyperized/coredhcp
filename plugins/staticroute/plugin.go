@@ -26,8 +26,6 @@ var Plugin = plugins.Plugin{
 	Setup4: setup4,
 }
 
-// pluginState holds the static routes served by an instance of the
-// staticroute plugin.
 type pluginState struct {
 	routes dhcpv4.Routes
 }
@@ -67,7 +65,7 @@ func setup4(args ...string) (handler.Handler4, error) {
 	return p.Handler4, nil
 }
 
-// Handler4 handles DHCPv4 packets for the static routes plugin
+// Handler4 handles DHCPv4 packets for the staticroute plugin.
 func (p *pluginState) Handler4(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	if len(p.routes) > 0 {
 		resp.Options.Update(dhcpv4.Option{

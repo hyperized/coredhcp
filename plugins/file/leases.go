@@ -10,11 +10,8 @@ import (
 	"github.com/coredhcp/coredhcp/leases"
 )
 
-// This file makes an instance of the file plugin readable: it implements
-// leases.Source over the same reservation map the packet path uses, under the
-// same lock, so an API or a UI can list the static mappings alongside the
-// dynamic leases of a pool plugin. setupFile registers the instance; see
-// plugin.go.
+// This file implements leases.Source over the same reservation map the packet
+// path uses, under the same lock.
 
 // Name reports this instance as "file <lease file>", which is what
 // distinguishes the server4 and server6 instances of the plugin, and two
@@ -25,13 +22,8 @@ func (s *pluginState) Name() string {
 
 // Leases returns every reservation loaded from the lease file.
 //
-// They are all static: an operator wrote them down, they never expire, and a
-// client cannot release one. Expires is left zero, which is what Static means
-// on the reading side.
-//
-// With autorefresh on, the map is replaced wholesale when the file changes, so
-// a snapshot is a coherent view of one revision of the file rather than a
-// blend of two.
+// All static, so Expires is left zero. With autorefresh on the map is replaced
+// wholesale, so a snapshot is one revision of the file, never a blend of two.
 func (s *pluginState) Leases() []leases.Lease {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -49,16 +41,12 @@ func (s *pluginState) Leases() []leases.Lease {
 	return out
 }
 
-// Pools returns nil. This plugin serves addresses an operator assigned by
-// hand; it manages no address space of its own, and reporting a pool of the
-// reservations it happens to hold would invite a reader to compute a
-// utilisation that means nothing.
+// Pools returns nil: the plugin manages no address space of its own, and a
+// pool of hand-written reservations would yield a meaningless utilisation.
 func (s *pluginState) Pools() []leases.Pool {
 	return nil
 }
 
-// familyOf maps the protocol flag setupFile is called with to the number a
-// lease reader uses.
 func familyOf(v6 bool) uint8 {
 	if v6 {
 		return 6

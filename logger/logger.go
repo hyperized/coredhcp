@@ -17,12 +17,10 @@ import (
 	"sync"
 )
 
-// levelFatal sits above slog.LevelError so fatal messages survive every
-// verbosity setting except "none".
+// Above slog.LevelError so a fatal survives every verbosity but "none".
 const levelFatal = slog.LevelError + 4
 
-// levels maps the accepted level names to slog levels. "none" sits above
-// fatal, so nothing is ever printed.
+// "none" sits above fatal, so nothing is ever printed.
 var levels = map[string]slog.Level{
 	"none":    levelFatal + 4,
 	"debug":   slog.LevelDebug,
@@ -39,8 +37,6 @@ var (
 	baseOnce sync.Once
 )
 
-// switchableWriter fans log lines out to the console and an optional file,
-// both swappable at runtime.
 type switchableWriter struct {
 	mu      sync.Mutex
 	console io.Writer
@@ -63,8 +59,7 @@ func (w *switchableWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// replaceAttr renders the custom fatal level with its proper name instead of
-// slog's "ERROR+4".
+// Without this slog prints levelFatal as "ERROR+4".
 func replaceAttr(_ []string, a slog.Attr) slog.Attr {
 	if a.Key == slog.LevelKey {
 		if lvl, ok := a.Value.Any().(slog.Level); ok && lvl >= levelFatal {
@@ -74,8 +69,7 @@ func replaceAttr(_ []string, a slog.Attr) slog.Attr {
 	return a
 }
 
-// Logger is a leveled, printf-style front end over log/slog, keeping the
-// call shapes the code base has always used.
+// Logger is a leveled, printf-style front end over log/slog.
 type Logger struct {
 	s *slog.Logger
 }
@@ -94,8 +88,7 @@ func GetLogger(prefix string) *Logger {
 	return &Logger{s: base.With("prefix", prefix)}
 }
 
-// With returns a logger with additional structured context attached as
-// alternating key/value pairs.
+// With attaches structured context as alternating key/value pairs.
 func (l *Logger) With(args ...any) *Logger {
 	return &Logger{s: l.s.With(args...)}
 }
@@ -167,8 +160,7 @@ func (l *Logger) Panicf(format string, args ...any) {
 	panic(msg)
 }
 
-// SetLevel sets the verbosity for all loggers. Accepted names come from
-// Levels.
+// SetLevel sets the verbosity for all loggers to one of the Levels names.
 func SetLevel(name string) error {
 	lvl, ok := levels[strings.ToLower(name)]
 	if !ok {
@@ -188,8 +180,7 @@ func Levels() []string {
 	return names
 }
 
-// WithFile appends every log line to the given file in addition to the
-// existing output. Calling it again replaces the previous file.
+// WithFile also appends every log line to path, replacing any previous file.
 func WithFile(path string) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
@@ -209,10 +200,8 @@ func WithNoStdOutErr() {
 	WithConsole(nil)
 }
 
-// WithConsole replaces the console stream, the same one WithNoStdOutErr
-// disables. A nil w disables console output. The file writer set by
-// WithFile is unaffected and keeps receiving lines. Safe to call while the
-// server is logging.
+// WithConsole replaces the console stream; a nil w disables it.
+// Safe to call while the server is logging; the WithFile writer is unaffected.
 func WithConsole(w io.Writer) {
 	out.mu.Lock()
 	defer out.mu.Unlock()

@@ -21,15 +21,8 @@ import (
 	"github.com/coredhcp/coredhcp/events"
 )
 
-// baseTime is the fixed instant every test builds its events around, so
-// nothing here depends on the wall clock.
 var baseTime = time.Date(2026, 9, 4, 21, 4, 11, 0, time.UTC)
 
-// ---------------------------------------------------------------------------
-// format.go
-// ---------------------------------------------------------------------------
-
-// TestClip pins every branch of clip's truncation and sanitisation.
 func TestClip(t *testing.T) {
 	t.Parallel()
 
@@ -64,8 +57,6 @@ func TestClip(t *testing.T) {
 	}
 }
 
-// TestClipTail pins clipTail, which keeps an identifier's end rather than its
-// start.
 func TestClipTail(t *testing.T) {
 	t.Parallel()
 
@@ -97,7 +88,6 @@ func TestClipTail(t *testing.T) {
 	}
 }
 
-// TestLineBufWriters exercises every lineBuf writer against a fixed budget.
 func TestLineBufWriters(t *testing.T) {
 	t.Parallel()
 
@@ -263,7 +253,6 @@ func TestLineBufWriters(t *testing.T) {
 	})
 }
 
-// TestHumanCount pins the thousands-separator formatting.
 func TestHumanCount(t *testing.T) {
 	t.Parallel()
 
@@ -288,7 +277,6 @@ func TestHumanCount(t *testing.T) {
 	}
 }
 
-// TestHumanDuration pins every duration bucket.
 func TestHumanDuration(t *testing.T) {
 	t.Parallel()
 
@@ -318,7 +306,6 @@ func TestHumanDuration(t *testing.T) {
 	}
 }
 
-// TestPad2 pins the zero-padding helper.
 func TestPad2(t *testing.T) {
 	t.Parallel()
 
@@ -327,8 +314,6 @@ func TestPad2(t *testing.T) {
 	assert.Equal(t, "42", pad2(42))
 }
 
-// TestHumanUptime pins hh:mm:ss rendering, including the negative floor and
-// running past 24 hours.
 func TestHumanUptime(t *testing.T) {
 	t.Parallel()
 
@@ -337,7 +322,6 @@ func TestHumanUptime(t *testing.T) {
 	assert.Equal(t, "30:00:00", humanUptime(30*time.Hour))
 }
 
-// TestHumanSince pins the "last seen" rendering.
 func TestHumanSince(t *testing.T) {
 	t.Parallel()
 
@@ -360,7 +344,6 @@ func TestHumanSince(t *testing.T) {
 	}
 }
 
-// TestHumanRemaining pins the lease countdown.
 func TestHumanRemaining(t *testing.T) {
 	t.Parallel()
 
@@ -384,7 +367,6 @@ func TestHumanRemaining(t *testing.T) {
 	}
 }
 
-// TestAddrText pins how one address prefix renders.
 func TestAddrText(t *testing.T) {
 	t.Parallel()
 
@@ -408,8 +390,6 @@ func TestAddrText(t *testing.T) {
 	}
 }
 
-// TestJoinAddrs pins how a reply's address list is joined, including the
-// "+N" suffix past maxShownAddrs.
 func TestJoinAddrs(t *testing.T) {
 	t.Parallel()
 
@@ -433,7 +413,6 @@ func TestJoinAddrs(t *testing.T) {
 	})
 }
 
-// TestSparkline pins the block-ramp rendering.
 func TestSparkline(t *testing.T) {
 	t.Parallel()
 
@@ -463,7 +442,6 @@ func TestSparkline(t *testing.T) {
 	})
 }
 
-// TestSparkRune pins the per-value glyph selection.
 func TestSparkRune(t *testing.T) {
 	t.Parallel()
 
@@ -490,7 +468,6 @@ func TestSparkRune(t *testing.T) {
 	}
 }
 
-// TestVisible pins the scroll window a pane renders.
 func TestVisible(t *testing.T) {
 	t.Parallel()
 
@@ -539,11 +516,6 @@ func TestVisible(t *testing.T) {
 	})
 }
 
-// ---------------------------------------------------------------------------
-// model.go
-// ---------------------------------------------------------------------------
-
-// TestRing pins the FIFO ring's push, ordering and reset behaviour.
 func TestRing(t *testing.T) {
 	t.Parallel()
 
@@ -581,8 +553,6 @@ func TestRing(t *testing.T) {
 	})
 }
 
-// TestRateRing pins the per-second bucket ring: priming, advancing,
-// clearing and reading it back as a series.
 func TestRateRing(t *testing.T) {
 	t.Parallel()
 
@@ -669,7 +639,6 @@ func TestRateRing(t *testing.T) {
 	})
 }
 
-// TestSumPeak pins the two series aggregates.
 func TestSumPeak(t *testing.T) {
 	t.Parallel()
 
@@ -680,8 +649,6 @@ func TestSumPeak(t *testing.T) {
 	assert.EqualValues(t, 0, peak(nil))
 }
 
-// TestFamilyCountersAdd pins how one request folds into the family tallies,
-// including the bumpKey key cap.
 func TestFamilyCountersAdd(t *testing.T) {
 	t.Parallel()
 
@@ -770,8 +737,6 @@ func TestFamilyCountersAdd(t *testing.T) {
 	})
 }
 
-// TestFamilyCountersClone pins that clone is a deep copy: mutating the
-// clone's maps must not reach the original.
 func TestFamilyCountersClone(t *testing.T) {
 	t.Parallel()
 
@@ -787,8 +752,6 @@ func TestFamilyCountersClone(t *testing.T) {
 	assert.Equal(t, c.total, clone.total)
 }
 
-// TestPaneIDFollowsAndTitle pins the follow flag and the border title for
-// every pane, including the sentinel paneCount value.
 func TestPaneIDFollowsAndTitle(t *testing.T) {
 	t.Parallel()
 
@@ -815,8 +778,6 @@ func TestPaneIDFollowsAndTitle(t *testing.T) {
 	}
 }
 
-// TestNewModelAddListenerAddPlugin pins that a fresh model records listeners
-// and plugins and marks itself dirty.
 func TestNewModelAddListenerAddPlugin(t *testing.T) {
 	t.Parallel()
 
@@ -833,8 +794,6 @@ func TestNewModelAddListenerAddPlugin(t *testing.T) {
 	assert.Equal(t, "range", snap.chains[events.FamilyV4][0].name)
 }
 
-// TestAddListenerClipsFields pins that a listener's strings are cut down
-// before they are stored.
 func TestAddListenerClipsFields(t *testing.T) {
 	t.Parallel()
 
@@ -847,8 +806,6 @@ func TestAddListenerClipsFields(t *testing.T) {
 	assert.LessOrEqual(t, len([]rune(m.listeners[0].Interface)), maxWordLen)
 }
 
-// TestAddPluginClipsName pins that a plugin's name is cut down before it is
-// stored, while its arguments travel unmodified into the chain link.
 func TestAddPluginClipsName(t *testing.T) {
 	t.Parallel()
 
@@ -861,8 +818,6 @@ func TestAddPluginClipsName(t *testing.T) {
 	assert.Equal(t, []string{"a"}, m.chains[events.FamilyV4][0].args)
 }
 
-// TestModelAddRequest pins that a handled request updates every part of the
-// model, and that a zero Time is filled in from the passed clock time.
 func TestModelAddRequest(t *testing.T) {
 	t.Parallel()
 
@@ -880,8 +835,6 @@ func TestModelAddRequest(t *testing.T) {
 	assert.EqualValues(t, 1, snap.counts[events.FamilyV4].total)
 }
 
-// TestModelAddRequestZeroTime pins that an event with a zero Time is
-// stamped with the clock time it was handed.
 func TestModelAddRequestZeroTime(t *testing.T) {
 	t.Parallel()
 
@@ -894,8 +847,6 @@ func TestModelAddRequestZeroTime(t *testing.T) {
 	assert.True(t, snap.traffic[0].Time.Equal(baseTime))
 }
 
-// TestBoundRequest pins that boundRequest cuts strings and the address list
-// down, and that the resulting Addresses slice does not alias the caller's.
 func TestBoundRequest(t *testing.T) {
 	t.Parallel()
 
@@ -941,8 +892,6 @@ func TestBoundRequest(t *testing.T) {
 	})
 }
 
-// TestModelFamily pins that the per-family counters map is capped at
-// maxFamilies, past which a throwaway counters value is handed back.
 func TestModelFamily(t *testing.T) {
 	t.Parallel()
 
@@ -962,8 +911,6 @@ func TestModelFamily(t *testing.T) {
 	assert.NotSame(t, first, second)
 }
 
-// TestModelRecordOutcome pins the server-wide tallies and the error history
-// timestamps for every outcome branch.
 func TestModelRecordOutcome(t *testing.T) {
 	t.Parallel()
 
@@ -1011,9 +958,8 @@ func TestModelRecordOutcome(t *testing.T) {
 		assert.Zero(t, m.tot.errors)
 	})
 
-	// A RELEASE or DECLINE is ordinary traffic the server does not answer.
-	// Counting it as a drop would put the status line into a warning state
-	// on a healthy network.
+	// A RELEASE or DECLINE is ordinary traffic the server does not answer; counting
+	// it as a drop would put the status line into a warning state on a healthy network.
 	t.Run("no reply touches nothing", func(t *testing.T) {
 		t.Parallel()
 
@@ -1027,8 +973,6 @@ func TestModelRecordOutcome(t *testing.T) {
 	})
 }
 
-// TestModelRecordChain pins how a request's outcome is attributed to the
-// plugins in its family's chain.
 func TestModelRecordChain(t *testing.T) {
 	t.Parallel()
 
@@ -1109,8 +1053,7 @@ func TestModelRecordChain(t *testing.T) {
 		assert.EqualValues(t, 1, m.chains[events.FamilyV4][2].dropped)
 	})
 
-	// The chain ran up to the plugin that stopped it, so those links were
-	// reached, but the stopping one neither answered nor dropped anything.
+	// The stopping link was reached but neither answered nor dropped anything.
 	t.Run("a stopping position with no reply is attributed as neither", func(t *testing.T) {
 		t.Parallel()
 
@@ -1140,8 +1083,6 @@ func TestModelRecordChain(t *testing.T) {
 	})
 }
 
-// TestModelAddLog pins that a log line is clipped and stored with its
-// arrival time, and marks the model dirty.
 func TestModelAddLog(t *testing.T) {
 	t.Parallel()
 
@@ -1154,8 +1095,6 @@ func TestModelAddLog(t *testing.T) {
 	assert.LessOrEqual(t, len([]rune(entry.raw)), maxLogLineLen)
 }
 
-// TestModelSnapshot pins the dirty flag protocol and the paused traffic
-// copy.
 func TestModelSnapshot(t *testing.T) {
 	t.Parallel()
 
@@ -1204,7 +1143,6 @@ func TestModelSnapshot(t *testing.T) {
 	})
 }
 
-// TestCloneChainsCloneCounts pins that both clone helpers are deep copies.
 func TestCloneChainsCloneCounts(t *testing.T) {
 	t.Parallel()
 
@@ -1238,8 +1176,6 @@ func TestCloneChainsCloneCounts(t *testing.T) {
 	})
 }
 
-// TestModelSetGeometry pins that a pane's scroll geometry is written back
-// under lock.
 func TestModelSetGeometry(t *testing.T) {
 	t.Parallel()
 
@@ -1251,12 +1187,6 @@ func TestModelSetGeometry(t *testing.T) {
 	assert.Equal(t, 10, m.panes[paneTraffic].height)
 }
 
-// ---------------------------------------------------------------------------
-// leases.go
-// ---------------------------------------------------------------------------
-
-// TestLeaseTransitionV4 pins every DHCPv4 rule from the README's "Where the
-// lease states come from" table.
 func TestLeaseTransitionV4(t *testing.T) {
 	t.Parallel()
 
@@ -1304,8 +1234,7 @@ func TestLeaseTransitionV4(t *testing.T) {
 			leaseDeclined,
 		},
 		{
-			// A DECLINE the server never got to run the chain on says
-			// nothing about the lease.
+			// A DECLINE the chain never ran on says nothing about the lease.
 			"decline as unsupported is not declined",
 			events.Request{Family: events.FamilyV4, Type: "DECLINE", Outcome: events.OutcomeUnsupported},
 			leaseNone,
@@ -1342,8 +1271,6 @@ func TestLeaseTransitionV4(t *testing.T) {
 	}
 }
 
-// TestLeaseTransitionV6 pins every DHCPv6 rule from the README's "Where the
-// lease states come from" table.
 func TestLeaseTransitionV6(t *testing.T) {
 	t.Parallel()
 
@@ -1436,15 +1363,12 @@ func TestLeaseTransitionV6(t *testing.T) {
 	}
 }
 
-// TestLeaseTransitionUnknownFamily pins that a family the table has no rule
-// for says nothing about a lease.
 func TestLeaseTransitionUnknownFamily(t *testing.T) {
 	t.Parallel()
 
 	assert.Equal(t, leaseNone, leaseTransition(events.Request{Family: events.Family(99)}))
 }
 
-// TestSolicitState pins the two answers a SOLICIT can get.
 func TestSolicitState(t *testing.T) {
 	t.Parallel()
 
@@ -1467,8 +1391,6 @@ func TestSolicitState(t *testing.T) {
 	}
 }
 
-// TestLeaseStateLabelAndTag pins the display word and colour for every
-// lease state.
 func TestLeaseStateLabelAndTag(t *testing.T) {
 	t.Parallel()
 
@@ -1497,9 +1419,6 @@ func TestLeaseStateLabelAndTag(t *testing.T) {
 	}
 }
 
-// TestLeaseTableUpdate pins how one update touches an entry: creation,
-// re-ordering to the front, selective field replacement and the expiry
-// rules.
 func TestLeaseTableUpdate(t *testing.T) {
 	t.Parallel()
 
@@ -1577,8 +1496,6 @@ func TestLeaseTableUpdate(t *testing.T) {
 	})
 }
 
-// TestLeaseTableEviction pins that the least recently seen entry is dropped
-// once the table is full.
 func TestLeaseTableEviction(t *testing.T) {
 	t.Parallel()
 
@@ -1593,8 +1510,6 @@ func TestLeaseTableEviction(t *testing.T) {
 	assert.Equal(t, "b", rows[1].client)
 }
 
-// TestLeaseTableCounts pins that the per-state tally follows the table's
-// entries, including through a touch that changes state.
 func TestLeaseTableCounts(t *testing.T) {
 	t.Parallel()
 
@@ -1611,8 +1526,6 @@ func TestLeaseTableCounts(t *testing.T) {
 	assert.Equal(t, 1, counts[leaseConfirmed])
 }
 
-// TestLeaseTableUnlinkPushFront pins the intrusive list operations at the
-// head, middle and tail of the list.
 func TestLeaseTableUnlinkPushFront(t *testing.T) {
 	t.Parallel()
 
@@ -1668,8 +1581,6 @@ func TestLeaseTableUnlinkPushFront(t *testing.T) {
 	})
 }
 
-// TestRecordLease pins the issued/confirmed totals and that an empty client
-// identifier is ignored.
 func TestRecordLease(t *testing.T) {
 	t.Parallel()
 
@@ -1705,8 +1616,6 @@ func TestRecordLease(t *testing.T) {
 	})
 }
 
-// TestLeaseColumns pins the column layout at a floor width, a width where
-// only the plugin column survives dropping, and a wide terminal.
 func TestLeaseColumns(t *testing.T) {
 	t.Parallel()
 
@@ -1732,7 +1641,6 @@ func TestLeaseColumns(t *testing.T) {
 	})
 }
 
-// TestLeaseColsWidthAndGrow pins the width accounting and the grow helper.
 func TestLeaseColsWidthAndGrow(t *testing.T) {
 	t.Parallel()
 
@@ -1752,8 +1660,6 @@ func TestLeaseColsWidthAndGrow(t *testing.T) {
 	assert.Equal(t, 10, field, "never grows past the ceiling")
 }
 
-// TestLeaseLines pins the header row, the empty placeholder and one
-// rendered row.
 func TestLeaseLines(t *testing.T) {
 	t.Parallel()
 
@@ -1780,8 +1686,6 @@ func TestLeaseLines(t *testing.T) {
 	})
 }
 
-// TestWriteLease pins the row layout, including the hostname riding along
-// the client cell and a dropped column being skipped.
 func TestWriteLease(t *testing.T) {
 	t.Parallel()
 
@@ -1806,8 +1710,6 @@ func TestWriteLease(t *testing.T) {
 	assert.NotContains(t, narrow, "range", "the plugin column was dropped at this width")
 }
 
-// TestLeaseRowCells pins the field-by-field transformation from a lease row
-// to its rendered cells.
 func TestLeaseRowCells(t *testing.T) {
 	t.Parallel()
 
@@ -1829,8 +1731,6 @@ func TestLeaseRowCells(t *testing.T) {
 	assert.Equal(t, tagPlain, cells.leaseTag)
 }
 
-// TestLeaseTimeTag pins that an expired or unknown lease dims, while a
-// counting-down lease stays plain.
 func TestLeaseTimeTag(t *testing.T) {
 	t.Parallel()
 
@@ -1839,7 +1739,6 @@ func TestLeaseTimeTag(t *testing.T) {
 	assert.Equal(t, tagPlain, leaseTimeTag(baseTime, leaseRow{expiry: baseTime.Add(time.Second)}))
 }
 
-// TestLeaseTitle pins the pane title's live counters.
 func TestLeaseTitle(t *testing.T) {
 	t.Parallel()
 
@@ -1851,11 +1750,6 @@ func TestLeaseTitle(t *testing.T) {
 	assert.Equal(t, " leases (3 offered, 7 confirmed) ", title)
 }
 
-// ---------------------------------------------------------------------------
-// traffic.go
-// ---------------------------------------------------------------------------
-
-// TestFamilyShort pins the two character family marker.
 func TestFamilyShort(t *testing.T) {
 	t.Parallel()
 
@@ -1864,8 +1758,6 @@ func TestFamilyShort(t *testing.T) {
 	assert.Equal(t, "v?", familyShort(events.Family(99)))
 }
 
-// TestOutcomeWord pins the reply column's word and colour for every
-// outcome, including a reply type outside the graded set.
 func TestOutcomeWord(t *testing.T) {
 	t.Parallel()
 
@@ -1897,7 +1789,6 @@ func TestOutcomeWord(t *testing.T) {
 	}
 }
 
-// TestTrafficTitle pins the paused marker in the pane title.
 func TestTrafficTitle(t *testing.T) {
 	t.Parallel()
 
@@ -1905,9 +1796,6 @@ func TestTrafficTitle(t *testing.T) {
 	assert.Equal(t, " traffic (last 500, paused) ", trafficTitle(snapshot{history: 500, paused: true}))
 }
 
-// TestTrafficColumns pins the layout at a narrow width, where interface and
-// plugin have already been dropped, and at a wide terminal where every
-// column survives and the client and address columns grow.
 func TestTrafficColumns(t *testing.T) {
 	t.Parallel()
 
@@ -1938,8 +1826,6 @@ func TestTrafficColumns(t *testing.T) {
 	})
 }
 
-// TestTrafficColsWidthAndShrink pins the width accounting and the shrink
-// helper.
 func TestTrafficColsWidthAndShrink(t *testing.T) {
 	t.Parallel()
 
@@ -1959,8 +1845,6 @@ func TestTrafficColsWidthAndShrink(t *testing.T) {
 	assert.Equal(t, 8, field, "never shrinks past the floor")
 }
 
-// TestTrafficLines pins the empty ring placeholder and the row count for a
-// populated ring.
 func TestTrafficLines(t *testing.T) {
 	t.Parallel()
 
@@ -1976,9 +1860,6 @@ func TestTrafficLines(t *testing.T) {
 	assert.Len(t, lines, 2)
 }
 
-// TestTrafficLine pins one rendered request row: a normal reply, a client
-// id too long for its column, a parse error with no client, and an error
-// row that does carry a client.
 func TestTrafficLine(t *testing.T) {
 	t.Parallel()
 
@@ -2066,11 +1947,6 @@ func TestTrafficLine(t *testing.T) {
 	})
 }
 
-// ---------------------------------------------------------------------------
-// plugins.go
-// ---------------------------------------------------------------------------
-
-// TestRedactArg pins every redaction rule for a single plugin argument.
 func TestRedactArg(t *testing.T) {
 	t.Parallel()
 
@@ -2098,8 +1974,6 @@ func TestRedactArg(t *testing.T) {
 	}
 }
 
-// TestRedactArgs pins that redactArgs joins its redacted arguments with a
-// space and returns the empty string for none.
 func TestRedactArgs(t *testing.T) {
 	t.Parallel()
 
@@ -2107,7 +1981,6 @@ func TestRedactArgs(t *testing.T) {
 	assert.Equal(t, "deny /etc/coredhcp/deny.txt", redactArgs([]string{"deny", "/etc/coredhcp/deny.txt"}))
 }
 
-// TestTaggedWidth pins the rune-counted width of a run of tagged pieces.
 func TestTaggedWidth(t *testing.T) {
 	t.Parallel()
 
@@ -2115,8 +1988,6 @@ func TestTaggedWidth(t *testing.T) {
 	assert.Equal(t, 5, taggedWidth([]tagged{{tagDim, "×3"}, {tagGood, "✓12"}}))
 }
 
-// TestChainCounts pins the tally column for a link with no traffic, only
-// replies, only drops, and both.
 func TestChainCounts(t *testing.T) {
 	t.Parallel()
 
@@ -2152,8 +2023,6 @@ func TestChainCounts(t *testing.T) {
 	})
 }
 
-// TestPluginLines pins the per-family sections: an unconfigured family and
-// one with a chain.
 func TestPluginLines(t *testing.T) {
 	t.Parallel()
 
@@ -2172,8 +2041,6 @@ func TestPluginLines(t *testing.T) {
 	assert.Contains(t, joined, "not configured", "DHCPv6 has no chain in this snapshot")
 }
 
-// TestFamilyHeader pins the listener summary next to the family name, and
-// the "no listener" fallback.
 func TestFamilyHeader(t *testing.T) {
 	t.Parallel()
 
@@ -2187,8 +2054,6 @@ func TestFamilyHeader(t *testing.T) {
 	assert.Contains(t, noListener, "no listener")
 }
 
-// TestListenerText pins how a family's bound addresses are joined,
-// including the interface suffix.
 func TestListenerText(t *testing.T) {
 	t.Parallel()
 
@@ -2202,8 +2067,6 @@ func TestListenerText(t *testing.T) {
 	assert.Equal(t, "", listenerText(listeners, events.Family(99)))
 }
 
-// TestChainLine pins a plugin's row, with the tallies pinned to the right
-// edge, and behaviour at a narrow width.
 func TestChainLine(t *testing.T) {
 	t.Parallel()
 
@@ -2217,7 +2080,6 @@ func TestChainLine(t *testing.T) {
 	assert.Contains(t, narrow, "✗1", "the tally column survives even when the name has to be clipped")
 }
 
-// TestClipTo pins the plain-string wrapper around clip.
 func TestClipTo(t *testing.T) {
 	t.Parallel()
 
@@ -2225,11 +2087,6 @@ func TestClipTo(t *testing.T) {
 	assert.Equal(t, "ab", clipTo("ab", 5))
 }
 
-// ---------------------------------------------------------------------------
-// counters.go
-// ---------------------------------------------------------------------------
-
-// TestCounterLines pins a family with no requests and one with counters.
 func TestCounterLines(t *testing.T) {
 	t.Parallel()
 
@@ -2244,7 +2101,6 @@ func TestCounterLines(t *testing.T) {
 	assert.Contains(t, joined, "DISCOVER")
 }
 
-// TestCounterHeader pins the family name and request total.
 func TestCounterHeader(t *testing.T) {
 	t.Parallel()
 
@@ -2253,7 +2109,6 @@ func TestCounterHeader(t *testing.T) {
 	assert.Contains(t, line, "42 req")
 }
 
-// TestTypeLine pins the label and the busiest types on one row.
 func TestTypeLine(t *testing.T) {
 	t.Parallel()
 
@@ -2263,7 +2118,6 @@ func TestTypeLine(t *testing.T) {
 	assert.Contains(t, line, "REQUEST")
 }
 
-// TestTopTypes pins the ordering by count then name, and the n cap.
 func TestTopTypes(t *testing.T) {
 	t.Parallel()
 
@@ -2276,8 +2130,6 @@ func TestTopTypes(t *testing.T) {
 	assert.Equal(t, namedCount{"B", 5}, top[2])
 }
 
-// TestProblemLine pins that a zero count stays dim while a non-zero count
-// takes its grading colour.
 func TestProblemLine(t *testing.T) {
 	t.Parallel()
 
@@ -2289,8 +2141,6 @@ func TestProblemLine(t *testing.T) {
 	assert.Contains(t, unhealthy, "3")
 }
 
-// TestPathLine pins the reply-path breakdown, and the "-" fallback when no
-// path was used.
 func TestPathLine(t *testing.T) {
 	t.Parallel()
 
@@ -2304,12 +2154,6 @@ func TestPathLine(t *testing.T) {
 	assert.Contains(t, line, "4")
 }
 
-// ---------------------------------------------------------------------------
-// rate.go
-// ---------------------------------------------------------------------------
-
-// TestRateLines pins that the rate pane renders three rows: requests,
-// errors and chain latency.
 func TestRateLines(t *testing.T) {
 	t.Parallel()
 
@@ -2326,7 +2170,6 @@ func TestRateLines(t *testing.T) {
 	assert.Contains(t, lines[2], "chain")
 }
 
-// TestErrLabel pins the error history's summary word.
 func TestErrLabel(t *testing.T) {
 	t.Parallel()
 
@@ -2334,8 +2177,6 @@ func TestErrLabel(t *testing.T) {
 	assert.Equal(t, "3 in 60 s", errLabel(3))
 }
 
-// TestSparkRow pins the label, sparkline and trailing scale, including the
-// error row's colour when it has something to show.
 func TestSparkRow(t *testing.T) {
 	t.Parallel()
 
@@ -2347,8 +2188,6 @@ func TestSparkRow(t *testing.T) {
 	assert.Contains(t, errRow, "[red]")
 }
 
-// TestChainLatencyLine pins the "no timings yet" placeholder and a line
-// with a median and a maximum.
 func TestChainLatencyLine(t *testing.T) {
 	t.Parallel()
 
@@ -2359,8 +2198,6 @@ func TestChainLatencyLine(t *testing.T) {
 	assert.Contains(t, line, "max")
 }
 
-// TestChainLatency pins the median and maximum computed over the traffic
-// still in the ring, ignoring entries with no duration.
 func TestChainLatency(t *testing.T) {
 	t.Parallel()
 
@@ -2378,7 +2215,6 @@ func TestChainLatency(t *testing.T) {
 	assert.Equal(t, 30*time.Millisecond, top)
 }
 
-// TestLatencyTag pins the slow-chain grading threshold.
 func TestLatencyTag(t *testing.T) {
 	t.Parallel()
 
@@ -2386,11 +2222,6 @@ func TestLatencyTag(t *testing.T) {
 	assert.Equal(t, tagWarn, latencyTag(slowChain))
 }
 
-// ---------------------------------------------------------------------------
-// status.go
-// ---------------------------------------------------------------------------
-
-// TestHeaderLine pins that the header row carries the running totals.
 func TestHeaderLine(t *testing.T) {
 	t.Parallel()
 
@@ -2412,8 +2243,6 @@ func TestHeaderLine(t *testing.T) {
 	assert.Contains(t, line, "errors=2")
 }
 
-// TestCountTag pins that a counter only takes its colour once it has
-// something to say.
 func TestCountTag(t *testing.T) {
 	t.Parallel()
 
@@ -2421,8 +2250,6 @@ func TestCountTag(t *testing.T) {
 	assert.Equal(t, tagBad, countTag(1, tagBad))
 }
 
-// TestRecentRate pins the mean over the trailing window: empty, shorter
-// than the window, and a full window.
 func TestRecentRate(t *testing.T) {
 	t.Parallel()
 
@@ -2437,8 +2264,6 @@ func TestRecentRate(t *testing.T) {
 	assert.Equal(t, "9.5", recentRate(series))
 }
 
-// TestGrade pins every branch of the server's health grading, in the order
-// it is checked.
 func TestGrade(t *testing.T) {
 	t.Parallel()
 
@@ -2500,7 +2325,6 @@ func TestGrade(t *testing.T) {
 	})
 }
 
-// TestWithin pins the error-grading window's boundary.
 func TestWithin(t *testing.T) {
 	t.Parallel()
 
@@ -2509,7 +2333,6 @@ func TestWithin(t *testing.T) {
 	assert.False(t, within(baseTime, baseTime.Add(-errorWindow)))
 }
 
-// TestListenerNote pins the singular and plural listener counts.
 func TestListenerNote(t *testing.T) {
 	t.Parallel()
 
@@ -2517,8 +2340,6 @@ func TestListenerNote(t *testing.T) {
 	assert.Equal(t, "2 listeners", listenerNote(snapshot{listeners: []events.Listener{{}, {}}}))
 }
 
-// TestRequestNote pins the last-request note, including the never-seen
-// case.
 func TestRequestNote(t *testing.T) {
 	t.Parallel()
 
@@ -2526,8 +2347,6 @@ func TestRequestNote(t *testing.T) {
 	assert.Contains(t, requestNote(snapshot{now: baseTime, tot: totals{lastRequest: baseTime.Add(-time.Second)}}), "last request")
 }
 
-// TestStatusLine pins that the status row carries the graded label and
-// note.
 func TestStatusLine(t *testing.T) {
 	t.Parallel()
 
@@ -2536,7 +2355,6 @@ func TestStatusLine(t *testing.T) {
 	assert.Contains(t, line, "FAILING")
 }
 
-// TestFooterLine pins the key hints and the paused marker.
 func TestFooterLine(t *testing.T) {
 	t.Parallel()
 
@@ -2548,8 +2366,6 @@ func TestFooterLine(t *testing.T) {
 	assert.Contains(t, paused, "PAUSED")
 }
 
-// TestHelpLinesAndHelpText pins the overlay's static content and that
-// helpText joins it with newlines.
 func TestHelpLinesAndHelpText(t *testing.T) {
 	t.Parallel()
 
@@ -2562,13 +2378,6 @@ func TestHelpLinesAndHelpText(t *testing.T) {
 	assert.Contains(t, joined, "lease database")
 }
 
-// ---------------------------------------------------------------------------
-// log.go
-// ---------------------------------------------------------------------------
-
-// TestLogWriterWrite pins how bytes are split into whole log lines,
-// including a line held across writes, a CRLF ending, and a line capped at
-// maxLogLineLen without letting the internal buffer grow past it.
 func TestLogWriterWrite(t *testing.T) {
 	t.Parallel()
 
@@ -2667,8 +2476,6 @@ func TestLogWriterWrite(t *testing.T) {
 	})
 }
 
-// TestParseLogLine pins the slog text-handler parser against a full line,
-// quoting rules, extra attributes, and the unparsed fallbacks.
 func TestParseLogLine(t *testing.T) {
 	t.Parallel()
 
@@ -2730,7 +2537,6 @@ func TestParseLogLine(t *testing.T) {
 	})
 }
 
-// TestScanPair pins reading one key=value pair off the front of a line.
 func TestScanPair(t *testing.T) {
 	t.Parallel()
 
@@ -2747,8 +2553,6 @@ func TestScanPair(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// TestScanValue pins the unquoted, quoted, unterminated and invalid quoted
-// value readers.
 func TestScanValue(t *testing.T) {
 	t.Parallel()
 
@@ -2769,8 +2573,6 @@ func TestScanValue(t *testing.T) {
 	assert.Equal(t, 4, n)
 }
 
-// TestParseLogTime pins the handler's timestamp format and the zero-time
-// fallback.
 func TestParseLogTime(t *testing.T) {
 	t.Parallel()
 
@@ -2780,8 +2582,6 @@ func TestParseLogTime(t *testing.T) {
 	assert.True(t, parseLogTime("not a time").IsZero())
 }
 
-// TestLevelTag pins the colour for every log level, including one the
-// server does not use.
 func TestLevelTag(t *testing.T) {
 	t.Parallel()
 
@@ -2809,7 +2609,6 @@ func TestLevelTag(t *testing.T) {
 	}
 }
 
-// TestLogLines pins the empty-ring placeholder.
 func TestLogLines(t *testing.T) {
 	t.Parallel()
 
@@ -2818,8 +2617,6 @@ func TestLogLines(t *testing.T) {
 	assert.Contains(t, lines[0], "no log lines yet")
 }
 
-// TestLogLine pins a parsed line, an unparsed line shown raw, a line with
-// no timestamp falling back to arrival time, and extras riding along.
 func TestLogLine(t *testing.T) {
 	t.Parallel()
 
@@ -2851,14 +2648,7 @@ func TestLogLine(t *testing.T) {
 	})
 }
 
-// ---------------------------------------------------------------------------
-// ui.go (construction only; Run/Stop and the draw loop belong to the
-// external test's screen-driven coverage)
-// ---------------------------------------------------------------------------
-
-// TestNewFallsBackOnBadOptions pins that New repairs every option value it
-// cannot work with: a nil clock, a non-positive refresh, and non-positive
-// ring sizes all fall back to their defaults instead of sticking.
+// Run, Stop and the draw loop are covered by the external test's screen-driven cases.
 func TestNewFallsBackOnBadOptions(t *testing.T) {
 	t.Parallel()
 
@@ -2872,13 +2662,9 @@ func TestNewFallsBackOnBadOptions(t *testing.T) {
 	assert.Equal(t, defaultLogLines, u.logLines)
 }
 
-// watchTimeout bounds how long the watch tests wait for the watcher goroutine
-// to close the channel it returns.
 const watchTimeout = 2 * time.Second
 
-// TestWaitStop pins which of the three ways a run ends waitStop reports as a
-// stop request. Every case leaves exactly one channel ready, so the select
-// has only one arm it can take.
+// Every case leaves exactly one channel ready, so the select has one arm it can take.
 func TestWaitStop(t *testing.T) {
 	t.Parallel()
 
@@ -2911,11 +2697,8 @@ func TestWaitStop(t *testing.T) {
 	})
 }
 
-// TestUIWatchReturnsWhenRunAlreadyEnded pins that the watcher gives up
-// without touching the application when the run ended before anything asked
-// it to stop. It is called directly against channels the test controls: no
-// screen, no Run, and app.Stop is never reached, so an application that was
-// never run, a zero wait group and a no-op cancel are all safe to pass.
+// Called directly against channels the test controls: app.Stop is never reached, so a
+// never-run application, a zero wait group and a no-op cancel are all safe to pass.
 func TestUIWatchReturnsWhenRunAlreadyEnded(t *testing.T) {
 	t.Parallel()
 
@@ -2935,20 +2718,13 @@ func TestUIWatchReturnsWhenRunAlreadyEnded(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// keys.go
-// ---------------------------------------------------------------------------
-
-// newKeyUI builds a UI with a fixed clock for the key-handling tests. No
-// screen and no Run are involved: handleKey is called directly.
+// No screen and no Run: handleKey is called directly.
 func newKeyUI(t *testing.T, at time.Time) *UI {
 	t.Helper()
 
 	return New(WithClock(func() time.Time { return at }))
 }
 
-// TestHandleKeyQuit pins that every quit key stops the UI and consumes the
-// event.
 func TestHandleKeyQuit(t *testing.T) {
 	t.Parallel()
 
@@ -2975,8 +2751,6 @@ func TestHandleKeyQuit(t *testing.T) {
 	}
 }
 
-// TestHandleKeyHelpOverlay pins that any key closes the help overlay while
-// it is open.
 func TestHandleKeyHelpOverlay(t *testing.T) {
 	t.Parallel()
 
@@ -2990,7 +2764,6 @@ func TestHandleKeyHelpOverlay(t *testing.T) {
 	assert.False(t, u.m.helpOpen())
 }
 
-// TestHandleKeyRunes pins pause, clear, help and focus selection.
 func TestHandleKeyRunes(t *testing.T) {
 	t.Parallel()
 
@@ -3064,8 +2837,6 @@ func TestHandleKeyRunes(t *testing.T) {
 	})
 }
 
-// TestHandleKeyFocusCycle pins Tab and Backtab walking focus in both
-// directions, including the wraparound.
 func TestHandleKeyFocusCycle(t *testing.T) {
 	t.Parallel()
 
@@ -3082,9 +2853,6 @@ func TestHandleKeyFocusCycle(t *testing.T) {
 	assert.Equal(t, paneLog, u.m.focus, "backtab wraps from the first pane to the last")
 }
 
-// TestHandleKeyScroll pins the scroll keys against a model whose geometry
-// was set explicitly, including the follow flag switching off when
-// scrolling away from the bottom and back on when returning to it.
 func TestHandleKeyScroll(t *testing.T) {
 	t.Parallel()
 
@@ -3168,8 +2936,6 @@ func TestHandleKeyScroll(t *testing.T) {
 	})
 }
 
-// TestHandleKeyUnhandled pins that a key nothing recognises is handed back
-// unchanged.
 func TestHandleKeyUnhandled(t *testing.T) {
 	t.Parallel()
 
@@ -3180,13 +2946,6 @@ func TestHandleKeyUnhandled(t *testing.T) {
 	assert.Same(t, ev, out)
 }
 
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
-
-// listClients walks an intrusive lease-entry list from head to tail and
-// collects the client identifiers, for asserting list order after unlink
-// and pushFront.
 func listClients(head *leaseEntry) []string {
 	var out []string
 	for e := head; e != nil; e = e.next {

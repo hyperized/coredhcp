@@ -24,7 +24,6 @@ import (
 
 const clientMAC = "00:11:22:33:44:55"
 
-// writeMappings writes a mapping file and returns the file: argument for it.
 func writeMappings(t *testing.T, contents string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ports.txt")
@@ -46,8 +45,6 @@ func handler6(t *testing.T, key, contents string) handler.Handler6 {
 	return h
 }
 
-// message4 builds a DHCPv4 request of the given type, with an option 82
-// carrying subs, and the reply the server would hand to the plugin chain.
 func message4(t *testing.T, mt dhcpv4.MessageType, subs ...dhcpv4.Option) (*dhcpv4.DHCPv4, *dhcpv4.DHCPv4) {
 	t.Helper()
 	mac, err := net.ParseMAC(clientMAC)
@@ -65,8 +62,6 @@ func message4(t *testing.T, mt dhcpv4.MessageType, subs ...dhcpv4.Option) (*dhcp
 	return req, resp
 }
 
-// relayed6 wraps a Solicit in one relay message carrying opts, and returns it
-// with the Advertise the chain gets alongside it.
 func relayed6(t *testing.T, opts ...dhcpv6.Option) (*dhcpv6.RelayMessage, dhcpv6.DHCPv6) {
 	t.Helper()
 	inner := solicit6(t)
@@ -94,8 +89,6 @@ func encapsulate6(t *testing.T, inner dhcpv6.DHCPv6, opts ...dhcpv6.Option) *dhc
 	return relay
 }
 
-// requireIAAddr pulls the single IA_NA address the plugin is expected to have
-// added to result.
 func requireIAAddr(t *testing.T, result dhcpv6.DHCPv6) *dhcpv6.OptIAAddress {
 	t.Helper()
 	opt := result.GetOneOption(dhcpv6.OptionIANA)
@@ -107,8 +100,6 @@ func requireIAAddr(t *testing.T, result dhcpv6.DHCPv6) *dhcpv6.OptIAAddress {
 	return addrs[0]
 }
 
-// TestHandler4Keys checks that each of the three DHCPv4 keys is read from the
-// sub-option it is named after, and only from that one.
 func TestHandler4Keys(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -148,8 +139,7 @@ func TestHandler4Keys(t *testing.T) {
 }
 
 func TestHandler4(t *testing.T) {
-	// longKey is exactly maxKeyLen bytes, the largest a mapping file takes
-	// and the largest an option 82 sub-option can carry.
+	// Exactly maxKeyLen bytes: the largest a mapping file or an option 82 sub-option can carry.
 	longKey := "port-" + strings.Repeat("a", 250)
 	mappings := "rack4-sw1:eth3 192.0.2.31 30m\n" +
 		"0x0a0b0c 192.0.2.32\n" +
@@ -202,10 +192,8 @@ func TestHandler4(t *testing.T) {
 	}
 }
 
-// TestHandler4PassesThroughMessageTypes covers the message types the plugin
-// must not answer even when the key is mapped. The server sends no reply at
-// all to a RELEASE or a DECLINE, so the handler is also given a nil response
-// to prove it does not touch one.
+// RELEASE/DECLINE get no reply from the server, so the handler is also given
+// a nil response here, to prove it never touches one.
 func TestHandler4PassesThroughMessageTypes(t *testing.T) {
 	h := handler4(t, "circuit-id", "rack4-sw1:eth3 192.0.2.31\n")
 
@@ -287,8 +275,7 @@ func TestHandler6InterfaceID(t *testing.T) {
 	}
 }
 
-// TestHandler6RemoteID also pins down that the enterprise number is not part
-// of the key: only the identifier bytes after it are matched.
+// The enterprise number is not part of the key; only the identifier bytes after it are matched.
 func TestHandler6RemoteID(t *testing.T) {
 	h := handler6(t, "remote-id", "0xaabbccddeeff 2001:db8::41 4h\n")
 
@@ -326,9 +313,7 @@ func TestHandler6RemoteID(t *testing.T) {
 	}
 }
 
-// TestHandler6NestedRelays checks which relay wins when a request crosses
-// more than one: the outermost, the one that handed the request to this
-// server.
+// The outermost relay wins - the one that handed the request to this server.
 func TestHandler6NestedRelays(t *testing.T) {
 	h := handler6(t, "interface-id", "access-sw:eth3 2001:db8::51\naggregation:xe-0/0/1 2001:db8::52\n")
 
@@ -391,8 +376,7 @@ func TestHandler6PassesThrough(t *testing.T) {
 	})
 
 	t.Run("malformed relay message", func(t *testing.T) {
-		// A RelayMessage with no embedded OptionRelayMsg makes
-		// GetInnerMessage fail, which drops the request.
+		// No embedded OptionRelayMsg makes GetInnerMessage fail, dropping the request.
 		req := &dhcpv6.RelayMessage{MessageType: dhcpv6.MessageTypeRelayForward}
 		result, stop := h(req, nil)
 		assert.Nil(t, result)
@@ -451,12 +435,8 @@ func TestSetupErrors(t *testing.T) {
 	})
 }
 
-// TestAutorefresh exercises the full autorefresh lifecycle: the initial load,
-// picking up a valid update, surviving a malformed update without losing the
-// mappings that were already loaded, and recovering once a valid file is
-// written again. All waits are require.Eventually against directly observable
-// state rather than fixed sleeps: handler responses, and the logged warning
-// for the otherwise invisible failed-reload case.
+// Waits use require.Eventually against observable state (handler responses,
+// a logged warning) rather than fixed sleeps, since a failed reload is otherwise invisible.
 func TestAutorefresh(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ports.txt")
@@ -484,12 +464,8 @@ func TestAutorefresh(t *testing.T) {
 	require.Eventually(t, resolves("port-2"), 5*time.Second, 20*time.Millisecond,
 		"autorefresh did not pick up the newly added mapping")
 
-	// A malformed update must fail the reload (logging a warning) without
-	// disturbing the mappings already loaded. It is written in place rather
-	// than with os.WriteFile, which truncates first: the watcher can reload
-	// between the truncate and the write, and an empty file is a valid file
-	// with no mappings, so the mappings would be gone before the bad content
-	// ever landed.
+	// Written in place (not os.WriteFile, which truncates first) so the watcher
+	// can't reload an empty file mid-write and lose the earlier mappings.
 	overwrite(t, path, "port-1 this-is-not-an-address\n")
 	require.Eventually(t, func() bool {
 		data, err := os.ReadFile(logPath)
@@ -498,16 +474,14 @@ func TestAutorefresh(t *testing.T) {
 	assert.True(t, resolves("port-1")(), "a mapping must keep resolving after a bad reload")
 	assert.True(t, resolves("port-2")(), "a mapping must keep resolving after a bad reload")
 
-	// The watcher goroutine must still be running after the failed reload, so
-	// a further valid update is picked up too.
+	// Confirms the watcher goroutine is still running after the failed reload.
 	require.NoError(t, os.WriteFile(path, []byte("port-1 192.0.2.31\nport-3 192.0.2.33\n"), 0o600))
 	require.Eventually(t, resolves("port-3"), 5*time.Second, 20*time.Millisecond,
 		"autorefresh did not recover after a bad reload")
 }
 
-// overwrite replaces the start of path with data without truncating it, so a
-// watcher never sees the file empty. What was there before stays on after the
-// new content, which is fine for content that is meant to be malformed.
+// Does not truncate, so a watcher never sees the file empty; whatever was
+// there before stays on after the new content, fine since it's meant to be malformed.
 func overwrite(t *testing.T, path, data string) {
 	t.Helper()
 	f, err := os.OpenFile(path, os.O_WRONLY, 0o600)

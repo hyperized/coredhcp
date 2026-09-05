@@ -4,11 +4,8 @@
 
 package bitmap
 
-// This allocator handles IPv6 address assignments the same way IPv4Allocator
-// handles IPv4: a single free-address bitmap over a contiguous range. Since
-// an IPv6 address doesn't fit a native integer type, the range and every
-// address in it are kept as two uint64 halves, so the arithmetic stays local
-// to this file and no helper needs to return an error.
+// Same free-address bitmap as IPv4Allocator. An IPv6 address does not fit a
+// native integer, so the range is kept as two uint64 halves.
 
 import (
 	"encoding/binary"
@@ -28,26 +25,22 @@ var (
 	errInvalidIPv6    = errors.New("invalid IPv6 address passed as input")
 )
 
-// maxIPv6RangeSize caps how many addresses one range may hold: 2^32, one
-// bit each, so at most 512MiB of bitmap. A /96 is therefore the widest pool.
+// One bit per address, so 2^32 caps the bitmap at 512MiB. A /96 is the
+// widest pool that fits.
 const maxIPv6RangeSize = 1 << 32
 
-// IPv6Allocator allocates single IPv6 addresses out of a contiguous range,
-// tracking utilization with a bitmap.
+// IPv6Allocator allocates single addresses out of a contiguous IPv6 range.
 type IPv6Allocator struct {
 	startHi, startLo uint64
 	size             uint64
 
-	// This bitset implementation isn't goroutine-safe, we protect it with a mutex for now
-	// until we can swap for another concurrent implementation
+	// bitset is not goroutine-safe, hence the mutex.
 	bitmap *bitset.BitSet
 	l      sync.Mutex
 }
 
-// toIP reconstructs the address sitting at offset from the start of the
-// range. It cannot overflow: start+size-1 is the end address that was
-// validated when the allocator was built, so adding any in-bounds offset to
-// start never carries past the top of the address.
+// Cannot carry past the top of the address: start+size-1 is the end address,
+// validated when the allocator was built.
 func (a *IPv6Allocator) toIP(offset uint) net.IP {
 	if uint64(offset) >= a.size {
 		panic("BUG: offset out of bounds")
@@ -62,10 +55,8 @@ func (a *IPv6Allocator) toIP(offset uint) net.IP {
 	return r
 }
 
-// toOffset returns the position of ip within the range. Unlike its IPv4
-// sibling it doesn't collapse both failure causes into one error: it
-// reports errInvalidIPv6 for a malformed address and errIPv6NotInRange for
-// a well-formed one outside [start, end], so a caller can tell them apart.
+// Unlike the IPv4 sibling, a malformed address and an out-of-range one get
+// different errors, so a caller can tell them apart.
 func (a *IPv6Allocator) toOffset(ip net.IP) (uint, error) {
 	v6 := ip.To16()
 	if v6 == nil || ip.To4() != nil {
@@ -81,30 +72,25 @@ func (a *IPv6Allocator) toOffset(ip net.IP) (uint, error) {
 		return 0, errIPv6NotInRange
 	}
 
-	// loOff < a.size <= maxIPv6RangeSize (1<<32), which fits in a uint on the
-	// 64-bit platforms this allocator targets.
+	// loOff < size <= 1<<32, which fits a uint on the targeted 64-bit platforms.
 	return uint(loOff), nil
 }
 
-// Allocate reserves an IPv6 address for a client. The hint's own toOffset
-// error is deliberately ignored, same as IPv4Allocator: an invalid or
-// out-of-range hint just falls back to offset 0, and from there to the
-// first free address the bitmap can find.
+// Allocate reserves an IPv6 address for a client.
+// A bad hint falls back to offset 0, and from there to the first free address.
 func (a *IPv6Allocator) Allocate(hint net.IPNet) (n net.IPNet, err error) {
 	n.Mask = net.CIDRMask(128, 128)
 
-	// This is just a hint, ignore any error with it
+	// Only a hint: the error is deliberately dropped.
 	hintOffset, _ := a.toOffset(hint.IP)
 
 	a.l.Lock()
 	defer a.l.Unlock()
 
 	var next uint
-	// First try the exact match
 	if !a.bitmap.Test(hintOffset) {
 		next = hintOffset
 	} else {
-		// Then any available address
 		avail, ok := a.bitmap.NextClear(0)
 		if !ok {
 			return n, allocators.ErrNoAddrAvail
@@ -117,10 +103,8 @@ func (a *IPv6Allocator) Allocate(hint net.IPNet) (n net.IPNet, err error) {
 	return
 }
 
-// Free releases the given IPv6 address back to the pool. Unlike
-// IPv4Allocator.Free, it returns whatever toOffset reported instead of
-// flattening it to one message, so a caller can tell an invalid address
-// from one that was merely never allocated.
+// Free releases the given IPv6 address back to the pool. It passes toOffset's
+// error through, where IPv4Allocator.Free flattens it to one message.
 func (a *IPv6Allocator) Free(n net.IPNet) error {
 	offset, err := a.toOffset(n.IP)
 	if err != nil {
@@ -171,8 +155,7 @@ func NewIPv6Allocator(start, end net.IP) (*IPv6Allocator, error) {
 		startHi: startHi,
 		startLo: startLo,
 		size:    size,
-		// size <= maxIPv6RangeSize (1<<32), which fits in a uint on the
-		// 64-bit platforms this allocator targets.
+		// size <= 1<<32, which fits a uint on the targeted 64-bit platforms.
 		bitmap: bitset.New(uint(size)),
 	}, nil
 }

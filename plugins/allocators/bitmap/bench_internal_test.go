@@ -9,9 +9,7 @@ import (
 	"testing"
 )
 
-// BenchmarkIPv4AllocatorAllocateMiss allocates over a large, mostly-empty
-// range with an empty hint, which never matches a free address and forces
-// the bitmap search on every call.
+// A large, mostly-empty range with no hint match forces the bitmap search on every call.
 func BenchmarkIPv4AllocatorAllocateMiss(b *testing.B) {
 	b.ReportAllocs()
 
@@ -27,9 +25,7 @@ func BenchmarkIPv4AllocatorAllocateMiss(b *testing.B) {
 	}
 }
 
-// BenchmarkIPv4AllocatorAllocateHintHit mimics a client renewing the same
-// lease over and over: the address is freed and immediately reallocated
-// with a hint that matches it, taking the direct-hit path every time.
+// Mimics a client renewing the same lease: freed and reallocated via a matching hint every time.
 func BenchmarkIPv4AllocatorAllocateHintHit(b *testing.B) {
 	b.ReportAllocs()
 
@@ -52,8 +48,6 @@ func BenchmarkIPv4AllocatorAllocateHintHit(b *testing.B) {
 	}
 }
 
-// BenchmarkIPv4AllocatorFree measures Free in isolation: each iteration
-// allocates an address outside the timer, then frees it under the timer.
 func BenchmarkIPv4AllocatorFree(b *testing.B) {
 	b.ReportAllocs()
 
@@ -77,9 +71,7 @@ func BenchmarkIPv4AllocatorFree(b *testing.B) {
 	}
 }
 
-// BenchmarkPrefixAllocatorAllocate exercises the IPv6 prefix allocator's
-// search path over a large pool with an empty hint, reusing the getAllocator
-// helper from bitmap_internal_test.go.
+// getAllocator(b, 24) builds a large IPv6 prefix pool; an empty hint forces the full search path.
 func BenchmarkPrefixAllocatorAllocate(b *testing.B) {
 	b.ReportAllocs()
 

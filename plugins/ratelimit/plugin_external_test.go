@@ -23,10 +23,8 @@ import (
 	"github.com/coredhcp/coredhcp/plugins/ratelimit"
 )
 
-// Most tests below configure a rate of one request per minute, so the only
-// tokens in play are the ones burst: put there. No amount of wall clock a test
-// run can consume adds another, which makes the pass and drop sequence exact
-// without reaching into the plugin's clock.
+// 1/m keeps the only tokens in play the ones burst: puts there; no amount of
+// real wall-clock time in a test run refills another, so results stay exact.
 const slow = "1/m"
 
 var (
@@ -34,8 +32,6 @@ var (
 	macB = net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x02}
 )
 
-// ctxFrom builds the context the server hands a handler for a request from
-// peer.
 func ctxFrom(peer string) context.Context {
 	return handler.WithRequestInfo(context.Background(), handler.RequestInfo{
 		Interface: "eth0",
@@ -44,8 +40,6 @@ func ctxFrom(peer string) context.Context {
 	})
 }
 
-// limiter4 is a configured DHCPv4 instance of the plugin, with the packet
-// building every test would otherwise repeat wrapped around it.
 type limiter4 struct {
 	t *testing.T
 	h handler.Handler4Ctx
@@ -58,8 +52,6 @@ func newLimiter4(t *testing.T, args ...string) limiter4 {
 	return limiter4{t: t, h: h}
 }
 
-// pass runs one Discovery from mac through the handler and reports whether
-// the chain continued.
 func (l limiter4) pass(ctx context.Context, mac net.HardwareAddr) bool {
 	l.t.Helper()
 	req, err := dhcpv4.NewDiscovery(mac)
@@ -76,7 +68,6 @@ func (l limiter4) pass(ctx context.Context, mac net.HardwareAddr) bool {
 	return true
 }
 
-// limiter6 is limiter4 for DHCPv6.
 type limiter6 struct {
 	t *testing.T
 	h handler.Handler6Ctx
@@ -89,8 +80,6 @@ func newLimiter6(t *testing.T, args ...string) limiter6 {
 	return limiter6{t: t, h: h}
 }
 
-// pass runs one Solicit built from opts through the handler and reports
-// whether the chain continued.
 func (l limiter6) pass(ctx context.Context, opts ...dhcpv6.Modifier) bool {
 	l.t.Helper()
 	req, err := dhcpv6.NewMessage(opts...)
@@ -108,8 +97,7 @@ func (l limiter6) pass(ctx context.Context, opts ...dhcpv6.Modifier) bool {
 	return true
 }
 
-// withMAC gives a DHCPv6 message a DUID-LL, which is where dhcpv6.ExtractMAC
-// finds a hardware address when there is no relay in front of the client.
+// DUID-LL is what dhcpv6.ExtractMAC reads when there's no relay in front of the client.
 func withMAC(mac net.HardwareAddr) dhcpv6.Modifier {
 	return dhcpv6.WithClientID(&dhcpv6.DUIDLL{HWType: dhcpiana.HWTypeEthernet, LinkLayerAddr: mac})
 }
@@ -157,7 +145,6 @@ func TestHandler4SpendsTheBurstThenDrops(t *testing.T) {
 	assert.False(t, l.pass(ctx, macA))
 	assert.False(t, l.pass(ctx, macA))
 
-	// A different client has a bucket of its own.
 	assert.True(t, l.pass(ctx, macB))
 }
 
@@ -185,10 +172,8 @@ func TestHandler4PerBothKeysOnThePair(t *testing.T) {
 }
 
 func TestHandler4WithoutRequestInfoFallsBackToTheMAC(t *testing.T) {
-	// The server always attaches RequestInfo, but a handler reached through
-	// the legacy LoadPlugins API or straight from a test sees none, and has
-	// to keep limiting rather than pass everything or lump every client into
-	// one bucket.
+	// A handler reached through the legacy LoadPlugins API, or straight from a
+	// test, sees no RequestInfo; it must keep limiting rather than pass everything.
 	l := newLimiter4(t, slow, "burst:1", "per:source")
 
 	assert.True(t, l.pass(context.Background(), macA))
@@ -237,9 +222,8 @@ func TestHandler6WithNeitherMACNorDUIDKeysOnThePeer(t *testing.T) {
 }
 
 func TestHandler4IsSafeUnderConcurrentUse(t *testing.T) {
-	// One instance, one goroutine per packet, which is how the server calls
-	// it. The race detector is the point; the counts have to add up exactly
-	// because no token is refilled inside a run this short.
+	// The race detector is the point here; the counts must add up exactly
+	// since the run is too short for any token to refill.
 	const (
 		goroutines = 16
 		perRoutine = 200
@@ -273,8 +257,7 @@ func TestHandler4IsSafeUnderConcurrentUse(t *testing.T) {
 	assert.Greater(t, int64(goroutines*perRoutine), allowed.Load())
 }
 
-// benchRequest builds the packet a benchmark reuses, so the numbers measure
-// the plugin and not dhcpv4 packet construction.
+// Reused across iterations so the numbers measure the plugin, not dhcpv4 packet construction.
 func benchRequest(b *testing.B, mac net.HardwareAddr) *dhcpv4.DHCPv4 {
 	b.Helper()
 	req, err := dhcpv4.NewDiscovery(mac)
@@ -291,14 +274,8 @@ func BenchmarkHandler4(b *testing.B) {
 		Peer:      netip.MustParseAddrPort("192.0.2.10:68"),
 	})
 
-	// One client hammering the server, which is the path a flood takes and
-	// the one that has to be free: a table hit, a move to the head of the LRU
-	// that finds the bucket already there, and the bucket arithmetic.
-	//
-	// The bucket runs dry partway through, since no rate the plugin accepts
-	// keeps up with a benchmark loop, so most iterations time a drop rather
-	// than a pass. The two differ by one subtraction and the counter behind
-	// the summary, and the drop is what a flood actually costs.
+	// The flood path: the bucket is already at the LRU head after the first
+	// hit, and runs dry fast, so most iterations time a drop, the real cost of a flood.
 	b.Run("hot key", func(b *testing.B) {
 		h, err := ratelimit.Plugin.Setup4Ctx("1000000/s")
 		if err != nil {
@@ -312,8 +289,7 @@ func BenchmarkHandler4(b *testing.B) {
 		}
 	})
 
-	// A stream of distinct clients that fits inside max: every key is a hit
-	// after the first pass, and every hit moves a bucket through the list.
+	// Fits inside max:, so after the first pass every key is a hit that moves a bucket through the LRU.
 	b.Run("cycled keys", func(b *testing.B) {
 		const keys = 1024
 		h, err := ratelimit.Plugin.Setup4Ctx("1000000/s", "max:1024")
@@ -333,9 +309,7 @@ func BenchmarkHandler4(b *testing.B) {
 		}
 	})
 
-	// A client varying its MAC per packet, which is what someone who has read
-	// this plugin's documentation does. Every request evicts and refiles a
-	// bucket, so the key string is allocated each time.
+	// Every request evicts and refiles a bucket, so this measures the key-string allocation too.
 	b.Run("new keys", func(b *testing.B) {
 		h, err := ratelimit.Plugin.Setup4Ctx("1000000/s", "max:1024")
 		if err != nil {

@@ -49,8 +49,6 @@ var Plugin = plugins.Plugin{
 	Setup4: setup4,
 }
 
-// pluginState holds the NBP options served by an instance of the nbp
-// plugin.
 type pluginState struct {
 	opt59, opt60 dhcpv6.Option
 	opt66, opt67 *dhcpv4.Option
@@ -106,22 +104,18 @@ func setup4(args ...string) (handler.Handler4, error) {
 // Handler6 handles DHCPv6 packets for the nbp plugin.
 func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	if p.opt59 == nil {
-		// nothing to do
 		return resp, true
 	}
 	decap, err := req.GetInnerMessage()
 	if err != nil {
 		log.Errorf("Could not decapsulate request: %v", err)
-		// drop the request, this is probably a critical error in the packet.
 		return nil, true
 	}
 	for _, code := range decap.Options.RequestedOptions() {
 		switch code {
 		case dhcpv6.OptionBootfileURL:
-			// bootfile URL is requested
 			resp.AddOption(p.opt59)
 		case dhcpv6.OptionBootfileParam:
-			// optionally add opt60, bootfile params, if requested
 			if p.opt60 != nil {
 				resp.AddOption(p.opt60)
 			}
@@ -134,7 +128,6 @@ func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 // Handler4 handles DHCPv4 packets for the nbp plugin.
 func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	if p.opt67 == nil {
-		// nothing to do
 		return resp, true
 	}
 	if req.IsOptionRequested(dhcpv4.OptionTFTPServerName) && p.opt66 != nil {

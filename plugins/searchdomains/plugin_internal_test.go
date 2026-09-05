@@ -23,14 +23,11 @@ func TestCopySlice(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := copySlice(tc.original)
-			// copySlice always allocates via make(), so a nil input yields
-			// an empty (non-nil) slice rather than nil; compare contents,
-			// not identity.
+			// copySlice allocates via make(), so nil input yields an empty, non-nil slice; compare contents, not identity.
 			assert.Equal(t, len(tc.original), len(got))
 			assert.ElementsMatch(t, tc.original, got)
 
-			// The copy must be independent: mutating it must not affect the
-			// original, so downstream plugins can't corrupt our state.
+			// The copy must be independent, or a downstream plugin could corrupt our state.
 			if len(got) > 0 {
 				got[0] = "mutated"
 				assert.NotEqual(t, tc.original[0], got[0])

@@ -26,33 +26,24 @@ const (
 )
 
 const (
-	// familyV4 and familyV6 are the "family" field.
 	familyV4 = 4
 	familyV6 = 6
 
-	// hostPrefixV4 and hostPrefixV6 turn a leased address into the host route
-	// the addresses field reports. See the payload section of the package
-	// documentation for why a lease is never reported as a subnet.
+	// Host routes, not subnets: see the payload section of the package doc.
 	hostPrefixV4 = "/32"
 	hostPrefixV6 = "/128"
 
-	// maxHostnameBytes caps the hostname copied out of a packet. Option 12
-	// and the DHCPv6 FQDN option are both attacker-controlled and as long as
-	// their encoding allows; 255 bytes is the longest a domain name may be
-	// (RFC 1035 section 2.3.4), so nothing legitimate is lost.
+	// RFC 1035 section 2.3.4: 255 bytes is the longest a domain name may be,
+	// so nothing legitimate is lost by capping the attacker-controlled hostname here.
 	maxHostnameBytes = 255
 )
 
-// allEvents lists every event name in the order they are documented. It is
-// read only.
 var allEvents = []string{eventOffer, eventAck, eventNak, eventReply, eventRelease, eventDecline}
 
-// knownEvents is allEvents as a set, and doubles as the default allow-list.
-// It is read only: applyEvents builds a fresh map rather than narrowing this
-// one.
+// The default allow-list. Read only: applyEvents builds a fresh map rather
+// than narrowing this one.
 var knownEvents = eventSet(allEvents)
 
-// eventSet turns a list of event names into a set.
 func eventSet(names []string) map[string]bool {
 	set := make(map[string]bool, len(names))
 	for _, name := range names {
@@ -61,14 +52,12 @@ func eventSet(names []string) map[string]bool {
 	return set
 }
 
-// eventNames lists the event names for an error message.
 func eventNames() string {
 	return strings.Join(allEvents, ", ")
 }
 
-// event is one lease event, and is exactly what gets serialised as the JSON
-// body. The field order here is the key order in that body, which is what
-// makes the output stable enough to compare byte for byte.
+// Field order here is the JSON key order, kept stable so output compares
+// byte for byte.
 type event struct {
 	Family        int      `json:"family"`
 	Event         string   `json:"event"`
@@ -83,19 +72,15 @@ type event struct {
 	TransactionID string   `json:"transaction_id,omitempty"`
 }
 
-// leaseEvent4 maps the two response types that carry an address to their
-// event name. It is read only.
 var leaseEvent4 = map[dhcpv4.MessageType]string{
 	dhcpv4.MessageTypeOffer: eventOffer,
 	dhcpv4.MessageTypeAck:   eventAck,
 }
 
-// event4 builds the event for one DHCPv4 exchange. ok is false when the
-// exchange is not something this plugin reports.
+// ok is false when the exchange is not something this plugin reports.
 func event4(req, resp *dhcpv4.DHCPv4, now time.Time) (event, bool) {
-	// RELEASE and DECLINE are dispatched on the request: the server answers
-	// neither, so the response the chain carries has no message type at all
-	// and says nothing about which address the client means.
+	// RELEASE and DECLINE dispatch on the request: the server answers
+	// neither, so the response carries no message type or address at all.
 	switch req.MessageType() {
 	case dhcpv4.MessageTypeRelease:
 		return withAddress4(base4(eventRelease, req, now), req.ClientIPAddr), true
@@ -108,8 +93,6 @@ func event4(req, resp *dhcpv4.DHCPv4, now time.Time) (event, bool) {
 	return answer4(req, resp, now)
 }
 
-// answer4 builds the event for the answer the chain produced, when that
-// answer is one of the three worth reporting.
 func answer4(req, resp *dhcpv4.DHCPv4, now time.Time) (event, bool) {
 	mt := resp.MessageType()
 	if mt == dhcpv4.MessageTypeNak {
@@ -117,9 +100,8 @@ func answer4(req, resp *dhcpv4.DHCPv4, now time.Time) (event, bool) {
 	}
 	name, ok := leaseEvent4[mt]
 	if !ok || !hasAddr(resp.YourIPAddr) {
-		// An OFFER or an ACK is only worth reporting once an allocator has
-		// put an address in yiaddr, which is the reason this plugin belongs
-		// last in the chain.
+		// Only worth reporting once an allocator has filled yiaddr, which
+		// is why this plugin runs last in the chain.
 		return event{}, false
 	}
 	ev := withAddress4(base4(name, req, now), resp.YourIPAddr)
@@ -127,7 +109,6 @@ func answer4(req, resp *dhcpv4.DHCPv4, now time.Time) (event, bool) {
 	return ev, true
 }
 
-// base4 fills the fields every DHCPv4 event carries.
 func base4(name string, req *dhcpv4.DHCPv4, now time.Time) event {
 	ev := event{
 		Family:        familyV4,
@@ -143,7 +124,6 @@ func base4(name string, req *dhcpv4.DHCPv4, now time.Time) event {
 	return ev
 }
 
-// withAddress4 reports one leased IPv4 address, when there is one.
 func withAddress4(ev event, ip net.IP) event {
 	if !hasAddr(ip) {
 		return ev
@@ -152,13 +132,11 @@ func withAddress4(ev event, ip net.IP) event {
 	return ev
 }
 
-// hasAddr reports whether ip names an address rather than "none". A DHCPv4
-// header field that was never filled in is either empty or all zeroes.
+// An unset DHCPv4 header field shows up as either empty or all zeroes, hence both checks.
 func hasAddr(ip net.IP) bool {
 	return len(ip) > 0 && !ip.IsUnspecified()
 }
 
-// event6 builds the event for one DHCPv6 exchange.
 func event6(req, resp dhcpv6.DHCPv6, now time.Time) (event, bool) {
 	reqMsg, err := req.GetInnerMessage()
 	if err != nil {
@@ -174,8 +152,8 @@ func event6(req, resp dhcpv6.DHCPv6, now time.Time) (event, bool) {
 	return replied6(req, reqMsg, resp, now)
 }
 
-// released6 reports what the client says it is handing back or refusing,
-// which its own message names rather than the reply.
+// Addresses and prefixes come from the client's own message, not the reply:
+// the client names what it is handing back or refusing.
 func released6(name string, req dhcpv6.DHCPv6, msg *dhcpv6.Message, now time.Time) event {
 	ev := base6(name, req, msg, now)
 	ev.Addresses, _ = addresses6(msg)
@@ -183,7 +161,6 @@ func released6(name string, req dhcpv6.DHCPv6, msg *dhcpv6.Message, now time.Tim
 	return ev
 }
 
-// replied6 reports a Reply that hands out at least one address or prefix.
 func replied6(req dhcpv6.DHCPv6, reqMsg *dhcpv6.Message, resp dhcpv6.DHCPv6, now time.Time) (event, bool) {
 	if resp == nil {
 		return event{}, false
@@ -207,9 +184,8 @@ func replied6(req dhcpv6.DHCPv6, reqMsg *dhcpv6.Message, resp dhcpv6.DHCPv6, now
 	return ev, true
 }
 
-// firstValid picks the lifetime that lease_seconds reports: the one belonging
-// to the first address, or to the first prefix when the reply delegates
-// without addressing.
+// lease_seconds reports the first address's lifetime, or the first prefix's
+// when the reply delegates without addressing.
 func firstValid(addrValid, pdValid time.Duration) time.Duration {
 	if addrValid != 0 {
 		return addrValid
@@ -217,7 +193,6 @@ func firstValid(addrValid, pdValid time.Duration) time.Duration {
 	return pdValid
 }
 
-// base6 fills the fields every DHCPv6 event carries.
 func base6(name string, req dhcpv6.DHCPv6, msg *dhcpv6.Message, now time.Time) event {
 	ev := event{
 		Family:        familyV6,
@@ -229,9 +204,8 @@ func base6(name string, req dhcpv6.DHCPv6, msg *dhcpv6.Message, now time.Time) e
 	if duid := msg.Options.ClientID(); duid != nil {
 		ev.DUID = hex.EncodeToString(duid.ToBytes())
 	}
-	// A DHCPv6 client is identified by its DUID; the MAC is only there when
-	// the DUID or a relay option happens to carry one, so its absence is
-	// normal and not worth a log line.
+	// The MAC is only present when the DUID or a relay option happens to
+	// carry one, so its absence is normal and not worth a log line.
 	if mac, err := dhcpv6.ExtractMAC(req); err == nil {
 		ev.MAC = mac.String()
 	}
@@ -241,8 +215,6 @@ func base6(name string, req dhcpv6.DHCPv6, msg *dhcpv6.Message, now time.Time) e
 	return ev
 }
 
-// addresses6 reads the IA_NA addresses out of a message, with the valid
-// lifetime of the first one.
 func addresses6(msg *dhcpv6.Message) ([]string, time.Duration) {
 	var out []string
 	var valid time.Duration
@@ -260,8 +232,6 @@ func addresses6(msg *dhcpv6.Message) ([]string, time.Duration) {
 	return out, valid
 }
 
-// delegations6 reads the IA_PD prefixes out of a message, with the valid
-// lifetime of the first one.
 func delegations6(msg *dhcpv6.Message) ([]string, time.Duration) {
 	var out []string
 	var valid time.Duration
@@ -279,8 +249,6 @@ func delegations6(msg *dhcpv6.Message) ([]string, time.Duration) {
 	return out, valid
 }
 
-// fqdn6 returns the name the client asked for in its FQDN option, empty when
-// it sent none.
 func fqdn6(msg *dhcpv6.Message) string {
 	opt := msg.Options.FQDN()
 	if opt == nil || opt.DomainName == nil {
@@ -289,12 +257,8 @@ func fqdn6(msg *dhcpv6.Message) string {
 	return strings.Join(opt.DomainName.Labels, ".")
 }
 
-// relayLinkAddr returns the link address of the relay closest to the client,
-// or nil when the request did not come through one.
-//
-// The innermost relay is the one on the client's own link, which is the
-// address an IPAM wants. The outermost, which is what the server holds, only
-// names the link the next relay sits on.
+// The innermost relay sits on the client's own link, the address an IPAM
+// wants; the outermost only names where the next relay sits.
 func relayLinkAddr(pkt dhcpv6.DHCPv6) net.IP {
 	var link net.IP
 	for {
@@ -311,11 +275,8 @@ func relayLinkAddr(pkt dhcpv6.DHCPv6) net.IP {
 	}
 }
 
-// truncateUTF8 caps s at max bytes, backing off to a rune boundary so the cut
-// itself cannot leave a partial rune behind. Invalid bytes that were already
-// in s are left alone; encoding/json escapes them on the way out.
-//
-// limit is always well above utf8.UTFMax here, so the loop cannot empty s.
+// Backs off to a rune boundary so the cut cannot leave a partial rune
+// behind. limit is always well above utf8.UTFMax here, so this cannot empty s.
 func truncateUTF8(s string, limit int) string {
 	if len(s) <= limit {
 		return s

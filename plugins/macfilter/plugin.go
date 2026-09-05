@@ -21,45 +21,29 @@
 //
 // Every remaining argument is either a MAC address, in any format accepted
 // by net.ParseMAC, or a file:/path/to/list entry naming a text file with one
-// MAC address per line. Blank lines and lines starting with '#' (after
-// leading whitespace) are ignored. Files are read once, at setup time; they
-// are not watched for changes. At least one MAC address must result from
-// the combined arguments, or setup fails; setup errors name the offending
-// argument or file line.
+// MAC address per line. Blank lines and lines starting with '#' are ignored.
+// Files are read once, at setup time; they are not watched for changes. At
+// least one MAC address must result, or setup fails.
 //
 // Matching is exact and case-insensitive: addresses are canonicalized with
 // net.HardwareAddr.String() before comparison.
 //
-// # What a MAC filter is worth
-//
-// A MAC address is not a credential. On DHCPv4 the filter matches chaddr, a
-// field the client fills in itself; on DHCPv6 the address is derived from a
-// DUID or a relay option that the client or the relay chose. Anyone who can
-// put a frame on the segment can put any address in it. Allow mode keeps
-// honest clients off a network they do not belong on and keeps the lease pool
-// tidy. It is not authentication, and nothing here should be load-bearing
-// against someone who is trying: that is what 802.1X or a separate VLAN is
-// for.
+// A MAC address is not a credential -- chaddr and the DHCPv6 DUID are both
+// filled in by the client -- so this keeps honest clients off a network they
+// do not belong on. Authentication is what 802.1X or a separate VLAN is for.
 //
 // # Placement
 //
-// macfilter should be listed before any plugin that allocates or reserves a
-// lease (e.g. range, file, prefix), so that a dropped client never touches
-// lease state.
+// Before any plugin that allocates or reserves a lease (range, file, prefix),
+// so a dropped client never touches lease state.
 //
 // # DHCPv6 and MAC-less requests
 //
-// DHCPv6 has no equivalent of DHCPv4's ClientHWAddr field: the MAC is
-// derived with dhcpv6.ExtractMAC, which looks at the relay's link-layer
-// option or the client's DUID-LL/DUID-LLT, and can fail to find one at all
-// (for example a DUID-EN client behind a relay that omits the link-layer
-// option). When no MAC can be derived, the two modes disagree on purpose:
-//
-//   - allow mode drops the request: an allow list can only pass what it
-//     recognizes, so a client it cannot identify fails closed.
-//   - deny mode passes the request: a deny list condemns specific
-//     addresses, and a client that matches none of them - because it has
-//     none to compare against - cannot be on the list.
+// DHCPv6 has no ClientHWAddr field, and dhcpv6.ExtractMAC can come up empty
+// (a DUID-EN client behind a relay that omits the link-layer option). The two
+// modes then disagree on purpose: allow drops, because a list can only pass
+// what it recognizes, and deny passes, because a client with no address to
+// compare cannot be on the list.
 package macfilter
 
 import (
@@ -92,15 +76,11 @@ var Plugin = plugins.Plugin{
 	Setup4: setup4,
 }
 
-// pluginState holds the mode and MAC set backing one instance of the
-// macfilter plugin.
 type pluginState struct {
 	allow bool // true for allow mode, false for deny mode
 	macs  map[string]struct{}
 }
 
-// drop reports whether a request from mac should be dropped under the
-// configured mode.
 func (p *pluginState) drop(mac net.HardwareAddr) bool {
 	_, listed := p.macs[mac.String()]
 	if p.allow {
@@ -125,7 +105,6 @@ func setup4(args ...string) (handler.Handler4, error) {
 	return p.Handler4, nil
 }
 
-// setupState parses the mode and MAC sources shared by setup4 and setup6.
 func setupState(args ...string) (*pluginState, error) {
 	if len(args) < 1 {
 		return nil, errors.New("need a mode argument: allow or deny")
@@ -169,9 +148,6 @@ func setupState(args ...string) (*pluginState, error) {
 	return &pluginState{allow: allow, macs: macs}, nil
 }
 
-// loadMACFile reads one MAC address per line from filename into macs.
-// Blank lines and lines starting with '#' (after leading whitespace) are
-// ignored.
 func loadMACFile(filename string, macs map[string]struct{}) error {
 	if filename == "" {
 		return errors.New("empty file path in file: entry")

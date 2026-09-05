@@ -75,9 +75,7 @@ func TestWithReturnsNewInstance(t *testing.T) {
 
 func TestWithConsoleRedirectsOutput(t *testing.T) {
 	t.Cleanup(func() {
-		// os.Stderr is what the package starts with (its console field is
-		// initialized to os.Stderr), so restoring it here puts things back
-		// the way every other test in this binary expects to find them.
+		// Restores os.Stderr, the package's default console, for tests sharing this binary.
 		logger.WithConsole(os.Stderr)
 	})
 

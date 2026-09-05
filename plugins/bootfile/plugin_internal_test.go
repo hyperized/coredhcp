@@ -55,7 +55,6 @@ func TestParseArgsErrorNamesTheOffendingInput(t *testing.T) {
 	_, err := parseArgs("sparc=tftp://10.0.0.5/f")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `"sparc"`)
-	// The message lists what would have been accepted instead.
 	assert.Contains(t, err.Error(), "arch:<n>")
 }
 

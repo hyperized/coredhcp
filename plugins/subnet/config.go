@@ -20,10 +20,8 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// Setup errors that a caller or a test can match with errors.Is. Anything
-// that has to quote the offending input is built with fmt.Errorf instead, so
-// the message names what was wrong with the file rather than only what rule
-// it broke.
+// Matched with errors.Is; an error that has to quote the offending input is
+// built with fmt.Errorf instead.
 var (
 	errNoSubnets       = errors.New("no subnets configured")
 	errNoName          = errors.New("every subnet needs a name")
@@ -40,16 +38,12 @@ var (
 	errMappedPrefix    = errors.New("write an IPv4 prefix in dotted-quad notation, not as IPv4-mapped IPv6")
 )
 
-// fileConfig is the whole YAML file. Decoding is strict, so a key that is not
-// spelled exactly like one of these fields fails setup instead of being
-// ignored: a typo in a subnet definition is the kind of mistake that would
-// otherwise only show up as clients on the wrong scope.
+// Decoded strictly: an unrecognized key fails setup instead of being silently
+// ignored, since a typo here would otherwise only show up as clients on the wrong scope.
 type fileConfig struct {
 	Subnets []subnetConfig `yaml:"subnets"`
 }
 
-// subnetConfig is one entry of the subnets list, straight off the disk. Every
-// value is still a string here; parseSubnet turns it into a scope.
 type subnetConfig struct {
 	Name         string            `yaml:"name"`
 	CIDR         string            `yaml:"cidr"`
@@ -64,14 +58,12 @@ type subnetConfig struct {
 	Options      optionsConfig     `yaml:"options"`
 }
 
-// matchConfig says which requests belong to a subnet.
 type matchConfig struct {
 	Interfaces []string `yaml:"interfaces"`
 	Relays     []string `yaml:"relays"`
 }
 
-// optionsConfig is the small set of options a scope carries. Anything beyond
-// it belongs in the options plugin, which encodes arbitrary codes.
+// Anything beyond this set belongs in the options plugin, which encodes arbitrary codes.
 type optionsConfig struct {
 	Router string   `yaml:"router"`
 	DNS    []string `yaml:"dns"`
@@ -79,7 +71,7 @@ type optionsConfig struct {
 	NTP    []string `yaml:"ntp"`
 }
 
-// addrRange is a pool written as <start>-<end>, inclusive at both ends.
+// Inclusive at both ends.
 type addrRange struct {
 	start, end netip.Addr
 }
@@ -87,35 +79,28 @@ type addrRange struct {
 // String renders the range the way the configuration file writes it.
 func (r addrRange) String() string { return r.start.String() + "-" + r.end.String() }
 
-// overlaps reports whether the two ranges share an address.
 func (r addrRange) overlaps(o addrRange) bool {
 	return r.start.Compare(o.end) <= 0 && o.start.Compare(r.end) <= 0
 }
 
-// scope is one validated subnet: the subnet the handlers use, plus the
-// arguments its range or prefix handler is built from. The two are kept apart
-// because the whole file is validated on every setup while handlers are only
-// built for the family being set up.
+// Kept apart from subnet because the whole file is validated on every setup,
+// but handlers are only built for the family being set up.
 type scope struct {
 	sub *subnet
 
-	// v4 is the family of sub.cidr, which fixes which of the fields below
-	// can be set at all.
+	// Fixes which of the fields below can be set at all.
 	v4 bool
 
-	// pool and leasedb are the DHCPv4 range plugin's arguments; pool is nil
-	// for a subnet that allocates nothing. prefixPool and prefixSize are the
-	// DHCPv6 prefix plugin's; prefixPool is invalid when unset.
+	// pool/leasedb feed the DHCPv4 range plugin, prefixPool/prefixSize the
+	// DHCPv6 prefix plugin. pool is nil and prefixPool invalid when unset.
 	pool       *addrRange
 	leasedb    string
 	prefixPool netip.Prefix
 	prefixSize int
 
-	// lease is the lease duration both delegates take.
 	lease time.Duration
 }
 
-// parseFile reads path and turns it into validated scopes in file order.
 func parseFile(path string) ([]*scope, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -138,7 +123,6 @@ func parseFile(path string) ([]*scope, error) {
 	return scopes, nil
 }
 
-// compile validates every subnet on its own and then the file as a whole.
 func compile(list []subnetConfig) ([]*scope, error) {
 	if len(list) == 0 {
 		return nil, errNoSubnets
@@ -157,9 +141,7 @@ func compile(list []subnetConfig) ([]*scope, error) {
 	return scopes, nil
 }
 
-// subnetError puts the offending subnet in front of err. An entry with no
-// name is identified by its position, counting from one as an operator reads
-// the file.
+// Counts from one, the way an operator reads the file, when the subnet has no name.
 func subnetError(idx int, name string, err error) error {
 	if name == "" {
 		return fmt.Errorf("subnet #%d: %w", idx+1, err)
@@ -167,10 +149,8 @@ func subnetError(idx int, name string, err error) error {
 	return fmt.Errorf("subnet %q: %w", name, err)
 }
 
-// parseSubnet validates one entry and builds the scope for it. No lease
-// database is opened and no allocator built here: everything in the file has
-// to be checked before the first delegate handler is constructed, or a
-// mistake in the last subnet leaves the earlier ones holding open files.
+// No lease database opened or allocator built here: the whole file must
+// validate first, or a mistake in a later subnet leaves earlier ones holding open files.
 func parseSubnet(sc subnetConfig) (*scope, error) {
 	if sc.Name == "" {
 		return nil, errNoName
@@ -197,8 +177,7 @@ func parseSubnet(sc subnetConfig) (*scope, error) {
 	return s, nil
 }
 
-// parseMatch reads the selection rules. A subnet nothing can select is a
-// configuration mistake, so one without rules has to say default: true.
+// A subnet nothing can select is a mistake, so one without match rules must say default: true.
 func parseMatch(s *scope, sc *subnetConfig) error {
 	if slices.Contains(sc.Match.Interfaces, "") {
 		return errEmptyInterface
@@ -217,8 +196,7 @@ func parseMatch(s *scope, sc *subnetConfig) error {
 	return nil
 }
 
-// parseRelay accepts either a single relay address or a prefix covering a
-// range of them, and returns it as a prefix either way.
+// A bare address comes back as a single-address prefix, so callers only handle one type.
 func parseRelay(value string, v4 bool) (netip.Prefix, error) {
 	if strings.Contains(value, "/") {
 		p, err := parsePrefix(value, "relay")
@@ -237,9 +215,8 @@ func parseRelay(value string, v4 bool) (netip.Prefix, error) {
 	return netip.PrefixFrom(a, a.BitLen()), nil
 }
 
-// parseLease reads the lease duration. It is required exactly for the subnets
-// that hand out an address, because neither delegate has a default this
-// plugin would want to inherit silently.
+// Required exactly for subnets that hand out an address: neither delegate has
+// a default worth inheriting silently.
 func parseLease(s *scope, sc *subnetConfig) error {
 	if sc.Lease == "" {
 		if sc.Pool != "" || sc.PrefixPool != "" || len(sc.Reservations) > 0 {
@@ -259,7 +236,6 @@ func parseLease(s *scope, sc *subnetConfig) error {
 	return nil
 }
 
-// parseAllocation reads whichever pool the subnet's family can have.
 func parseAllocation(s *scope, sc *subnetConfig) error {
 	if s.v4 {
 		return parsePool4(s, sc)
@@ -267,8 +243,7 @@ func parseAllocation(s *scope, sc *subnetConfig) error {
 	return parsePool6(s, sc)
 }
 
-// parsePool4 reads pool and leasedb, the two arguments the range plugin needs
-// beyond the lease time.
+// pool and leasedb feed the range plugin.
 func parsePool4(s *scope, sc *subnetConfig) error {
 	if sc.PrefixPool != "" || sc.PrefixSize != 0 {
 		return errPrefixOnV4
@@ -294,8 +269,6 @@ func parsePool4(s *scope, sc *subnetConfig) error {
 	return nil
 }
 
-// parseRange splits a <start>-<end> pool and checks the two ends are IPv4 and
-// in order.
 func parseRange(value string) (addrRange, error) {
 	first, last, ok := strings.Cut(value, "-")
 	if !ok {
@@ -315,9 +288,8 @@ func parseRange(value string) (addrRange, error) {
 	return addrRange{start: start, end: end}, nil
 }
 
-// parsePool6 reads prefixpool and prefixsize, the prefix plugin's arguments.
-// The size has to sit between the pool's own length and 128, which is the
-// range of prefixes that can be carved out of it.
+// prefixpool and prefixsize feed the prefix plugin; prefixsize must sit between
+// the prefixpool's own length and 128, the range of prefixes it can carve out.
 func parsePool6(s *scope, sc *subnetConfig) error {
 	if sc.Pool != "" || sc.LeaseDB != "" {
 		return errPoolOnV6
@@ -344,9 +316,7 @@ func parsePool6(s *scope, sc *subnetConfig) error {
 	return nil
 }
 
-// parseReservations canonicalizes the MAC keys and checks every address is on
-// the subnet. Keys are visited in sorted order so a file with more than one
-// mistake in it always fails on the same one.
+// Keys are visited in sorted order so a file with more than one mistake always fails on the same one.
 func parseReservations(s *scope, sc *subnetConfig) error {
 	if len(sc.Reservations) == 0 {
 		return nil
@@ -376,7 +346,6 @@ func parseReservations(s *scope, sc *subnetConfig) error {
 	return nil
 }
 
-// parseOptions reads the options block for the subnet's family.
 func parseOptions(s *scope, sc *subnetConfig) error {
 	if s.v4 {
 		return parseOptions4(s, &sc.Options)
@@ -384,9 +353,7 @@ func parseOptions(s *scope, sc *subnetConfig) error {
 	return parseOptions6(s, &sc.Options)
 }
 
-// parseOptions4 builds the DHCPv4 option set. The subnet mask is not
-// configurable: it is the one option a scope always knows, straight from the
-// cidr.
+// The subnet mask isn't configurable: it's the one option a scope always knows, straight from the cidr.
 func parseOptions4(s *scope, o *optionsConfig) error {
 	opts := options4{mask: net.CIDRMask(s.sub.cidr.Bits(), 32), domain: o.Domain}
 	if o.Router != "" {
@@ -410,10 +377,8 @@ func parseOptions4(s *scope, o *optionsConfig) error {
 	return nil
 }
 
-// parseOptions6 builds the DHCPv6 option set, which is the resolver list and
-// nothing else. Option 3 has no DHCPv6 equivalent (routers are learned from
-// router advertisements), and the domain name and NTP options are encoded
-// differently enough that they belong in the options and ntp plugins.
+// Router has no DHCPv6 equivalent (learned via router advertisements instead), and
+// domain/NTP are encoded differently enough to belong in the options and ntp plugins.
 func parseOptions6(s *scope, o *optionsConfig) error {
 	if o.Router != "" || o.Domain != "" || len(o.NTP) > 0 {
 		return errOptionsV4Only
@@ -426,7 +391,6 @@ func parseOptions6(s *scope, o *optionsConfig) error {
 	return nil
 }
 
-// checkFile runs the rules that need to see every subnet at once.
 func checkFile(scopes []*scope) error {
 	for _, check := range []func([]*scope) error{checkNames, checkDefaults, checkLeaseDBs, checkPools} {
 		if err := check(scopes); err != nil {
@@ -436,8 +400,7 @@ func checkFile(scopes []*scope) error {
 	return nil
 }
 
-// checkNames refuses duplicate names, which would make every log line and
-// every error message about them ambiguous.
+// Duplicate names would make every log line and error message about them ambiguous.
 func checkNames(scopes []*scope) error {
 	seen := make(map[string]bool, len(scopes))
 	for _, s := range scopes {
@@ -449,9 +412,8 @@ func checkNames(scopes []*scope) error {
 	return nil
 }
 
-// checkDefaults allows one fallback subnet per family. Two would make the
-// fallback depend on file order, which is not something an operator should
-// have to reason about.
+// Two defaults per family would make the fallback depend on file order, which
+// an operator shouldn't have to reason about.
 func checkDefaults(scopes []*scope) error {
 	defaults := map[bool]string{}
 	for _, s := range scopes {
@@ -467,9 +429,8 @@ func checkDefaults(scopes []*scope) error {
 	return nil
 }
 
-// checkLeaseDBs refuses to point two subnets at one sqlite file. Sharing one
-// would have two range plugins allocate from the same lease table with
-// separate allocators, and hand the same address to two clients.
+// Sharing a leasedb would have two range plugins allocate from the same lease
+// table with separate allocators, handing out the same address twice.
 func checkLeaseDBs(scopes []*scope) error {
 	seen := make(map[string]string, len(scopes))
 	for _, s := range scopes {
@@ -485,9 +446,7 @@ func checkLeaseDBs(scopes []*scope) error {
 	return nil
 }
 
-// checkPools refuses overlapping pools, for the same reason as checkLeaseDBs:
-// each subnet allocates from its own allocator, so an address in two pools is
-// an address handed out twice.
+// Each subnet allocates from its own allocator, so an address in two pools would be handed out twice.
 func checkPools(scopes []*scope) error {
 	for i, a := range scopes {
 		for _, b := range scopes[:i] {
@@ -499,7 +458,6 @@ func checkPools(scopes []*scope) error {
 	return nil
 }
 
-// poolConflict names the overlap between two scopes, if there is one.
 func poolConflict(a, b *scope) error {
 	switch {
 	case a.pool != nil && b.pool != nil && a.pool.overlaps(*b.pool):
@@ -511,9 +469,8 @@ func poolConflict(a, b *scope) error {
 	return nil
 }
 
-// parsePrefix parses a CIDR, rejecting the IPv4-mapped form because it would
-// match neither family: netip.Prefix.Contains compares address lengths, so a
-// ::ffff:10.0.0.0/120 scope would silently never be selected.
+// Rejects the IPv4-mapped form: netip.Prefix.Contains compares address lengths,
+// so a ::ffff:10.0.0.0/120 scope would silently never be selected.
 func parsePrefix(value, what string) (netip.Prefix, error) {
 	p, err := netip.ParsePrefix(value)
 	if err != nil {
@@ -525,8 +482,6 @@ func parsePrefix(value, what string) (netip.Prefix, error) {
 	return p.Masked(), nil
 }
 
-// parseIP parses one address and checks it is from the family the subnet
-// serves. what names the field for the error message.
 func parseIP(value string, v4 bool, what string) (netip.Addr, error) {
 	a, err := netip.ParseAddr(value)
 	if err != nil {
@@ -539,8 +494,7 @@ func parseIP(value string, v4 bool, what string) (netip.Addr, error) {
 	return a, nil
 }
 
-// parseIPs parses a list of addresses of one family, returning nil for an
-// empty list so callers can tell "not configured" from "configured empty".
+// Returns nil for an empty list, so callers can tell not-configured from configured-empty.
 func parseIPs(values []string, v4 bool, what string) ([]net.IP, error) {
 	if len(values) == 0 {
 		return nil, nil
@@ -556,12 +510,10 @@ func parseIPs(values []string, v4 bool, what string) ([]net.IP, error) {
 	return out, nil
 }
 
-// familyError reports a value from the wrong protocol family.
 func familyError(what, value string, v4 bool) error {
 	return fmt.Errorf("%s %q is not %s, which is the family of this subnet", what, value, familyName(v4))
 }
 
-// familyName spells a family out for an error message.
 func familyName(v4 bool) string {
 	if v4 {
 		return "IPv4"

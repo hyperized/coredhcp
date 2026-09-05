@@ -37,34 +37,25 @@ var (
 	iaid2 = [4]byte{0x00, 0x00, 0x00, 0x02}
 )
 
-// TestMain silences the console for the whole package. The plugin logs a line
-// per exchange, and a full run makes thousands of them.
+// The plugin logs a line per exchange, and a full run makes thousands of them.
 func TestMain(m *testing.M) {
 	logger.WithNoStdOutErr()
 	os.Exit(m.Run())
 }
 
-// setupPlugin builds a plugin instance over a fresh database in the test's
-// temp dir.
-//
-// Every instance gets a sweep interval far longer than a test run. Setup6
-// starts the background sweeper and nothing in the public API can stop it, so
-// the black-box tests rely on it never ticking; the timing of reclamation
-// itself is tested against the clock seam in plugin_internal_test.go.
+// Sweep interval is far longer than a test run — Setup6 starts the sweeper
+// and nothing here can stop it, so these tests rely on it never ticking;
+// reclamation timing is tested via the clock seam in plugin_internal_test.go.
 func setupPlugin(t *testing.T) handler.Handler6 {
 	t.Helper()
 	return setupPool(t, poolLast)
 }
 
-// setupPool builds one over a pool that ends at last, which is how a test asks
-// for a pool small enough to run dry.
 func setupPool(t *testing.T, last string, opts ...string) handler.Handler6 {
 	t.Helper()
 	return setupPoolAt(t, filepath.Join(t.TempDir(), "leases6.sqlite3"), last, opts...)
 }
 
-// setupPoolAt is the same over a named database file, so a test can start a
-// second instance on the one the first left behind.
 func setupPoolAt(t *testing.T, db, last string, opts ...string) handler.Handler6 {
 	t.Helper()
 	args := append([]string{db, poolFirst, last, leaseTime, "sweep:1h"}, opts...)
@@ -74,8 +65,6 @@ func setupPoolAt(t *testing.T, db, last string, opts ...string) handler.Handler6
 	return h
 }
 
-// testDUID builds a link-layer DUID, distinct per id so one test can drive
-// several clients.
 func testDUID(id byte) dhcpv6.DUID {
 	return &dhcpv6.DUIDLL{
 		HWType:        dhcpIana.HWTypeEthernet,
@@ -83,8 +72,6 @@ func testDUID(id byte) dhcpv6.DUID {
 	}
 }
 
-// newIANA builds an IA_NA option carrying the given addresses, which is both
-// how a client hints at an address and how it names the ones it is giving up.
 func newIANA(iaid [4]byte, addrs ...net.IP) *dhcpv6.OptIANA {
 	ia := &dhcpv6.OptIANA{IaId: iaid}
 	for _, addr := range addrs {
@@ -104,8 +91,6 @@ func newRequest(t *testing.T, mtype dhcpv6.MessageType, duid dhcpv6.DUID, ianas 
 	return req
 }
 
-// newResponse builds the response the server hands the plugin chain: an
-// Advertise for a plain SOLICIT, a Reply for everything else.
 func newResponse(req *dhcpv6.Message) *dhcpv6.Message {
 	mtype := dhcpv6.MessageTypeReply
 	if req.MessageType == dhcpv6.MessageTypeSolicit && req.GetOneOption(dhcpv6.OptionRapidCommit) == nil {
@@ -114,8 +99,6 @@ func newResponse(req *dhcpv6.Message) *dhcpv6.Message {
 	return &dhcpv6.Message{MessageType: mtype, TransactionID: req.TransactionID}
 }
 
-// exchange runs one message through the handler and returns the response it
-// filled in. A nil response means the plugin dropped the packet.
 func exchange(t *testing.T, h handler.Handler6, req *dhcpv6.Message) (*dhcpv6.Message, bool) {
 	t.Helper()
 	got, stop := h(req, newResponse(req))
@@ -127,8 +110,6 @@ func exchange(t *testing.T, h handler.Handler6, req *dhcpv6.Message) (*dhcpv6.Me
 	return msg, stop
 }
 
-// ianaIn returns the answer for one IAID, or nil when the response carries
-// none.
 func ianaIn(msg *dhcpv6.Message, iaid [4]byte) *dhcpv6.OptIANA {
 	for _, ia := range msg.Options.IANA() {
 		if ia.IaId == iaid {
@@ -138,8 +119,6 @@ func ianaIn(msg *dhcpv6.Message, iaid [4]byte) *dhcpv6.OptIANA {
 	return nil
 }
 
-// leasedAddress returns the single address answered for one IAID, failing the
-// test when the IA_NA is missing or carries a status instead.
 func leasedAddress(t *testing.T, msg *dhcpv6.Message, iaid [4]byte) net.IP {
 	t.Helper()
 	ia := ianaIn(msg, iaid)
@@ -149,7 +128,6 @@ func leasedAddress(t *testing.T, msg *dhcpv6.Message, iaid [4]byte) net.IP {
 	return addrs[0].IPv6Addr
 }
 
-// assertStatus checks the status code of one answered IA_NA.
 func assertStatus(t *testing.T, msg *dhcpv6.Message, iaid [4]byte, want dhcpIana.StatusCode) {
 	t.Helper()
 	ia := ianaIn(msg, iaid)
@@ -160,7 +138,6 @@ func assertStatus(t *testing.T, msg *dhcpv6.Message, iaid [4]byte, want dhcpIana
 	assert.Empty(t, ia.Options.Addresses(), "an IA_NA answering with a status carries no address")
 }
 
-// solicit runs one SOLICIT and returns the address the client was given.
 func solicit(t *testing.T, h handler.Handler6, duid dhcpv6.DUID, iaid [4]byte) net.IP {
 	t.Helper()
 	resp, stop := exchange(t, h, newRequest(t, dhcpv6.MessageTypeSolicit, duid, newIANA(iaid)))
@@ -169,7 +146,6 @@ func solicit(t *testing.T, h handler.Handler6, duid dhcpv6.DUID, iaid [4]byte) n
 	return leasedAddress(t, resp, iaid)
 }
 
-// inPool reports whether an address falls inside the pool the tests configure.
 func inPool(ip net.IP) bool {
 	v6 := ip.To16()
 	return bytes.Compare(v6, net.ParseIP(poolFirst).To16()) >= 0 &&
@@ -213,8 +189,6 @@ func TestSetupArgumentValidation(t *testing.T) {
 	}
 }
 
-// TestSetupAcceptsOptionsInAnyOrder pins that the optional arguments are
-// named rather than positional.
 func TestSetupAcceptsOptionsInAnyOrder(t *testing.T) {
 	cases := [][]string{
 		{},
@@ -235,7 +209,6 @@ func TestSetupAcceptsOptionsInAnyOrder(t *testing.T) {
 	}
 }
 
-// strings names a subtest after the arguments it passes.
 func strings(args []string) string {
 	if len(args) == 0 {
 		return "no options"
@@ -270,9 +243,7 @@ func TestSolicitAllocatesAnAddress(t *testing.T) {
 	assert.Equal(t, 12*time.Hour, addrs[0].ValidLifetime)
 }
 
-// TestSolicitWithRapidCommitFillsTheReply drives the path the server takes
-// when the client asked for a two-message exchange: the response is already a
-// Reply rather than an Advertise, and the plugin fills it in the same way.
+// Rapid Commit means the response is already a Reply, not an Advertise.
 func TestSolicitWithRapidCommitFillsTheReply(t *testing.T) {
 	h := setupPlugin(t)
 
@@ -291,8 +262,6 @@ func TestSolicitWithRapidCommitFillsTheReply(t *testing.T) {
 	assert.True(t, inPool(leasedAddress(t, reply, iaid1)))
 }
 
-// TestRequestKeepsTheSolicitedAddress pins that a SOLICIT binding counts: the
-// address a client was offered is the one it gets when it asks for it.
 func TestRequestKeepsTheSolicitedAddress(t *testing.T) {
 	h := setupPlugin(t)
 	duid := testDUID(1)
@@ -304,8 +273,6 @@ func TestRequestKeepsTheSolicitedAddress(t *testing.T) {
 	assert.Equal(t, offered.String(), leasedAddress(t, resp, iaid1).String())
 }
 
-// TestClientHintIsHonoured pins that a client asking for a free address in the
-// pool gets that one.
 func TestClientHintIsHonoured(t *testing.T) {
 	h := setupPlugin(t)
 	wanted := net.ParseIP("2001:db8:1::1f0")
@@ -326,8 +293,7 @@ func TestRenewExtendsTheBinding(t *testing.T) {
 	assert.Equal(t, held.String(), leasedAddress(t, resp, iaid1).String())
 }
 
-// TestRenewWithoutABindingGetsNoBinding is RFC 8415 §18.3.4: the client has to
-// be told to start over rather than left waiting.
+// RFC 8415 §18.3.4.
 func TestRenewWithoutABindingGetsNoBinding(t *testing.T) {
 	h := setupPlugin(t)
 
@@ -347,9 +313,8 @@ func TestRebindExtendsTheBinding(t *testing.T) {
 	assert.Equal(t, held.String(), leasedAddress(t, resp, iaid1).String())
 }
 
-// TestRebindWithoutABindingStaysQuiet is RFC 8415 §18.3.5: a REBIND reaches
-// every server on the link, so one that knows nothing about the client says
-// nothing and leaves the answer to the server that does.
+// RFC 8415 §18.3.5: a REBIND reaches every server on the link, so this one
+// stays quiet and leaves the answer to whichever server has the binding.
 func TestRebindWithoutABindingStaysQuiet(t *testing.T) {
 	h := setupPlugin(t)
 
@@ -396,8 +361,6 @@ func TestConfirm(t *testing.T) {
 
 func status(c dhcpIana.StatusCode) *dhcpIana.StatusCode { return &c }
 
-// TestConfirmChangesNoBinding pins that a CONFIRM neither allocates nor frees:
-// the client keeps whatever it had, and the pool is untouched.
 func TestConfirmChangesNoBinding(t *testing.T) {
 	h := setupPlugin(t)
 	duid := testDUID(1)
@@ -422,20 +385,15 @@ func TestReleaseFreesTheAddress(t *testing.T) {
 	require.NotNil(t, resp.Options.Status())
 	assert.Equal(t, dhcpIana.StatusSuccess, resp.Options.Status().StatusCode)
 
-	// The binding is gone: a RENEW for it now has nothing to extend.
 	renewed, _ := exchange(t, h, newRequest(t, dhcpv6.MessageTypeRenew, duid, newIANA(iaid1, held)))
 	require.NotNil(t, renewed)
 	assertStatus(t, renewed, iaid1, dhcpIana.StatusNoBinding)
 
-	// And the address is back in the pool: the next client can have it.
 	other, _ := exchange(t, h, newRequest(t, dhcpv6.MessageTypeRequest, testDUID(2), newIANA(iaid1, held)))
 	require.NotNil(t, other)
 	assert.Equal(t, held.String(), leasedAddress(t, other, iaid1).String())
 }
 
-// TestReleaseOfSomethingElse pins that a RELEASE only frees what the sender
-// actually holds. Going by the DUID alone, or by the IAID alone, would let
-// anyone who can forge one empty the pool.
 func TestReleaseOfSomethingElse(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -468,9 +426,6 @@ func TestReleaseOfSomethingElse(t *testing.T) {
 	}
 }
 
-// TestDeclineHoldsTheAddressBack pins the quarantine: the client reported the
-// address as already in use, so the next client must not be walked into the
-// same conflict.
 func TestDeclineHoldsTheAddressBack(t *testing.T) {
 	h := setupPool(t, "2001:db8:1::101")
 	duid := testDUID(1)
@@ -483,13 +438,10 @@ func TestDeclineHoldsTheAddressBack(t *testing.T) {
 	require.NotNil(t, resp.Options.Status())
 	assert.Equal(t, dhcpIana.StatusSuccess, resp.Options.Status().StatusCode)
 
-	// A second client asking for exactly that address gets the other one.
 	other := solicit(t, h, testDUID(2), iaid1)
 	assert.NotEqual(t, held.String(), other.String(), "a declined address must stay out of the pool")
 }
 
-// TestDeclineWithoutProbationReturnsTheAddress pins that the quarantine can be
-// turned off, which is what an operator who trusts their link wants.
 func TestDeclineWithoutProbationReturnsTheAddress(t *testing.T) {
 	h := setupPool(t, "2001:db8:1::100", "decline-probation:0s")
 	duid := testDUID(1)
@@ -503,8 +455,6 @@ func TestDeclineWithoutProbationReturnsTheAddress(t *testing.T) {
 	assert.Equal(t, held.String(), other.String(), "with no probation the address goes straight back")
 }
 
-// TestDeclineOfSomethingElse mirrors TestReleaseOfSomethingElse: a DECLINE
-// must not take an address the sender does not hold out of the pool.
 func TestDeclineOfSomethingElse(t *testing.T) {
 	h := setupPlugin(t)
 	duid := testDUID(1)
@@ -520,8 +470,6 @@ func TestDeclineOfSomethingElse(t *testing.T) {
 	assert.Equal(t, held.String(), leasedAddress(t, renewed, iaid1).String())
 }
 
-// TestQuarantineIsBounded pins decline-max: a client that declines everything
-// it is offered cannot take the pool with it.
 func TestQuarantineIsBounded(t *testing.T) {
 	h := setupPool(t, "2001:db8:1::103", "decline-max:1")
 	duid := testDUID(1)
@@ -535,7 +483,6 @@ func TestQuarantineIsBounded(t *testing.T) {
 		assertStatus(t, resp, [4]byte{0, 0, 0, byte(i)}, dhcpIana.StatusSuccess)
 	}
 
-	// Only one address may still be held back, so the pool is not empty.
 	got := solicit(t, h, testDUID(2), iaid1)
 	assert.Contains(t, declined, got.String(), "an evicted address has to be usable again")
 }
@@ -550,8 +497,7 @@ func TestInformationRequestPassesThrough(t *testing.T) {
 	assert.Empty(t, resp.Options.Options, "an INFORMATION-REQUEST asks for configuration, not an address")
 }
 
-// TestUnhandledMessageTypesPassThrough pins that the plugin only acts on the
-// message types RFC 8415 §18.3 gives it something to do for.
+// RFC 8415 §18.3: only listed message types get handled.
 func TestUnhandledMessageTypesPassThrough(t *testing.T) {
 	for _, mtype := range []dhcpv6.MessageType{
 		dhcpv6.MessageTypeAdvertise,
@@ -581,8 +527,6 @@ func TestTwoIANAsGetTwoAddresses(t *testing.T) {
 	assert.True(t, inPool(second))
 }
 
-// TestIANAsPerMessageAreCapped pins the bound on how much work one packet may
-// ask for. Nine IA_NAs go in, eight are answered.
 func TestIANAsPerMessageAreCapped(t *testing.T) {
 	h := setupPlugin(t)
 
@@ -645,9 +589,6 @@ func TestPoolExhaustion(t *testing.T) {
 	assertStatus(t, resp, iaid1, dhcpIana.StatusNoAddrsAvail)
 }
 
-// TestBindingsSurviveARestart runs setup twice over the same file: the second
-// instance has to load the stored bindings and put them back in the allocator,
-// so the client keeps its address and nobody else is handed it.
 func TestBindingsSurviveARestart(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "leases6.sqlite3")
 	duid := testDUID(1)
@@ -661,8 +602,8 @@ func TestBindingsSurviveARestart(t *testing.T) {
 		"a restored binding must still hold its address in the allocator")
 }
 
-// TestStoredHostnameIsSanitised reads the row back out of sqlite: the name
-// comes off the wire, so what lands in the database is filtered and bounded.
+// The name comes straight off the wire, so what lands in the database must
+// be filtered and bounded.
 func TestStoredHostnameIsSanitised(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "leases6.sqlite3")
 	h := setupPoolAt(t, dbPath, poolLast)
@@ -682,8 +623,7 @@ func TestStoredHostnameIsSanitised(t *testing.T) {
 	assert.Equal(t, "laptopdrop.example", hostname)
 }
 
-// seedDB writes rows straight into the lease table, bypassing every check the
-// plugin makes, to set up the states setup has to survive on reload.
+// Bypasses every check the plugin makes, to set up states a normal write couldn't reach.
 func seedDB(t *testing.T, path string, rows [][5]any) {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+path)
@@ -723,8 +663,6 @@ func TestSetupRejectsUnusableStoredRows(t *testing.T) {
 	}
 }
 
-// TestSetupRestoresAStoredBinding is the happy path of the same reload: a row
-// written before the server started is served back to its owner.
 func TestSetupRestoresAStoredBinding(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "leases6.sqlite3")
 	duid := testDUID(1)

@@ -59,9 +59,8 @@ func TestSendEthernetNoMACSerializeFailure(t *testing.T) {
 }
 
 func TestSendEthernetZeroValueResponse(t *testing.T) {
-	// gopacket decodes even a zero-value DHCPv4 (so the nil-layer guard in
-	// sendEthernet stays defensive-only; it used to be a panic), but the
-	// empty source IP then fails IPv4 serialization.
+	// gopacket decodes even a zero-value DHCPv4, so sendEthernet's nil-layer
+	// guard is defensive-only; the empty source IP fails serialization instead.
 	err := sendEthernet(findMACInterface(t), &dhcpv4.DHCPv4{})
 	require.Error(t, err)
 	require.ErrorContains(t, err, "cannot serialize layer")

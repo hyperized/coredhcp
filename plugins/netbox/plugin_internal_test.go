@@ -18,8 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// pluginStubBackend is a lookuper the handler and lookup tests can drive
-// directly, without going through an HTTP server.
+// pluginStubBackend is a lookuper the handler and lookup tests can drive directly, skipping HTTP.
 type pluginStubBackend struct {
 	calls  int
 	gotMAC string
@@ -108,8 +107,7 @@ func TestOptionsParse(t *testing.T) {
 			if tc.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErr)
-				// An argument that isn't one of the known prefixes should
-				// name what is accepted, not just what was rejected.
+				// An unknown argument's error should name what is accepted, not just what was rejected.
 				if tc.name == "unknown argument" || tc.name == "unknown argument that looks like one of ours" {
 					assert.Contains(t, err.Error(), knownOptions())
 				}
@@ -122,8 +120,7 @@ func TestOptionsParse(t *testing.T) {
 }
 
 func TestKnownOptions(t *testing.T) {
-	// The documented order in the package comment: ttl, negative-ttl,
-	// timeout, lifetime.
+	// This order is documented in the package comment.
 	assert.Equal(t, "ttl:, negative-ttl:, timeout:, lifetime:", knownOptions())
 }
 
@@ -154,8 +151,8 @@ func TestSetupStateErrors(t *testing.T) {
 			args: []string{"https://netbox.example.com", "env:NETBOX_TEST_SETUP_STATE_MISSING"},
 			setup: func(t *testing.T) {
 				t.Helper()
-				// Set-but-empty behaves the same as unset for resolveToken,
-				// and is deterministic, unlike hoping a name is unset.
+				// Set-but-empty is deterministic, unlike hoping a name stays unset, and resolveToken
+				// treats it the same way.
 				t.Setenv("NETBOX_TEST_SETUP_STATE_MISSING", "")
 			},
 			wantErr: "unset or empty",
@@ -232,8 +229,8 @@ func TestPluginStateLookup(t *testing.T) {
 
 		_, err := p.lookup(mac)
 		require.NoError(t, err)
-		// Past the negative TTL but nowhere near the (much longer) positive
-		// one, so this only proves anything if the miss used negativeTTL.
+		// Past negativeTTL but nowhere near the longer ttl, so this only proves anything
+		// if the miss actually used negativeTTL.
 		now = now.Add(opts.negativeTTL)
 		_, err = p.lookup(mac)
 		require.NoError(t, err)
@@ -263,9 +260,8 @@ func TestPluginStateLookup(t *testing.T) {
 	})
 }
 
-// pluginV4Exchange builds a DHCPDISCOVER and the reply frame for it, both
-// with a real (non-nil) Options map, the way a server would hand them to a
-// handler.
+// pluginV4Exchange builds both with a real, non-nil Options map, the way a server would hand
+// them to a handler.
 func pluginV4Exchange(t *testing.T, mac net.HardwareAddr) (*dhcpv4.DHCPv4, *dhcpv4.DHCPv4) {
 	t.Helper()
 	req, err := dhcpv4.NewDiscovery(mac)
@@ -372,8 +368,7 @@ func TestHandler4(t *testing.T) {
 		mask := gotResp.SubnetMask()
 		require.NotNil(t, mask)
 		assert.Equal(t, net.CIDRMask(v4.Bits(), 32), mask)
-		// IPMask.String() is hex ("ffffff00"); reading it back as an IP
-		// gives the dotted-decimal form an operator would recognise.
+		// IPMask.String() is hex ("ffffff00"); wrapping it as net.IP gives the dotted-decimal form.
 		assert.Equal(t, "255.255.255.0", net.IP(mask).String())
 	})
 }
@@ -387,8 +382,7 @@ func TestHandler6(t *testing.T) {
 		stub := &pluginStubBackend{}
 		p := &pluginState{backend: stub, cache: newCache(16), opts: defaultOptions(), now: clock}
 
-		// A RelayMessage with no embedded relay-message option fails to
-		// decapsulate.
+		// No embedded relay-message option, so decapsulation fails.
 		req := &dhcpv6.RelayMessage{MessageType: dhcpv6.MessageTypeRelayForward}
 		resp, err := dhcpv6.NewMessage()
 		require.NoError(t, err)
@@ -417,8 +411,7 @@ func TestHandler6(t *testing.T) {
 		stub := &pluginStubBackend{}
 		p := &pluginState{backend: stub, cache: newCache(16), opts: defaultOptions(), now: clock}
 
-		// An IA_NA is present (so the OneIANA check passes) but there is no
-		// client ID option to derive a MAC from.
+		// IA_NA is present (OneIANA passes) but there is no client ID to derive a MAC from.
 		req, err := dhcpv6.NewMessage(dhcpv6.WithIANA())
 		require.NoError(t, err)
 		resp, err := dhcpv6.NewMessage()
@@ -434,9 +427,8 @@ func TestHandler6(t *testing.T) {
 		stub := &pluginStubBackend{}
 		p := &pluginState{backend: stub, cache: newCache(16), opts: defaultOptions(), now: clock}
 
-		// Built from NewSolicit so an IA_NA and an extractable MAC are both
-		// present; the type check must still short-circuit before either is
-		// consulted.
+		// NewSolicit gives an IA_NA and an extractable MAC; the message-type check must still
+		// short-circuit before either is consulted.
 		req, err := dhcpv6.NewSolicit(mac)
 		require.NoError(t, err)
 		req.MessageType = dhcpv6.MessageTypeRelease
@@ -473,8 +465,8 @@ func TestHandler6(t *testing.T) {
 		require.NoError(t, err)
 		inner.MessageType = dhcpv6.MessageTypeDecline
 
-		// The relay wrapper's own type is RELAY-FORW, never Decline; only the
-		// encapsulated message carries the client's real type.
+		// The relay wrapper's own type is always RELAY-FORW; only the encapsulated message
+		// carries the client's real type.
 		relay, err := dhcpv6.EncapsulateRelay(inner, dhcpv6.MessageTypeRelayForward,
 			net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"))
 		require.NoError(t, err)
@@ -536,8 +528,7 @@ func TestHandler6(t *testing.T) {
 		v6 := netip.MustParsePrefix("2001:db8::10:5/64")
 		stub := &pluginStubBackend{result: lookupResult{found: true, v6: v6}}
 		opts := defaultOptions()
-		// A non-default lifetime proves the option carries the configured
-		// value rather than some other hardcoded default.
+		// Non-default, so the option is proven to carry the configured value, not a hardcoded one.
 		opts.lifetime = 90 * time.Minute
 		p := &pluginState{backend: stub, cache: newCache(16), opts: opts, now: clock}
 

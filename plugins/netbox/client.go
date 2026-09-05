@@ -20,21 +20,17 @@ import (
 )
 
 const (
-	// macAddressPath lists MAC address objects. NetBox 4.2 promoted MAC
-	// addresses to a model of their own; before that they were a field on the
-	// interface and this endpoint does not exist.
+	// NetBox 4.2 promoted MAC addresses to a model of their own; on anything
+	// older this endpoint does not exist.
 	macAddressPath = "/api/dcim/mac-addresses/"
-	// ipAddressPath lists IP address objects, filtered by the interface they
-	// are assigned to.
+	// Filtered by the interface the addresses are assigned to.
 	ipAddressPath = "/api/ipam/ip-addresses/"
 
-	// macAddressLimit caps the MAC query. A MAC should be unique in NetBox;
-	// asking for a few more makes a duplicated or unassigned entry visible
-	// instead of hiding the assigned one behind it.
+	// A MAC should be unique, so a few extra rows make a duplicated or
+	// unassigned entry visible instead of hiding the assigned one behind it.
 	macAddressLimit = 10
-	// ipAddressLimit caps the address query. We only need the first address
-	// of each family, but an interface may legitimately carry several and the
-	// order NetBox returns them in is the operator's.
+	// Only the first address of each family is used, but an interface may
+	// legitimately carry several and NetBox' order is the operator's.
 	ipAddressLimit = 20
 
 	// assigned_object_type values we can serve addresses for.
@@ -45,37 +41,29 @@ const (
 	paramInterfaceID   = "interface_id"
 	paramVMInterfaceID = "vminterface_id"
 
-	// tokenPrefix marks a token argument as a secret. The config loader
-	// redacts an argument's logged value when it starts with "token:",
-	// "password:" or "secret:"; a bare argument gets no such treatment and
-	// is printed in full.
+	// The config loader redacts an argument's logged value when it starts with
+	// "token:", "password:" or "secret:"; a bare one is printed in full.
 	tokenPrefix = "token:"
-	// tokenEnvPrefix marks a token argument that names an environment
-	// variable instead of carrying the secret in config.yml.
+	// Names an environment variable instead of carrying the secret in config.
 	tokenEnvPrefix = "env:"
-	// tokenV2Prefix identifies a NetBox 4.5 style token, which authenticates
-	// as a bearer token. Older tokens use the "Token" scheme.
+	// A NetBox 4.5 style token, which authenticates as a bearer token.
 	tokenV2Prefix = "nbt_"
 
-	// maxBodyBytes bounds a response body. The two list responses we ask for
-	// are a few kilobytes at most; anything past this is either a NetBox bug
-	// or something else answering on that URL, and reading it into memory on
-	// a DHCP server is not worth it.
+	// The list responses are a few kilobytes at most; anything past this is a
+	// NetBox bug or something else answering on that URL.
 	maxBodyBytes = 1 << 20
 )
 
-// client talks to one NetBox instance.
-//
-// It is safe for concurrent use: every field is set at construction and read
-// only afterwards, and http.Client is itself concurrency-safe.
+// Safe for concurrent use: every field is set at construction and read only
+// afterwards, and http.Client is itself concurrency-safe.
 type client struct {
 	base string // no trailing slash, e.g. "https://netbox.example.com"
 	auth string // full Authorization header value
 	hc   *http.Client
 }
 
-// newClient returns a client for baseURL. baseURL must already be normalized
-// by parseBaseURL and token resolved by resolveToken.
+// baseURL must already be normalized by parseBaseURL, and token resolved by
+// resolveToken.
 func newClient(baseURL, token string, timeout time.Duration) *client {
 	return &client{
 		base: baseURL,
@@ -84,9 +72,8 @@ func newClient(baseURL, token string, timeout time.Duration) *client {
 	}
 }
 
-// parseBaseURL validates the configured NetBox URL and returns it without a
-// trailing slash, so paths can be appended directly. A subpath is allowed:
-// NetBox is often mounted somewhere other than the root of its host.
+// Returned without a trailing slash so paths can be appended directly. A
+// subpath is allowed: NetBox is often mounted below the root of its host.
 func parseBaseURL(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -104,16 +91,9 @@ func parseBaseURL(raw string) (string, error) {
 	return strings.TrimSuffix(u.String(), "/"), nil
 }
 
-// resolveToken returns the API token to authenticate with. The accepted
-// forms are token:env:NAME and token:<value>, which name the argument as a
-// secret so the config loader's redaction rule (a "token:", "password:" or
-// "secret:" prefix) finds it, plus the older bare env:NAME and a bare
-// literal for compatibility. token:env:NAME is the recommended form.
-//
-// A bare literal is still accepted, since rejecting it would break existing
-// configs, but the config loader cannot tell it apart from a non-secret
-// argument and logs it in full at startup, so this is warned about once at
-// setup rather than silently allowed.
+// The token: prefix is what makes the config loader treat the argument as a
+// secret; a bare literal is accepted for compatibility but gets logged in
+// full at startup, hence the warning rather than a silent pass.
 func resolveToken(arg string) (string, error) {
 	if arg == "" {
 		return "", errors.New("API token cannot be empty")
@@ -128,9 +108,7 @@ func resolveToken(arg string) (string, error) {
 	return arg, nil
 }
 
-// resolveTaggedToken handles a "token:"-prefixed argument, dispatching to
-// resolveEnvToken for its env: form and treating anything else as a literal
-// token value. arg is the original argument, kept for error messages.
+// arg is the original argument, kept for error messages.
 func resolveTaggedToken(arg, rest string) (string, error) {
 	if name, ok := strings.CutPrefix(rest, tokenEnvPrefix); ok {
 		return resolveEnvToken(arg, name)
@@ -141,9 +119,7 @@ func resolveTaggedToken(arg, rest string) (string, error) {
 	return rest, nil
 }
 
-// resolveEnvToken reads the token from the environment variable named name,
-// which comes from an "env:NAME" or "token:env:NAME" argument. arg is the
-// original argument, kept for error messages.
+// arg is the original argument, kept for error messages.
 func resolveEnvToken(arg, name string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("token argument %q needs an environment variable name after %q", arg, tokenEnvPrefix)
@@ -155,9 +131,8 @@ func resolveEnvToken(arg, name string) (string, error) {
 	return token, nil
 }
 
-// authHeader picks the authentication scheme for token. NetBox 4.5 introduced
-// v2 tokens, which are bearer tokens and carry an "nbt_" prefix; every older
-// token uses NetBox' own "Token" scheme.
+// NetBox 4.5 v2 tokens are bearer tokens and carry an "nbt_" prefix; every
+// older token uses NetBox' own "Token" scheme.
 func authHeader(token string) string {
 	if strings.HasPrefix(token, tokenV2Prefix) {
 		return "Bearer " + token
@@ -165,8 +140,7 @@ func authHeader(token string) string {
 	return "Token " + token
 }
 
-// interfaceRef points at the interface a MAC address is assigned to, on either
-// a device or a virtual machine.
+// The interface may live on a device or on a virtual machine.
 type interfaceRef struct {
 	param  string // query parameter naming this kind of interface
 	id     int64
@@ -179,8 +153,8 @@ func (r interfaceRef) String() string {
 	return r.name + " on " + r.parent
 }
 
-// macAddressPage is the part of a /api/dcim/mac-addresses/ list response we
-// read. Everything else NetBox returns is deliberately ignored.
+// Only the fields this plugin reads; everything else NetBox returns is
+// ignored.
 type macAddressPage struct {
 	Results []macAddress `json:"results"`
 }
@@ -201,9 +175,8 @@ type namedObject struct {
 	Name string `json:"name"`
 }
 
-// interfaceRef returns the interface this MAC address is assigned to, or nil
-// when it is unassigned or attached to something we cannot serve addresses
-// for (a FHRP group, say).
+// nil when the MAC is unassigned or attached to something addresses cannot be
+// served for, an FHRP group say.
 func (m *macAddress) interfaceRef() *interfaceRef {
 	if m.AssignedObject == nil || m.AssignedObjectID == 0 {
 		return nil
@@ -218,14 +191,12 @@ func (m *macAddress) interfaceRef() *interfaceRef {
 	}
 }
 
-// ref builds the reference to this interface under the given query parameter.
 func (a *assignedObject) ref(param string, id int64) *interfaceRef {
 	return &interfaceRef{param: param, id: id, name: a.Name, parent: a.parentName()}
 }
 
-// parentName is the device or virtual machine the interface belongs to. It is
-// only used in log lines, so a response missing both is named rather than
-// treated as an error.
+// Only used in log lines, so a response naming neither parent is described
+// rather than treated as an error.
 func (a *assignedObject) parentName() string {
 	switch {
 	case a.Device != nil:
@@ -237,7 +208,6 @@ func (a *assignedObject) parentName() string {
 	}
 }
 
-// ipAddressPage is the part of a /api/ipam/ip-addresses/ list response we read.
 type ipAddressPage struct {
 	Results []ipAddress `json:"results"`
 }
@@ -246,10 +216,8 @@ type ipAddress struct {
 	Address string `json:"address"`
 }
 
-// lookup resolves mac to the addresses documented on the interface carrying
-// it. mac must already be canonical lowercase. A MAC that NetBox does not know,
-// or that is not assigned to an interface, is not an error: the result comes
-// back with found false.
+// mac must already be canonical lowercase. A MAC NetBox does not know, or one
+// assigned to no interface, is not an error: the result has found false.
 func (c *client) lookup(ctx context.Context, mac string) (lookupResult, error) {
 	ref, err := c.findInterface(ctx, mac)
 	if err != nil {
@@ -261,9 +229,8 @@ func (c *client) lookup(ctx context.Context, mac string) (lookupResult, error) {
 	return c.addressesFor(ctx, ref)
 }
 
-// findInterface asks NetBox which interface owns mac. The first assignment we
-// can serve wins; the rest are logged and skipped, because a MAC assigned to
-// several objects is a NetBox data problem the DHCP server cannot resolve.
+// The first servable assignment wins; the rest are logged and skipped, since a
+// MAC on several objects is a NetBox data problem this server cannot resolve.
 func (c *client) findInterface(ctx context.Context, mac string) (*interfaceRef, error) {
 	q := url.Values{}
 	q.Set("mac_address", mac)
@@ -282,8 +249,7 @@ func (c *client) findInterface(ctx context.Context, mac string) (*interfaceRef, 
 	return nil, nil
 }
 
-// addressesFor collects the first active IPv4 and IPv6 address on ref. One
-// query covers both families, since NetBox stores them in the same model.
+// One query covers both families, since NetBox stores them in the same model.
 func (c *client) addressesFor(ctx context.Context, ref *interfaceRef) (lookupResult, error) {
 	q := url.Values{}
 	q.Set(ref.param, strconv.FormatInt(ref.id, 10))
@@ -307,7 +273,6 @@ func (c *client) addressesFor(ctx context.Context, ref *interfaceRef) (lookupRes
 	return result, nil
 }
 
-// get performs one authenticated GET and decodes the JSON body into out.
 func (c *client) get(ctx context.Context, path string, q url.Values, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path+"?"+q.Encode(), nil)
 	if err != nil {
@@ -326,8 +291,8 @@ func (c *client) get(ctx context.Context, path string, q url.Values, out any) er
 		return statusError(path, resp.StatusCode)
 	}
 
-	// One byte past the limit so a body that is exactly at it still decodes
-	// while a longer one is recognisable as truncated.
+	// One byte past the limit, so a body exactly at it still decodes while a
+	// longer one is recognisable as truncated.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
 	if err != nil {
 		return fmt.Errorf("reading response from %s: %w", path, err)
@@ -341,9 +306,8 @@ func (c *client) get(ctx context.Context, path string, q url.Values, out any) er
 	return nil
 }
 
-// statusError describes a non-2xx response. Authentication failures name the
-// token, since that is the one thing an operator can act on and the status
-// alone reads like a routing mistake.
+// An authentication failure names the token: the status alone reads like a
+// routing mistake, and the token is what an operator can act on.
 func statusError(path string, code int) error {
 	if code == http.StatusUnauthorized || code == http.StatusForbidden {
 		return fmt.Errorf("%s returned HTTP %d, check the API token and its permissions", path, code)

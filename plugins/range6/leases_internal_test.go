@@ -20,9 +20,7 @@ import (
 	"github.com/coredhcp/coredhcp/leases"
 )
 
-// stateWithLeases builds an instance holding the given bindings, without a
-// database, an allocator or a sweeper: Leases and Pools read the maps and
-// nothing else.
+// stateWithLeases builds an instance with only the maps Leases and Pools read.
 func stateWithLeases(recs map[string]*Record, declined map[string]time.Time) *pluginState {
 	return &pluginState{
 		name:      "range6 leases6.sqlite3",
@@ -33,8 +31,7 @@ func stateWithLeases(recs map[string]*Record, declined map[string]time.Time) *pl
 	}
 }
 
-// byAddress orders leases so a map's iteration order does not leak into the
-// assertions.
+// byAddress keeps map iteration order out of the assertions.
 func byAddress(a, b leases.Lease) int {
 	return a.Address.Addr().Compare(b.Address.Addr())
 }
@@ -68,8 +65,7 @@ func TestLeases(t *testing.T) {
 					expires:  int(live.Unix()),
 					hostname: "laptop",
 				},
-				// Expired but not swept yet: reported all the same, with the
-				// expiry that has already passed.
+				// Expired but unswept: still reported.
 				"b": {
 					DUID:    duidB,
 					IAID:    iaidX,

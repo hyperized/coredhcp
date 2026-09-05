@@ -15,24 +15,15 @@ import (
 	"github.com/coredhcp/coredhcp/plugins/allocators"
 )
 
-// to16 pads/truncates arbitrary fuzz-provided bytes to exactly 16, the
-// length Offset/AddPrefixes treat as a 128-bit address (see ipcalc.go's
-// a[:8]/a[8:] slicing, which assumes 16 bytes).
+// to16 pads/truncates to 16 bytes, the length Offset/AddPrefixes assume for a 128-bit address.
 func to16(b []byte) net.IP {
 	ip := make(net.IP, net.IPv6len)
 	copy(ip, b)
 	return ip
 }
 
-// FuzzOffset fuzzes Offset with arbitrary 16-byte IPs and an arbitrary
-// prefix length. Offset's own doc comment says it "returns the absolute
-// distance between addresses a and b", and the implementation enforces that
-// by comparing a and b and always subtracting the smaller from the larger -
-// so, regardless of which was fuzzed into which argument position, swapping
-// the two arguments must yield exactly the same result (same value, same
-// error-ness). That symmetry holds independent of the (fragile, borrow- and
-// shift-sensitive) arithmetic used to actually compute the distance, so it
-// is a safe invariant to fuzz without reimplementing that arithmetic here.
+// FuzzOffset checks that Offset is symmetric: swapping a and b must give the
+// same value and error-ness, regardless of the underlying arithmetic.
 func FuzzOffset(f *testing.F) {
 	a := net.ParseIP("2001:db8:0:aabb::").To16()
 	b := net.ParseIP("2001:db8:ff::34").To16()
@@ -66,13 +57,8 @@ func FuzzOffset(f *testing.F) {
 	})
 }
 
-// FuzzAddPrefixes fuzzes AddPrefixes with an arbitrary IP and arbitrary
-// uint64s, first against the raw arbitrary inputs (checking only for
-// panics, since a hostile unit or n has no obligation to make arithmetic
-// sense), then against inputs clamped into AddPrefixes' documented domain
-// (a 128-bit ip, unit in [0,128], n representable within that unit) to check
-// the round trip against Offset: growing a base by n /unit prefixes and then
-// measuring the Offset back to that same base must recover n exactly.
+// FuzzAddPrefixes checks AddPrefixes never panics on arbitrary input, and
+// that growing a base by n /unit prefixes round-trips through Offset to n.
 func FuzzAddPrefixes(f *testing.F) {
 	base := net.ParseIP("2001:db8::").To16()
 	f.Add([]byte(base), uint64(0xff), uint64(64))
@@ -87,11 +73,8 @@ func FuzzAddPrefixes(f *testing.F) {
 	f.Add(bytes.Repeat([]byte{0xff}, 16), ^uint64(0), uint64(1)) // hostile: near top of address space
 
 	f.Fuzz(func(t *testing.T, ipBytes []byte, n, unitRaw uint64) {
-		// Raw, unclamped call: only "does not panic" is asserted, since a
-		// unit outside [0,128] or an ip that isn't 16 bytes has no defined
-		// round-trip meaning (AddPrefixes' own len(ip)!=16 check is what
-		// makes this safe; see NewIPv4Allocator/bitmap.Allocator's actual
-		// callers, which never pass anything else).
+		// Only checked for panics: an out-of-range unit or a non-16-byte ip has
+		// no defined round-trip meaning.
 		assert.NotPanics(t, func() {
 			_, _ = allocators.AddPrefixes(net.IP(ipBytes), n, unitRaw)
 		})
@@ -101,14 +84,8 @@ func FuzzAddPrefixes(f *testing.F) {
 		}
 		base := to16(ipBytes)
 
-		// Clamp into AddPrefixes' documented domain: unit is a prefix
-		// length (0-128), and n must fit within that many bits or the left
-		// shift `n << (64-unit)` used for unit<=64 silently drops n's high
-		// bits before the overflow check ever sees them - that's a
-		// separate, already-latent property of AddPrefixes unrelated to
-		// what this test is trying to establish (the round trip through
-		// Offset), so inputs are shaped to avoid it rather than assert
-		// through it.
+		// Clamp so n fits unit's bits: past that, AddPrefixes' left shift silently
+		// drops n's high bits before its own overflow check can see them.
 		unit := unitRaw % 129
 		nn := n
 		switch {

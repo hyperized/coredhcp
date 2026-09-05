@@ -14,13 +14,8 @@ import (
 	"github.com/coredhcp/coredhcp/handler"
 )
 
-// FuzzHandleMsg4 drives arbitrary bytes through the full DHCPv4 receive path:
-// parse, build a reply, run the plugin chain, pick a destination, and write
-// the reply out. buf is passed through datagramBuf so it has the same
-// MaxDatagram-capacity shape Serve() hands to HandleMsg4, which HandleMsg4
-// then returns to the shared bufpool: an under-sized buffer here would
-// corrupt that pool for later Get()/reslice calls (see datagramBuf's comment
-// in handle_internal_test.go).
+// FuzzHandleMsg4 fuzzes HandleMsg4's full receive path. buf goes through
+// datagramBuf since HandleMsg4 returns it to bufpool (see handle_internal_test.go).
 func FuzzHandleMsg4(f *testing.F) {
 	discover, err := dhcpv4.New(dhcpv4.WithHwAddr(testMAC), dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
 	if err != nil {
@@ -47,9 +42,8 @@ func FuzzHandleMsg4(f *testing.F) {
 	})
 }
 
-// FuzzHandleMsg6 mirrors FuzzHandleMsg4 for the DHCPv6 receive path, seeded
-// with a plain solicit and a relayed solicit (dhcpv6.EncapsulateRelay) so the
-// relay decapsulate/re-encapsulate path gets fuzzed too.
+// FuzzHandleMsg6 also seeds a relayed solicit, so the relay
+// decapsulate/re-encapsulate path gets fuzzed too.
 func FuzzHandleMsg6(f *testing.F) {
 	solicit, err := dhcpv6.NewSolicit(testMAC)
 	if err != nil {

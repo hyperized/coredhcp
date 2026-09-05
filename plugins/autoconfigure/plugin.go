@@ -6,20 +6,9 @@
 // autoconfigure option (RFC 2563) for clients that get no address.
 package autoconfigure
 
-// This plugin implements RFC2563:
-// 1. If the client has been allocated an IP address, do nothing
-// 2. If the client has not been allocated an IP address
-//    (yiaddr=0.0.0.0), then:
-//    2a. If the client has requested the "AutoConfigure" option,
-//        then add the defined value to the response
-//    2b. Otherwise, terminate processing and send no reply
-//
-// This plugin should be used at the end of the plugin chain,
-// after any IP address allocation has taken place.
-//
-// The optional argument is the string "DoNotAutoConfigure" or
-// "AutoConfigure" (or "0" or "1" respectively).  The default
-// is DoNotAutoConfigure.
+// Place this at the end of the plugin chain, after address allocation: it only
+// acts on an Offer that still carries yiaddr=0.0.0.0. The optional argument is
+// "DoNotAutoConfigure" (the default, also "0") or "AutoConfigure" ("1").
 
 import (
 	"errors"
@@ -47,8 +36,6 @@ var argMap = map[string]dhcpv4.AutoConfiguration{
 	"AutoConfigure":      dhcpv4.AutoConfigure,
 }
 
-// pluginState holds the configuration of an instance of the autoconfigure
-// plugin.
 type pluginState struct {
 	autoconfigure dhcpv4.AutoConfiguration
 }
@@ -88,8 +75,7 @@ func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 		"mac", req.ClientHWAddr.String(),
 		"autoconfigure", "nil",
 	).Debug("Client does not support autoconfigure")
-	// RFC2563 2.3: if no address is chosen for the host [...]
-	// If the DHCPDISCOVER does not contain the Auto-Configure option,
-	// it is not answered.
+	// RFC 2563 §2.3: with no address chosen, a DHCPDISCOVER without the
+	// Auto-Configure option is not answered at all.
 	return nil, true
 }

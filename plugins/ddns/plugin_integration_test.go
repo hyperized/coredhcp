@@ -4,12 +4,10 @@
 
 //go:build integration
 
-// These tests drive the plugin's handlers against a real name server that
-// accepts TSIG-signed RFC 2136 updates, then ask that server what it now
-// holds. `make test-ddns` brings up Knot DNS and runs them in compose;
-// without DDNS_SERVER they skip.
+// These tests drive the plugin against a real name server. `make test-ddns`
+// brings up Knot DNS and runs them in compose; without DDNS_SERVER they skip.
 //
-// The environment they read:
+// Environment read:
 //
 //	DDNS_SERVER        host:port of the name server
 //	DDNS_ZONE          the forward zone, which has to accept the key
@@ -36,16 +34,12 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-// settle is how long a record is waited for. Knot applies an update before it
-// answers, so this only ever covers the hop between the two.
+// Knot applies an update before it answers, so this only covers the hop
+// between the two.
 const settle = 10 * time.Second
 
-// serverAddr returns DDNS_SERVER as a literal address with a port.
-//
-// The plugin refuses a server: argument that is a name, on purpose: a DHCP
-// server that looks its name server up through the resolver it feeds has a
-// bootstrap problem. In compose the server is reached by its service name, so
-// the resolving happens here instead, once.
+// The plugin requires a literal server IP; compose reaches the name server
+// by service name, so the resolution happens here once instead.
 func serverAddr(t *testing.T) string {
 	t.Helper()
 	server := os.Getenv("DDNS_SERVER")
@@ -65,8 +59,6 @@ func serverAddr(t *testing.T) string {
 	return net.JoinHostPort(ips[0].String(), port)
 }
 
-// integrationPlugin builds an instance against the configured server, with
-// its worker running.
 func integrationPlugin(t *testing.T) *pluginState {
 	t.Helper()
 	p, err := setupState(
@@ -83,15 +75,13 @@ func integrationPlugin(t *testing.T) *pluginState {
 	return p
 }
 
-// testHost returns a host name nothing else in this zone is using, so a rerun
-// or a shared server cannot decide the outcome.
+// Unique, so a rerun or a shared server can't decide the outcome.
 func testHost(t *testing.T) string {
 	t.Helper()
 	return fmt.Sprintf("itest-%d-%d", os.Getpid(), time.Now().UnixNano())
 }
 
-// testAddr4 returns an address inside DDNS_REVERSE4, keyed off the process so
-// two runs on one server do not fight over the same PTR.
+// Keyed off the process, so two runs on one server don't fight over the same PTR.
 func testAddr4(t *testing.T) netip.Addr {
 	t.Helper()
 	pfx, err := netip.ParsePrefix(os.Getenv("DDNS_REVERSE4"))
@@ -101,7 +91,6 @@ func testAddr4(t *testing.T) netip.Addr {
 	return netip.AddrFrom4(b)
 }
 
-// testAddr6 does the same inside DDNS_REVERSE6.
 func testAddr6(t *testing.T) netip.Addr {
 	t.Helper()
 	pfx, err := netip.ParsePrefix(os.Getenv("DDNS_REVERSE6"))
@@ -111,7 +100,6 @@ func testAddr6(t *testing.T) netip.Addr {
 	return netip.AddrFrom16(b)
 }
 
-// ask sends one ordinary query and returns the answer section.
 func ask(t *testing.T, server, name string, qtype dnsmessage.Type) []dnsmessage.Resource {
 	t.Helper()
 	qname, err := dnsmessage.NewName(name)
@@ -142,7 +130,6 @@ func ask(t *testing.T, server, name string, qtype dnsmessage.Type) []dnsmessage.
 	return answers
 }
 
-// addresses returns the A and AAAA records of an answer section.
 func addresses(answers []dnsmessage.Resource) []string {
 	var out []string
 	for _, r := range answers {
@@ -156,7 +143,6 @@ func addresses(answers []dnsmessage.Resource) []string {
 	return out
 }
 
-// targets returns the PTR targets of an answer section.
 func targets(answers []dnsmessage.Resource) []string {
 	var out []string
 	for _, r := range answers {
@@ -167,7 +153,6 @@ func targets(answers []dnsmessage.Resource) []string {
 	return out
 }
 
-// eventually waits for the server to agree with want.
 func eventually(t *testing.T, server, name string, qtype dnsmessage.Type, extract func([]dnsmessage.Resource) []string, want []string) {
 	t.Helper()
 	var got []string
@@ -177,9 +162,6 @@ func eventually(t *testing.T, server, name string, qtype dnsmessage.Type, extrac
 	}, settle, 200*time.Millisecond, "%s %s: wanted %v, last saw %v", name, qtype, want, got)
 }
 
-// TestIntegrationLease4 walks a DHCPv4 client through a lease and a release,
-// checking with the server after each that the forward and reverse records
-// are what they should be.
 func TestIntegrationLease4(t *testing.T) {
 	p := integrationPlugin(t)
 	server := p.server
@@ -221,8 +203,6 @@ func TestIntegrationLease4(t *testing.T) {
 	eventually(t, server, ptrName(addr), dnsmessage.TypePTR, targets, nil)
 }
 
-// TestIntegrationLease6 is TestIntegrationLease4 for DHCPv6, where the
-// addresses come out of the IA_NA of the reply being built.
 func TestIntegrationLease6(t *testing.T) {
 	p := integrationPlugin(t)
 	server := p.server
@@ -265,11 +245,8 @@ func TestIntegrationLease6(t *testing.T) {
 	eventually(t, server, ptrName(addr), dnsmessage.TypePTR, targets, nil)
 }
 
-// TestIntegrationRefusedZone checks what a server really does with a zone it
-// does not hold. Knot has no key for such a zone and so cannot sign the
-// refusal: the answer comes back unsigned, carrying NOTAUTH. That has to be
-// reported as an unsigned answer, with the code it claimed named alongside,
-// and never as a verified NOTAUTH.
+// Knot has no key for a zone it doesn't hold, so it can't sign the refusal:
+// the answer comes back unsigned, carrying NOTAUTH, and must be reported as such.
 func TestIntegrationRefusedZone(t *testing.T) {
 	p := integrationPlugin(t)
 	err := p.update("not-a-zone-we-hold.example.",
@@ -278,10 +255,8 @@ func TestIntegrationRefusedZone(t *testing.T) {
 	assert.Contains(t, err.Error(), "NOTAUTH")
 }
 
-// TestIntegrationWrongKey checks that a server which rejects the signature is
-// heard correctly. Knot answers a bad MAC with a TSIG carrying BADKEY or
-// BADSIG rather than with a signed refusal, and that has to come back as a
-// TSIG failure, not as a MAC this side computed wrongly.
+// Knot answers a bad MAC with a TSIG BADKEY/BADSIG, not a signed refusal;
+// that must come back as a TSIG failure, not a MAC this side computed wrongly.
 func TestIntegrationWrongKey(t *testing.T) {
 	good := integrationPlugin(t)
 	bad, err := newPluginState(
@@ -297,7 +272,6 @@ func TestIntegrationWrongKey(t *testing.T) {
 	assert.ErrorIs(t, err, ErrTSIGError)
 }
 
-// labels turns a single host name into the form option 39 carries.
 func labels(host string) *rfc1035label.Labels {
 	return &rfc1035label.Labels{Labels: []string{host}}
 }

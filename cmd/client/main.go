@@ -62,7 +62,6 @@ func run(macString, ifname string) error {
 	return err
 }
 
-// printConversation logs a summary of every message in the exchange.
 func printConversation(conv []dhcpv6.DHCPv6) {
 	for _, p := range conv {
 		log.Print(p.Summary())

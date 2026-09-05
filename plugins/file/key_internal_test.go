@@ -203,8 +203,7 @@ func TestParseClientIDField(t *testing.T) {
 	}
 }
 
-// TestKeyModeParseKeyField only has to prove the mode dispatches to the right
-// helper; each helper's own edge cases are covered above.
+// Only proves the mode dispatches to the right helper; edge cases are covered above.
 func TestKeyModeParseKeyField(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

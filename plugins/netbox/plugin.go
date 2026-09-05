@@ -17,78 +17,54 @@
 // /api/... to it. Only http and https are accepted.
 //
 // The token is best given as token:env:NAME, which reads NAME from the
-// environment when the server starts and marks the argument as a secret.
-// token:<value> carries the token itself, and the older env:NAME and bare
-// forms are still accepted. Setup fails when the named variable is unset or
-// empty.
-// Tokens starting with "nbt_" are the v2 tokens NetBox 4.5
-// introduced and are sent as "Authorization: Bearer"; everything else is sent
-// as "Authorization: Token". NetBox deprecated the legacy tokens in 4.6 and
-// plans to drop them in 5.0, so new deployments should be issuing v2 tokens
-// already. This plugin never logs the token, and the config loader keeps it
-// out of its own output too: at the default level it prints each plugin's
-// name and argument count, and the arguments themselves only at debug level,
-// with anything shaped like a token, password or secret replaced by ***.
-// Recognising a bare token by its shape is a safety net rather than a
-// guarantee, so env:NAME stays the better way to configure it.
+// environment at startup and marks the argument as a secret; token:<value>
+// and the older env:NAME and bare forms also work. A token starting with
+// "nbt_" is a NetBox 4.5 v2 token and is sent as "Authorization: Bearer",
+// everything else as "Authorization: Token".
 //
 // The remaining arguments are optional and may appear in any order:
 //
 //   - ttl:<duration> how long a found answer is cached, default 5m.
-//   - negative-ttl:<duration> how long "NetBox does not know this MAC" is
-//     cached, default 30s.
+//   - negative-ttl:<duration> how long an unknown MAC is cached, default 30s.
 //   - timeout:<duration> the HTTP timeout per NetBox request, default 5s.
-//   - lifetime:<duration> the preferred and valid lifetime of the DHCPv6
-//     address, default 1h.
+//   - lifetime:<duration> the DHCPv6 address lifetime, default 1h.
 //
 // Every duration must be positive, and an argument that is none of the above
-// fails setup naming itself, rather than being quietly ignored.
+// fails setup naming itself.
 //
 // # What it asks NetBox
 //
-// Two calls per cache miss. First /api/dcim/mac-addresses/ filtered on the
-// MAC, which yields the interface the address is assigned to, on a device or
-// on a virtual machine. Then /api/ipam/ip-addresses/ filtered on that
-// interface with status=active, from which the first IPv4 and the first IPv6
-// address are taken in the order NetBox returns them.
+// Two calls per cache miss: /api/dcim/mac-addresses/ filtered on the MAC gives
+// the interface it is assigned to, then /api/ipam/ip-addresses/ filtered on
+// that interface with status=active gives the first IPv4 and IPv6 address in
+// the order NetBox returns them.
 //
 // This needs NetBox 4.2 or newer, where MAC addresses became a model of their
-// own. The token needs read access to dcim.macaddress and ipam.ipaddress and
-// nothing else.
+// own, and a token with read access to dcim.macaddress and ipam.ipaddress.
 //
-// The addresses come from the interface the MAC sits on, not from the device
-// the interface belongs to. On a machine with more than one NIC the device's
-// primary_ip4/primary_ip6 belongs to a single interface, and the client that
-// just sent a DISCOVER is not necessarily on that one. Filtering by interface
-// also covers virtual machines, since NetBox stores VM interface addresses in
-// the same place. The abandoned upstream plugin did neither: it read the
-// device's primary addresses and ignored virtual machines.
+// Addresses come from the interface, not from the device: on a multi-NIC
+// machine primary_ip4/primary_ip6 belongs to one interface and the client that
+// sent the DISCOVER need not be on it. Filtering by interface also covers
+// virtual machines, whose addresses NetBox stores in the same place.
 //
 // # Caching
 //
-// DHCP clients retransmit, and a site coming back from a power cut sends every
-// client at once. The cache is what keeps that off NetBox: results are held in
-// a bounded LRU keyed by MAC address, so a boot storm costs one API call per
-// client rather than one per packet. Failures are never cached, so a NetBox
-// that was briefly down is retried on the next packet.
+// Results are held in a bounded LRU keyed by MAC, so a site coming back from a
+// power cut costs one API call per client rather than one per retransmission.
+// Failures are never cached.
 //
 // # Placement
 //
 // Same as the file plugin: after the option plugins (dns, router, netmask) and
-// before range, so a documented client gets its NetBox address and everything
-// else falls through to the dynamic pool.
-//
-// A failed lookup drops the request rather than passing it on. A client whose
-// static address is documented in NetBox must not be handed a pool address by
-// the next plugin because NetBox was briefly unreachable. The client
-// retransmits, and gets its documented address once NetBox answers again.
+// before range. A failed lookup drops the request rather than passing it on,
+// so a client documented in NetBox is never handed a pool address because
+// NetBox was briefly unreachable; it retransmits and gets its own address.
 //
 // # TLS
 //
 // The system trust store, plus SSL_CERT_FILE or SSL_CERT_DIR for an internal
-// CA. There is deliberately no option to skip verification. Every request
-// carries the API token, so an unverified connection hands that token to
-// whoever happens to answer on the address.
+// CA. There is no option to skip verification: every request carries the API
+// token, so an unverified connection hands it to whoever answers.
 package netbox
 
 import (
@@ -123,7 +99,6 @@ const (
 	defaultLifetime    = time.Hour
 )
 
-// options holds the tunable durations, filled in from the trailing arguments.
 type options struct {
 	ttl         time.Duration
 	negativeTTL time.Duration
@@ -131,8 +106,6 @@ type options struct {
 	lifetime    time.Duration
 }
 
-// durationOptions maps each trailing argument prefix to the field it sets.
-// Adding a knob here is all it takes; parseOne stays a loop either way.
 var durationOptions = []struct {
 	prefix string
 	set    func(*options, time.Duration)
@@ -143,7 +116,6 @@ var durationOptions = []struct {
 	{"lifetime:", func(o *options, d time.Duration) { o.lifetime = d }},
 }
 
-// defaultOptions returns the options as they stand before any argument is read.
 func defaultOptions() options {
 	return options{
 		ttl:         defaultTTL,
@@ -153,7 +125,6 @@ func defaultOptions() options {
 	}
 }
 
-// parse applies the trailing arguments in order.
 func (o *options) parse(args []string) error {
 	for _, arg := range args {
 		if err := o.parseOne(arg); err != nil {
@@ -163,7 +134,6 @@ func (o *options) parse(args []string) error {
 	return nil
 }
 
-// parseOne applies a single trailing argument.
 func (o *options) parseOne(arg string) error {
 	for _, opt := range durationOptions {
 		raw, ok := strings.CutPrefix(arg, opt.prefix)
@@ -183,8 +153,6 @@ func (o *options) parseOne(arg string) error {
 	return fmt.Errorf("unexpected argument %q, want %s followed by a duration", arg, knownOptions())
 }
 
-// knownOptions lists the accepted trailing argument prefixes for error
-// messages, in the order they are documented.
 func knownOptions() string {
 	names := make([]string, 0, len(durationOptions))
 	for _, opt := range durationOptions {
@@ -193,20 +161,15 @@ func knownOptions() string {
 	return strings.Join(names, ", ")
 }
 
-// lookuper is the NetBox side of the plugin, as the handlers need it. It is
-// declared here, where it is used, so the handler tests can drive every branch
+// Declared where it is consumed, so the handler tests can drive every branch
 // with a stub instead of an HTTP server.
 type lookuper interface {
 	lookup(ctx context.Context, mac string) (lookupResult, error)
 }
 
-// pluginState is one configured instance of the plugin. setup4 and setup6
-// build one each, so a server that runs both families keeps a cache per
-// family rather than sharing one across them.
-//
-// It is safe for concurrent use: the cache does its own locking, the backend
-// is stateless, and everything else is written during setup and only read
-// afterwards.
+// setup4 and setup6 build one each, so a server running both families keeps a
+// cache per family. Safe for concurrent use: the cache locks itself, the
+// backend is stateless, and the rest is write-once during setup.
 type pluginState struct {
 	backend lookuper
 	cache   *cache
@@ -230,11 +193,8 @@ func setup6(args ...string) (handler.Handler6, error) {
 	return p.Handler6, nil
 }
 
-// setupState validates the arguments and builds an instance.
-//
-// It deliberately does not contact NetBox. A DHCP server has to come up when
-// NetBox is down or still booting, and the first request will find out soon
-// enough whether the credentials work.
+// Deliberately does not contact NetBox: a DHCP server has to come up while
+// NetBox is down or still booting.
 func setupState(args ...string) (*pluginState, error) {
 	if len(args) < 2 {
 		return nil, fmt.Errorf("need at least 2 arguments (NetBox URL and API token), got %d", len(args))
@@ -263,16 +223,9 @@ func setupState(args ...string) (*pluginState, error) {
 	}, nil
 }
 
-// lookup answers from the cache when it can, and asks NetBox otherwise.
-// Errors are returned as they are and never cached, so a NetBox that was
-// briefly unreachable is retried on the next packet instead of being
-// remembered as a failure for a whole TTL.
-//
-// There is no single-flight around the miss path. Two packets from the same
-// client arriving while the first lookup is still out will both query NetBox,
-// which is two requests for one client rather than the coordination and the
-// extra lock a de-duplicating layer costs. A boot storm is many clients, and
-// those are separate lookups either way.
+// Errors are never cached, so a NetBox that was briefly unreachable is retried
+// on the next packet. There is deliberately no single-flight: a boot storm is
+// many clients, which are separate lookups either way.
 func (p *pluginState) lookup(hwaddr net.HardwareAddr) (lookupResult, error) {
 	mac := hwaddr.String()
 	now := p.now()
@@ -280,9 +233,8 @@ func (p *pluginState) lookup(hwaddr net.HardwareAddr) (lookupResult, error) {
 		return result, nil
 	}
 
-	// The plugin handler API has no context to inherit, and the client's own
-	// timeout bounds the request, so a background context is the whole story
-	// here.
+	// The handler API has no context to inherit, and the client's own timeout
+	// already bounds the request.
 	result, err := p.backend.lookup(context.Background(), mac)
 	if err != nil {
 		return lookupResult{}, err
@@ -296,12 +248,9 @@ func (p *pluginState) lookup(hwaddr net.HardwareAddr) (lookupResult, error) {
 	return result, nil
 }
 
-// skipsLookup4 reports whether msgType never needs a NetBox lookup. INFORM
-// carries no address request. RELEASE and DECLINE are skipped too: the
-// server never replies to either whatever the plugin chain returns, this
-// plugin holds no lease state that a release could free, and looking them up
-// anyway would let a spoofed MAC turn every DECLINE it sends into a NetBox
-// API call.
+// INFORM carries no address request. RELEASE and DECLINE get no reply and free
+// no state here, so looking them up would let a spoofed MAC turn every packet
+// it sends into a NetBox API call.
 func skipsLookup4(msgType dhcpv4.MessageType) bool {
 	switch msgType {
 	case dhcpv4.MessageTypeInform, dhcpv4.MessageTypeRelease, dhcpv4.MessageTypeDecline:
@@ -333,9 +282,7 @@ func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 	return resp, true
 }
 
-// skipsLookup6 reports whether msgType never needs a NetBox lookup, for the
-// same reasons as skipsLookup4: RELEASE and DECLINE get no reply and free no
-// state this plugin holds.
+// Same reasoning as skipsLookup4.
 func skipsLookup6(msgType dhcpv6.MessageType) bool {
 	switch msgType {
 	case dhcpv6.MessageTypeRelease, dhcpv6.MessageTypeDecline:
@@ -353,9 +300,8 @@ func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 		return nil, true
 	}
 
-	// A relayed message carries the client's own type inside; the relay
-	// wrapper's type is RELAY-FORW or RELAY-REPL and says nothing about
-	// what the client sent, so the check runs on m, not req.
+	// The relay wrapper's type is RELAY-FORW or RELAY-REPL and says nothing
+	// about what the client sent, so the check runs on m, not req.
 	if skipsLookup6(m.MessageType) {
 		return resp, false
 	}

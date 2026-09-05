@@ -30,8 +30,6 @@ import (
 
 var testMAC = net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}
 
-// --- buildReply6 ---
-
 func mustSolicit(t *testing.T, rapidCommit bool) *dhcpv6.Message {
 	t.Helper()
 	var mods []dhcpv6.Modifier
@@ -43,9 +41,8 @@ func mustSolicit(t *testing.T, rapidCommit bool) *dhcpv6.Message {
 	return m
 }
 
-// mustMessage6 builds a DHCPv6 message of the given type with a Client ID
-// option attached, since NewReplyFromMessage requires one for every type it
-// accepts.
+// mustMessage6 attaches a Client ID because NewReplyFromMessage requires
+// one for every type it accepts.
 func mustMessage6(t *testing.T, mt dhcpv6.MessageType) *dhcpv6.Message {
 	t.Helper()
 	m, err := dhcpv6.NewMessage()
@@ -60,12 +57,8 @@ func mustMessage6(t *testing.T, mt dhcpv6.MessageType) *dhcpv6.Message {
 	return m
 }
 
-// datagramBuf mimics the buffer shape Serve() hands to HandleMsg4/HandleMsg6:
-// a slice with MaxDatagram capacity, resliced down to the received length.
-// Calling HandleMsg4/HandleMsg6 directly with an under-sized buffer would
-// have them return an under-capacity buffer to the shared bufpool, which
-// later panics when Serve() reslices a pooled buffer back up to
-// MaxDatagram.
+// datagramBuf gives buf MaxDatagram capacity like Serve() does; an
+// undersized buffer here would panic later when returned to bufpool.
 func datagramBuf(data []byte) []byte {
 	b := make([]byte, MaxDatagram)
 	n := copy(b, data)
@@ -166,8 +159,6 @@ func TestBuildReply6(t *testing.T) {
 	}
 }
 
-// --- buildReply4 ---
-
 func mustRequest4(t *testing.T, mods ...dhcpv4.Modifier) *dhcpv4.DHCPv4 {
 	t.Helper()
 	req, err := dhcpv4.New(append([]dhcpv4.Modifier{dhcpv4.WithHwAddr(testMAC)}, mods...)...)
@@ -201,9 +192,8 @@ func TestBuildReply4(t *testing.T) {
 			wantType: dhcpv4.MessageTypeAck,
 		},
 		{
-			// Accepted so the chain runs on it, with no type on the base
-			// reply. That nothing is ever sent back is HandleMsg4's job,
-			// not buildReply4's.
+			// Accepted so the chain still runs; that nothing is sent back
+			// is HandleMsg4's job, not buildReply4's.
 			name:     "release gets no message type set",
 			in:       mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeRelease)),
 			wantType: dhcpv4.MessageTypeNone,
@@ -242,8 +232,6 @@ func TestBuildReply4(t *testing.T) {
 		})
 	}
 }
-
-// --- applyHandlers4 / applyHandlers6 ---
 
 func TestApplyHandlers4(t *testing.T) {
 	base := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
@@ -319,8 +307,6 @@ func TestApplyHandlers6(t *testing.T) {
 	})
 }
 
-// --- encapsulateRelay6 ---
-
 func TestEncapsulateRelay6(t *testing.T) {
 	t.Run("non-relay request passes through unchanged", func(t *testing.T) {
 		req := mustMessage6(t, dhcpv6.MessageTypeRequest)
@@ -349,7 +335,6 @@ func TestEncapsulateRelay6(t *testing.T) {
 		req, err := dhcpv6.EncapsulateRelay(inner, dhcpv6.MessageTypeRelayForward, net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"))
 		require.NoError(t, err)
 
-		// resp is itself a *RelayMessage, i.e. not a *dhcpv6.Message.
 		resp, err := dhcpv6.EncapsulateRelay(mustMessage6(t, dhcpv6.MessageTypeReply), dhcpv6.MessageTypeRelayReply, net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"))
 		require.NoError(t, err)
 
@@ -371,8 +356,6 @@ func TestEncapsulateRelay6(t *testing.T) {
 		assert.Nil(t, out)
 	})
 }
-
-// --- replyDestination4 ---
 
 func TestReplyDestination4(t *testing.T) {
 	ack := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeAck))
@@ -458,8 +441,6 @@ func TestReplyDestination4(t *testing.T) {
 	}
 }
 
-// --- replyIfIndex / oobIfIndex4 / oobIfIndex6 ---
-
 func TestReplyIfIndex(t *testing.T) {
 	assert.Equal(t, 5, replyIfIndex(5, 9))
 	assert.Equal(t, 9, replyIfIndex(0, 9))
@@ -476,16 +457,12 @@ func TestOobIfIndex6(t *testing.T) {
 	assert.Equal(t, 4, oobIfIndex6(&ipv6.ControlMessage{IfIndex: 4}))
 }
 
-// --- HandleMsg4 ---
-
 func newTestListener4(handlers []handler.Handler4, conn *fakeConn4) *listener4 {
 	return &listener4{conn4: conn, chain: chain4(handlers...)}
 }
 
-// chain4 turns bare handlers into a chain, naming each link after its
-// position so a test can tell from an event which one stopped the chain.
-// Each one is wrapped the way plugins.LoadChains wraps a handler from a
-// plain Setup4, so the chain a test drives is shaped like a loaded one.
+// chain4 names each link by position so a test can tell which one stopped
+// the chain, wrapped the way plugins.LoadChains wraps a plain Setup4 handler.
 func chain4(handlers ...handler.Handler4) []plugins.Link4 {
 	chain := make([]plugins.Link4, 0, len(handlers))
 	for i, h := range handlers {
@@ -494,7 +471,6 @@ func chain4(handlers ...handler.Handler4) []plugins.Link4 {
 	return chain
 }
 
-// chain6 is chain4 for the DHCPv6 chain.
 func chain6(handlers ...handler.Handler6) []plugins.Link6 {
 	chain := make([]plugins.Link6, 0, len(handlers))
 	for i, h := range handlers {
@@ -503,15 +479,14 @@ func chain6(handlers ...handler.Handler6) []plugins.Link6 {
 	return chain
 }
 
-// ignoreCtx4 is the adapter plugins puts around a handler from a plain
-// Setup4: the context goes no further than the wrapper.
+// ignoreCtx4 mirrors the adapter plugins puts around a plain Setup4
+// handler: the context goes no further than the wrapper.
 func ignoreCtx4(h handler.Handler4) handler.Handler4Ctx {
 	return func(_ context.Context, req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 		return h(req, resp)
 	}
 }
 
-// ignoreCtx6 is ignoreCtx4 for DHCPv6.
 func ignoreCtx6(h handler.Handler6) handler.Handler6Ctx {
 	return func(_ context.Context, req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 		return h(req, resp)
@@ -544,9 +519,7 @@ func TestHandleMsg4HandlerDropsRequest(t *testing.T) {
 }
 
 // TestHandleMsg4NoReplyMessageTypes covers RFC 2131 section 4.4: the server
-// answers neither a RELEASE nor a DECLINE, whatever the plugin chain hands
-// back. A spoofed RELEASE used to leave the server as a reply carrying no
-// option 53, one per packet.
+// answers neither RELEASE nor DECLINE, whatever the chain hands back.
 func TestHandleMsg4NoReplyMessageTypes(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -557,8 +530,6 @@ func TestHandleMsg4NoReplyMessageTypes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := mustRequest4(t, dhcpv4.WithMessageType(tc.mt))
-			// A plugin that answers anyway. Its response is exactly what
-			// the old code put on the wire.
 			answer := func(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 				resp.YourIPAddr = net.IP{192, 0, 2, 10}
 				return resp, false
@@ -574,8 +545,7 @@ func TestHandleMsg4NoReplyMessageTypes(t *testing.T) {
 			assert.Equal(t, events.OutcomeNoReply, ev.Outcome)
 			assert.Equal(t, events.PathNone, ev.Path)
 			assert.Equal(t, tc.mt.String(), ev.Type)
-			// Nothing left the server, so the event says nothing about a
-			// reply that never existed.
+			// Nothing left the server, so the event says nothing about a reply that never existed.
 			assert.Empty(t, ev.ReplyType)
 			assert.Empty(t, ev.Addresses)
 			assert.Empty(t, ev.Error)
@@ -583,9 +553,8 @@ func TestHandleMsg4NoReplyMessageTypes(t *testing.T) {
 	}
 }
 
-// A plugin that stops the chain on a RELEASE has not dropped anything: the
-// packet was never going to be answered. The event still names the plugin, so
-// an operator can see which one freed the lease.
+// A plugin that stops the chain on a RELEASE hasn't dropped anything: the
+// packet was never going to be answered, but the event still names the plugin.
 func TestHandleMsg4NoReplyAfterChainStop(t *testing.T) {
 	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeRelease))
 	pass := func(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) { return resp, false }
@@ -603,9 +572,8 @@ func TestHandleMsg4NoReplyAfterChainStop(t *testing.T) {
 	assert.Equal(t, 2, ev.Position)
 }
 
-// A DECLINE has to reach the plugins so they can quarantine the address the
-// client says is already taken. buildReply4 used to reject it as an unhandled
-// message type, so no plugin ever saw one.
+// A DECLINE must reach the plugins, so they can quarantine the address the
+// client says is already taken.
 func TestHandleMsg4DeclineReachesTheChain(t *testing.T) {
 	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDecline))
 
@@ -667,9 +635,8 @@ func TestHandleMsg4PlainUnicastNoControlMessage(t *testing.T) {
 }
 
 func TestHandleMsg4EthernetWithoutInterfaceInfoDoesNotCrash(t *testing.T) {
-	// useEthernet path with no bound interface (l.Index == 0) and no oob
-	// interface info: woob stays nil. This used to crash the server by
-	// dereferencing woob; now it must just log and return.
+	// No bound interface (l.Index == 0) and no oob info: woob stays nil, so
+	// this must log and return rather than dereference it.
 	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover)) // default case -> useEthernet
 	conn := &fakeConn4{}
 	l := newTestListener4(nil, conn)
@@ -745,8 +712,6 @@ func TestHandleMsg4EthernetSendSuccessAndFailure(t *testing.T) {
 	})
 }
 
-// --- HandleMsg6 ---
-
 func newTestListener6(handlers []handler.Handler6, conn *fakeConn6) *listener6 {
 	return &listener6{conn6: conn, chain: chain6(handlers...)}
 }
@@ -788,8 +753,6 @@ func TestHandleMsg6EncapsulateRelayError(t *testing.T) {
 }
 
 // A DHCPv6 Decline is answered with a Reply (RFC 8415 section 18.3.8).
-// buildReply6 used to reject it, so the client never heard back and no plugin
-// got the chance to quarantine the address.
 func TestHandleMsg6DeclineGetsReply(t *testing.T) {
 	req := mustMessage6(t, dhcpv6.MessageTypeDecline)
 	conn := &fakeConn6{}
@@ -879,8 +842,6 @@ func TestHandleMsg6RelayNonMessagePassthrough(t *testing.T) {
 	assert.Equal(t, relayResp.ToBytes(), conn.writes[0].b)
 }
 
-// --- Serve loops ---
-
 func TestListener4ServeReturnsNilOnClosed(t *testing.T) {
 	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
 	req.SetBroadcast()
@@ -936,19 +897,14 @@ func TestListener6ServeReturnsError(t *testing.T) {
 	assert.Equal(t, "read boom", err.Error())
 }
 
-// TestBufpoolNewAllocatesMaxDatagram covers bufpool's New initializer
-// directly. Whether sync.Pool.Get ever actually calls New is unspecified
-// (it depends on whether the pool already holds an item), so the only
-// deterministic way to exercise the closure's statements is to call it
-// itself rather than trying to force the pool empty.
+// TestBufpoolNewAllocatesMaxDatagram calls New directly, since whether
+// sync.Pool.Get invokes it is unspecified and can't be forced.
 func TestBufpoolNewAllocatesMaxDatagram(t *testing.T) {
 	got := bufpool.New()
 	b, ok := got.(*[]byte)
 	require.True(t, ok)
 	assert.Len(t, *b, MaxDatagram)
 }
-
-// --- observer reporting ---
 
 // recordObserver collects everything the server reports. Request runs on the
 // goroutine handling each packet, so the slices are guarded.
@@ -995,8 +951,6 @@ var fixedDUID = &dhcpv6.DUIDLL{HWType: iana.HWTypeEthernet, LinkLayerAddr: testM
 // type 1, then the MAC.
 const fixedDUIDHex = "00030001001122334455"
 
-// message6 builds a DHCPv6 message of the given type carrying fixedDUID as
-// its client ID, plus any options the test needs.
 func message6(t *testing.T, mt dhcpv6.MessageType, opts ...dhcpv6.Option) *dhcpv6.Message {
 	t.Helper()
 	m, err := dhcpv6.NewMessage()
@@ -1009,7 +963,6 @@ func message6(t *testing.T, mt dhcpv6.MessageType, opts ...dhcpv6.Option) *dhcpv
 	return m
 }
 
-// observedListener4 is newTestListener4 with an observer attached.
 func observedListener4(handlers []handler.Handler4, conn *fakeConn4) (*listener4, *recordObserver) {
 	obs := &recordObserver{}
 	l := newTestListener4(handlers, conn)
@@ -1017,7 +970,6 @@ func observedListener4(handlers []handler.Handler4, conn *fakeConn4) (*listener4
 	return l, obs
 }
 
-// observedListener6 is newTestListener6 with an observer attached.
 func observedListener6(handlers []handler.Handler6, conn *fakeConn6) (*listener6, *recordObserver) {
 	obs := &recordObserver{}
 	l := newTestListener6(handlers, conn)
@@ -1210,9 +1162,8 @@ func TestHandleMsg4ObserverLayer2(t *testing.T) {
 	}
 }
 
-// An unbound listener learns the interface from each packet's control
-// message. The name is resolved once and then remembered, so a second packet
-// from the same interface reports the same name without another lookup.
+// An unbound listener resolves the interface name once and remembers it, so
+// a second packet from the same interface needs no further lookup.
 func TestHandleMsg4ObserverInterfaceFromControlMessage(t *testing.T) {
 	loName := loopbackInterfaceName(t)
 	lo, err := net.InterfaceByName(loName)
@@ -1401,10 +1352,8 @@ func TestHandleMsg6ObserverInterfaceFromControlMessage(t *testing.T) {
 	assert.Equal(t, loName, obs.only(t).Interface)
 }
 
-// A SOLICIT asking for rapid commit is answered with a REPLY instead of an
-// ADVERTISE. Nothing in the chain hands out an address here, so the event
-// reports a reply with no addresses and no lease time rather than zeroes that
-// look like a lease.
+// Rapid commit turns a SOLICIT into a REPLY. No plugin hands out an
+// address, so the event reports none rather than a zero that looks like a lease.
 func TestHandleMsg6ObserverRapidCommit(t *testing.T) {
 	req := mustSolicit(t, true)
 	l, obs := observedListener6(nil, &fakeConn6{})

@@ -15,11 +15,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// These two cases substitute the fsnotifyNewWatcher/watcherAdd seams to
-// simulate autorefresh setup failures. Real filesystem operations can't
-// deterministically fail fsnotify.NewWatcher (an fd exhaustion condition) or
-// Watcher.Add on a file that was just successfully read, so the production
-// code exposes these as indirections purely for this test.
+// fsnotifyNewWatcher/watcherAdd are seams because real filesystem operations
+// can't deterministically fail here (fd exhaustion, or Add on a file just read).
 
 func TestSetupFileWatcherCreateError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "leases.txt")
@@ -51,9 +48,6 @@ func TestSetupFileWatcherAddError(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to watch")
 }
 
-// TestParseArgs covers the config-line grammar directly: the required file
-// name, the two optional arguments in either order, and the errors each bad
-// input produces.
 func TestParseArgs(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

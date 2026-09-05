@@ -17,8 +17,7 @@ import (
 	"github.com/coredhcp/coredhcp/plugins/sleep"
 )
 
-// delay is kept tiny so the tests stay fast; behaviour under test is "did we
-// wait at least this long", not precise timing.
+// delay is tiny so tests stay fast; we're testing "waited long enough," not precise timing.
 const delay = time.Millisecond
 
 func TestSetup6ArgErrors(t *testing.T) {

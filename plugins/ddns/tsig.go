@@ -20,34 +20,30 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-// Failures on the TSIG side of an exchange. They are separate from the plain
-// transport errors so a key that is wrong everywhere reads differently in the
-// log from a server that is merely unreachable.
+// Kept separate from the plain transport errors so a bad key reads
+// differently in the log from an unreachable server.
 var (
 	// ErrUnknownAlgorithm is an algo: this plugin does not implement.
 	ErrUnknownAlgorithm = errors.New("ddns: unknown TSIG algorithm")
 
-	// ErrNoTSIG is a response that carries no TSIG record at all, which for
-	// an answer to a signed request means the server did not authenticate
-	// itself and nothing in the answer can be trusted.
+	// ErrNoTSIG is a response with no TSIG record: for a signed request, that
+	// means the server never authenticated and nothing in it can be trusted.
 	ErrNoTSIG = errors.New("ddns: response is not signed")
 
-	// ErrTSIGPlacement is a TSIG record that is not where RFC 8945 puts it,
-	// or whose owner name was compressed or rewritten. Either way the bytes
-	// that were signed cannot be recovered.
+	// ErrTSIGPlacement is a TSIG record not where RFC 8945 puts it, or with a
+	// compressed or rewritten owner name; either way the signed bytes are lost.
 	ErrTSIGPlacement = errors.New("ddns: TSIG record is not the last record of the response")
 
 	// ErrTSIGKey is a response signed with a different key or a different
 	// algorithm from the one the request used.
 	ErrTSIGKey = errors.New("ddns: response is signed with the wrong key")
 
-	// ErrTSIGError is a response whose TSIG carries an error of its own:
-	// BADKEY, BADSIG or BADTIME. BADTIME is the common one and means the two
-	// clocks are more than the fudge apart.
+	// ErrTSIGError is a response whose TSIG carries its own error (BADKEY,
+	// BADSIG, BADTIME); BADTIME means the two clocks differ by more than the fudge.
 	ErrTSIGError = errors.New("ddns: server rejected the signature")
 
-	// ErrBadMAC is a response whose MAC does not verify. Nothing in it can
-	// be believed, including its RCODE.
+	// ErrBadMAC is a response whose MAC does not verify; nothing in it,
+	// including the RCODE, can be believed.
 	ErrBadMAC = errors.New("ddns: response MAC does not verify")
 
 	// ErrShortRDATA is a TSIG RDATA that ends in the middle of a field.
@@ -55,42 +51,29 @@ var (
 )
 
 const (
-	// typeTSIG is the TSIG record type. dnsmessage has no constant for it
-	// and no body type either, which is why TSIG is written and read here as
-	// an opaque resource.
+	// dnsmessage has no constant or body type for TSIG, so it is handled
+	// here as an opaque resource record.
 	typeTSIG = dnsmessage.Type(250)
 
-	// tsigFudge is the window, in seconds, the server is asked to allow
-	// between its clock and the time in the record. 300 is what RFC 8945
-	// suggests and what nsupdate sends.
+	// 300 seconds: what RFC 8945 suggests and what nsupdate sends.
 	tsigFudge = 300
 
-	// tsigRRFixedLen is the size of the type, class, TTL and RDLENGTH fields
-	// that sit between a record's owner name and its RDATA.
+	// Bytes between a record's owner name and its RDATA: type, class, TTL, RDLENGTH.
 	tsigRRFixedLen = 10
 
-	// headerLen is the size of a DNS message header, and arcountOff is where
-	// its ARCOUNT field starts.
+	// Fixed DNS header size, and the byte offset of its ARCOUNT field.
 	headerLen  = 12
 	arcountOff = 10
 )
 
-// algorithms maps the name an operator writes in algo: to the hash behind it.
-// It is fixed and only ever read.
-//
-// HMAC-SHA1 is in the list because RFC 8945 names it and because a name
-// server that has been running since before SHA-256 was the default may still
-// hold keys for it. TSIG uses the hash as a keyed MAC, where the collision
-// attacks that retired SHA-1 for signatures do not apply, and nothing here
-// reaches it unless a configuration asks for algo:hmac-sha1 by name.
+// HMAC-SHA1 stays for RFC 8945 compatibility and old key material; as a
+// keyed MAC it isn't exposed to SHA-1's collision weakness.
 var algorithms = map[string]func() hash.Hash{
 	"hmac-sha1":   sha1.New,
 	"hmac-sha256": sha256.New,
 	"hmac-sha512": sha512.New,
 }
 
-// algorithmNames lists the accepted algo: values in a stable order, for error
-// messages.
 func algorithmNames() []string {
 	names := make([]string, 0, len(algorithms))
 	for name := range algorithms {
@@ -100,11 +83,8 @@ func algorithmNames() []string {
 	return names
 }
 
-// tsigKey is a TSIG key with everything the signing path needs precomputed.
-//
-// It is immutable once built and safe to share between goroutines. The secret
-// never reaches the log: no method of this type prints it, and the errors it
-// returns name the key, never its value.
+// Immutable once built, safe to share across goroutines. No method prints
+// the secret, and returned errors name the key, never its value.
 type tsigKey struct {
 	name     string // presentation form, lowercase, trailing dot
 	nameWire []byte
@@ -114,7 +94,6 @@ type tsigKey struct {
 	secret   []byte
 }
 
-// newTSIGKey builds a key from the configured name, algorithm and secret.
 func newTSIGKey(name, algo string, secret []byte) (tsigKey, error) {
 	newHash, ok := algorithms[algo]
 	if !ok {
@@ -128,19 +107,16 @@ func newTSIGKey(name, algo string, secret []byte) (tsigKey, error) {
 	return k, nil
 }
 
-// packLabel is packName for a name of exactly one label, which every TSIG
-// algorithm name is. It takes no error return because its only inputs are the
-// keys of the algorithms map: fixed strings, well under the label limit.
+// No error return: the only inputs are algorithms map keys, fixed strings
+// well under the label limit.
 func packLabel(label string) []byte {
 	out := make([]byte, 0, len(label)+2)
-	//nolint:gosec // The only callers pass a key of the algorithms map, and
-	// the test beside this one holds them to what packName would produce.
+	//nolint:gosec // callers only pass algorithms map keys, held to packName's output by the sibling test.
 	out = append(out, byte(len(label)))
 	out = append(out, label...)
 	return append(out, 0)
 }
 
-// dot gives a name its trailing dot if it has none.
 func dot(name string) string {
 	if len(name) > 0 && name[len(name)-1] == '.' {
 		return name
@@ -148,14 +124,9 @@ func dot(name string) string {
 	return name + "."
 }
 
-// sign appends a TSIG record to msg and returns the signed message together
-// with the MAC, which the caller needs in order to verify the answer
-// (RFC 8945 section 5.4).
-//
-// signedAt is the time that goes on the wire. The server compares it against
-// its own clock and answers BADTIME when the two are more than the fudge
-// apart, so a host whose clock has drifted gets a named failure instead of a
-// silent one.
+// The returned MAC lets the caller verify the answer (RFC 8945 section 5.4).
+// signedAt is compared against the server's own clock; drift beyond the
+// fudge gets a named BADTIME failure instead of a silent one.
 func (k tsigKey) sign(msg []byte, signedAt time.Time, origID uint16) ([]byte, []byte) {
 	ts := unixSeconds(signedAt)
 	mac := k.digest(msg, ts, nil)
@@ -164,9 +135,8 @@ func (k tsigKey) sign(msg []byte, signedAt time.Time, origID uint16) ([]byte, []
 	return out, mac
 }
 
-// unixSeconds is signedAt as the 48-bit unsigned Time Signed field. A clock
-// that has not been set yet reads as the epoch rather than as a time in the
-// year 8 million, which is what the conversion would otherwise produce.
+// A clock not yet set reads as the epoch, not a wraparound into the far
+// future, which a naive int64-to-uint64 conversion would produce.
 func unixSeconds(signedAt time.Time) uint64 {
 	s := signedAt.Unix()
 	if s < 0 {
@@ -175,13 +145,8 @@ func unixSeconds(signedAt time.Time) uint64 {
 	return uint64(s)
 }
 
-// digest computes the MAC over msg, which has to be the message without the
-// TSIG record and with the ARCOUNT it had before the record was added
-// (RFC 8945 section 4.3.3).
-//
-// requestMAC is nil for a request. For a response it is the MAC of the
-// request being answered, which is digested first with a two octet length in
-// front of it; that is what ties an answer to the question it answers.
+// msg must exclude the TSIG record and carry the pre-append ARCOUNT (RFC 8945
+// section 4.3.3). requestMAC, when present, ties a response to its request.
 func (k tsigKey) digest(msg []byte, timeSigned uint64, requestMAC []byte) []byte {
 	h := hmac.New(k.newHash, k.secret)
 	if len(requestMAC) > 0 {
@@ -197,20 +162,13 @@ func (k tsigKey) digest(msg []byte, timeSigned uint64, requestMAC []byte) []byte
 	return h.Sum(nil)
 }
 
-// write feeds b to h. A hash never reports a write error, which hash.Hash
-// documents; the assignment is here so the call reads as deliberate.
+// hash.Hash never returns a write error; the assignment just makes that explicit.
 func write(h hash.Hash, b []byte) {
 	_, _ = h.Write(b)
 }
 
-// variables returns the TSIG variables that follow the message in the digest
-// (RFC 8945 section 4.3.3): the record's own name, class and TTL, then the
-// RDATA fields other than the MAC.
-//
-// Error and Other Data are always zero. This plugin only signs requests, and
-// it only accepts an answer whose TSIG error is NOERROR, so the one case
-// where those fields carry something -- a BADTIME reply, which returns the
-// server's clock in Other Data -- is refused before the MAC is computed.
+// TSIG variables per RFC 8945 section 4.3.3. Error and Other Data are always
+// zero: only a NOERROR reply is accepted, so BADTIME's use of Other Data never applies.
 func (k tsigKey) variables(timeSigned uint64) []byte {
 	buf := make([]byte, 0, len(k.nameWire)+len(k.algoWire)+18)
 	buf = append(buf, k.nameWire...)
@@ -224,7 +182,7 @@ func (k tsigKey) variables(timeSigned uint64) []byte {
 	return buf
 }
 
-// appendRR appends the TSIG resource record itself. The caller bumps ARCOUNT.
+// Caller is responsible for bumping ARCOUNT.
 func (k tsigKey) appendRR(msg []byte, timeSigned uint64, mac []byte, origID uint16) []byte {
 	rdata := make([]byte, 0, len(k.algoWire)+len(mac)+18)
 	rdata = append(rdata, k.algoWire...)
@@ -241,21 +199,18 @@ func (k tsigKey) appendRR(msg []byte, timeSigned uint64, mac []byte, origID uint
 	msg = binary.BigEndian.AppendUint16(msg, uint16(typeTSIG))
 	msg = binary.BigEndian.AppendUint16(msg, uint16(dnsmessage.ClassANY))
 	msg = binary.BigEndian.AppendUint32(msg, 0) // TTL
-	//nolint:gosec // The RDATA is a name, a MAC and seven fixed width
-	// fields: a few hundred octets at the very most.
+	//nolint:gosec // RDATA is a name, a MAC and seven fixed width fields: a few hundred octets at most.
 	msg = binary.BigEndian.AppendUint16(msg, uint16(len(rdata)))
 	return append(msg, rdata...)
 }
 
-// appendUint48 appends the low 48 bits of v, which is how RFC 8945 carries
-// Time Signed.
+// RFC 8945 carries Time Signed as 48 bits.
 func appendUint48(b []byte, v uint64) []byte {
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], v)
 	return append(b, buf[2:]...)
 }
 
-// tsigRecord is a TSIG record read back out of a response.
 type tsigRecord struct {
 	name       string
 	algo       string
@@ -268,10 +223,8 @@ type tsigRecord struct {
 	rdataLen   int
 }
 
-// findTSIG returns the TSIG record of msg.
-//
-// RFC 8945 section 5.2 makes it the last record of the additional section,
-// which is what lets the digest be taken over the bytes in front of it.
+// RFC 8945 section 5.2: TSIG is the last record of the additional section,
+// so the digest covers everything in front of it.
 func findTSIG(msg []byte) (tsigRecord, error) {
 	var p dnsmessage.Parser
 	if _, err := p.Start(msg); err != nil {
@@ -295,8 +248,8 @@ func findTSIG(msg []byte) (tsigRecord, error) {
 	return rec, nil
 }
 
-// skipToAdditionals walks the parser past the zone, prerequisite and update
-// sections an UPDATE response echoes back.
+// An UPDATE response echoes the zone, prerequisite and update sections
+// before its additional section.
 func skipToAdditionals(p *dnsmessage.Parser) error {
 	if err := p.SkipAllQuestions(); err != nil {
 		return err
@@ -307,8 +260,6 @@ func skipToAdditionals(p *dnsmessage.Parser) error {
 	return p.SkipAllAuthorities()
 }
 
-// lastAdditional returns the header and RDATA of the final record of the
-// additional section.
 func lastAdditional(p *dnsmessage.Parser) (dnsmessage.ResourceHeader, []byte, error) {
 	var (
 		hdr   dnsmessage.ResourceHeader
@@ -354,8 +305,6 @@ func parseTSIGRDATA(rdata []byte) (tsigRecord, error) {
 	return rec, nil
 }
 
-// verify checks a response's TSIG against this key and the MAC of the request
-// it answers.
 func (k tsigKey) verify(msg []byte, rec tsigRecord, requestMAC []byte) error {
 	if rec.name != k.name {
 		return fmt.Errorf("%w: signed with %s, expected %s", ErrTSIGKey, rec.name, k.name)
@@ -363,6 +312,8 @@ func (k tsigKey) verify(msg []byte, rec tsigRecord, requestMAC []byte) error {
 	if rec.algo != k.algo {
 		return fmt.Errorf("%w: signed with %s, expected %s", ErrTSIGKey, rec.algo, k.algo)
 	}
+	// Checked before the MAC: RFC 8945 has a BADKEY/BADSIG reply carry a
+	// zero-length MAC, so there is nothing to verify there.
 	if rec.rcode != 0 {
 		return fmt.Errorf("%w: %s", ErrTSIGError, tsigErrorName(rec.rcode))
 	}
@@ -376,15 +327,8 @@ func (k tsigKey) verify(msg []byte, rec tsigRecord, requestMAC []byte) error {
 	return nil
 }
 
-// stripTSIG returns the message as it was digested: everything in front of
-// the TSIG record, with ARCOUNT back down to what it was before the record
-// was appended (RFC 8945 section 4.3.3).
-//
-// The record sits at the end and section 4.2 forbids compressing its owner
-// name, so its offset follows from the length of that name and of the RDATA.
-// A server that compresses or rewrites the name anyway is refused here, where
-// the reason is still visible, rather than three lines later as a MAC that
-// does not verify.
+// RFC 8945 section 4.2 forbids compressing the TSIG name; its offset is
+// computed from name and RDATA length, so a rewritten name fails here, not later as a bad MAC.
 func (k tsigKey) stripTSIG(msg []byte, rdataLen int) ([]byte, error) {
 	off := len(msg) - rdataLen - tsigRRFixedLen - len(k.nameWire)
 	if off < headerLen || !bytes.EqualFold(msg[off:off+len(k.nameWire)], k.nameWire) {
@@ -396,8 +340,7 @@ func (k tsigKey) stripTSIG(msg []byte, rdataLen int) ([]byte, error) {
 	return out, nil
 }
 
-// tsigErrors names the extended RCODEs a TSIG record can carry (RFC 8945
-// section 2 and the IANA registry).
+// Extended RCODEs a TSIG record can carry (RFC 8945 section 2, IANA registry).
 var tsigErrors = map[uint16]string{
 	16: "BADSIG",
 	17: "BADKEY",
@@ -408,7 +351,6 @@ var tsigErrors = map[uint16]string{
 	22: "BADTRUNC",
 }
 
-// tsigErrorName names a TSIG error for the log.
 func tsigErrorName(code uint16) string {
 	if name, ok := tsigErrors[code]; ok {
 		return name
@@ -416,15 +358,13 @@ func tsigErrorName(code uint16) string {
 	return fmt.Sprintf("TSIG error %d", code)
 }
 
-// rdataReader reads the fixed width fields of a TSIG RDATA, keeping the first
-// error so the parse reads as a straight sequence of fields instead of a
-// ladder of length checks.
+// Keeps the first error so a parse reads as a straight sequence of fields,
+// not a ladder of length checks.
 type rdataReader struct {
 	b   []byte
 	err error
 }
 
-// take returns the next n octets.
 func (r *rdataReader) take(n int) []byte {
 	if r.err != nil {
 		return nil
@@ -438,7 +378,6 @@ func (r *rdataReader) take(n int) []byte {
 	return out
 }
 
-// uint16 reads a two octet field.
 func (r *rdataReader) uint16() uint16 {
 	b := r.take(2)
 	if b == nil {
@@ -447,7 +386,6 @@ func (r *rdataReader) uint16() uint16 {
 	return binary.BigEndian.Uint16(b)
 }
 
-// uint48 reads the six octet Time Signed field.
 func (r *rdataReader) uint48() uint64 {
 	b := r.take(6)
 	if b == nil {
@@ -456,7 +394,6 @@ func (r *rdataReader) uint48() uint64 {
 	return uint64(binary.BigEndian.Uint32(b[2:])) | uint64(binary.BigEndian.Uint16(b[:2]))<<32
 }
 
-// name reads an uncompressed name.
 func (r *rdataReader) name() string {
 	if r.err != nil {
 		return ""

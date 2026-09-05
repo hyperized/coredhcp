@@ -164,11 +164,7 @@ func TestPluginState4Handler4(t *testing.T) {
 		assert.True(t, serverID.Equal(sid))
 	})
 
-	// The old code keyed off req.ServerIPAddr (siaddr), which a client may
-	// carry over from an earlier exchange even though it has nothing to do
-	// with which DHCP server the request is for. This used to be rejected;
-	// now that the guard looks only at option 54, a request with no option
-	// 54 passes regardless of siaddr.
+	// Only option 54 identifies the intended server; siaddr may be stale and is not authoritative.
 	t.Run("siaddr points elsewhere but no option 54, accepted", func(t *testing.T) {
 		req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest, ServerIPAddr: otherID}
 		resp := &dhcpv4.DHCPv4{}
@@ -253,8 +249,6 @@ func TestPluginState4Handler4(t *testing.T) {
 		})
 	}
 
-	// Regression: option 54 is only required for RELEASE and DECLINE. A
-	// DISCOVER with no server identifier still passes.
 	t.Run("DISCOVER with no option 54, accepted", func(t *testing.T) {
 		req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest}
 		req.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeDiscover))

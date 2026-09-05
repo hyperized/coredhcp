@@ -28,11 +28,8 @@ const (
 	ipFixture       = `{"count":2,"results":[{"id":1,"family":{"value":4,"label":"IPv4"},"address":"10.0.0.5/24","status":{"value":"active","label":"Active"}},{"id":2,"family":{"value":6,"label":"IPv6"},"address":"2001:db8::10:5/64","status":{"value":"active","label":"Active"}}]}`
 )
 
-// fakeNetBox is an in-process stand-in for a NetBox instance, serving the two
-// list endpoints the plugin calls. It counts every request received and
-// checks the Authorization header on each one, reporting a mismatch with
-// t.Errorf: the handler runs on its own goroutine, and require.* there would
-// call runtime.Goexit instead of failing the test.
+// fakeNetBox reports an Authorization mismatch with t.Errorf, not require.*, since the handler
+// runs on its own goroutine where require.* would call runtime.Goexit instead of failing the test.
 type fakeNetBox struct {
 	srv      *httptest.Server
 	wantAuth string
@@ -130,10 +127,8 @@ func TestSetup6KnownMAC(t *testing.T) {
 	assert.Contains(t, opt.String(), "IP=2001:db8::10:5")
 }
 
-// TestCacheKeepsNetBoxOffThePerPacketPath drives the same DHCPv4 request
-// through the handler twice. The second pass must not add any request to the
-// fake server: that is the whole point of the cache, since a boot storm
-// retransmits the same MAC many times.
+// TestCacheKeepsNetBoxOffThePerPacketPath matters because a boot storm retransmits the same MAC
+// many times; the second pass here must add no request to the fake server.
 func TestCacheKeepsNetBoxOffThePerPacketPath(t *testing.T) {
 	fake := newFakeNetBox(t, "Token secret")
 	h4, err := netbox.Plugin.Setup4(fake.srv.URL, "secret")
@@ -177,9 +172,8 @@ func TestSetupArgErrors(t *testing.T) {
 	}
 }
 
-// TestSetupDoesNotContactNetBox is a design property worth its own name:
-// setup must succeed even when NetBox cannot be reached at all, because a
-// DHCP server has to come up when NetBox is down or still booting.
+// TestSetupDoesNotContactNetBox checks setup succeeds regardless, since a DHCP server must come
+// up even when NetBox is down or still booting.
 func TestSetupDoesNotContactNetBox(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		t.Errorf("unexpected request to %s during setup", r.URL.Path)

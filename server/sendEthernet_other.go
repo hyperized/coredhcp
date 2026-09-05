@@ -13,10 +13,8 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv4"
 )
 
-// sendEthernet requires a raw AF_PACKET socket to unicast a response to a
-// client that does not have an IP address yet, which only exists on Linux.
-// Everywhere else the server falls back to this stub so the package still
-// compiles; callers get an error at runtime if the Ethernet path is selected.
+// The raw AF_PACKET socket this needs is Linux-only. The stub keeps the
+// package building, and errors only if the Ethernet path is actually taken.
 func sendEthernet(_ net.Interface, _ *dhcpv4.DHCPv4) error {
 	return errors.New("raw Ethernet replies are only supported on Linux")
 }

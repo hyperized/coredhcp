@@ -12,56 +12,43 @@ import (
 	"strings"
 )
 
-// Names a client asked for that this plugin refuses to write. They are all
-// reported at debug level: a name that does not pass costs the client its DNS
-// record and nothing else, and a network with a handful of appliances whose
-// names carry underscores would otherwise fill the log.
+// Logged at debug, not error: a rejected name only costs the client its
+// record, and DHCP segments send oddly-named devices constantly.
 var (
 	// ErrNoHostname is a client that sent no name at all, or an empty one.
 	ErrNoHostname = errors.New("ddns: no hostname")
 
-	// ErrInvalidHostname is a name that is not a plain DNS name: an empty
-	// label, one over 63 octets, a leading or trailing hyphen, or a
-	// character outside [a-z0-9-].
+	// ErrInvalidHostname is a name that fails the RFC 1035 section 2.3.1 label syntax.
 	ErrInvalidHostname = errors.New("ddns: invalid hostname")
 
-	// ErrOutsideZone is a fully qualified name that does not sit under the
-	// configured zone. Writing it would mean updating a zone this server was
-	// never given a key for, so the name is dropped rather than rewritten
-	// into the zone we do hold.
+	// ErrOutsideZone is a fully qualified name outside the configured zone:
+	// writing it would touch a zone this server has no key for.
 	ErrOutsideZone = errors.New("ddns: name is outside the zone")
 
 	// ErrBadName is a name that cannot be put on the wire, or one read off
 	// the wire that is malformed.
 	ErrBadName = errors.New("ddns: malformed DNS name")
 
-	// ErrReverseBoundary is a reverse: prefix that does not end on a label
-	// boundary of its .arpa tree.
+	// ErrReverseBoundary is a reverse prefix that does not end on a label
+	// boundary of its arpa tree.
 	ErrReverseBoundary = errors.New("ddns: reverse prefix does not end on a zone boundary")
 )
 
 const (
-	// maxLabel and maxName are the DNS limits, in octets, on one label and
-	// on a name in presentation form without its trailing dot.
+	// maxLabel and maxName are the RFC 1035 section 2.3.4 size limits, in octets.
 	maxLabel = 63
 	maxName  = 253
 
-	// The two reverse trees. Both carry a trailing dot: every name this
-	// package passes around is fully qualified.
+	// Both carry a trailing dot: every name this package passes around is
+	// fully qualified.
 	arpaV4 = "in-addr.arpa."
 	arpaV6 = "ip6.arpa."
 
 	hexDigits = "0123456789abcdef"
 )
 
-// hostFQDN turns the name a client asked for into the fully qualified name to
-// write, with a trailing dot. zone carries a trailing dot too.
-//
-// A single label is relative and is appended to the zone. Anything with a dot
-// in it has to already be the fully qualified form of a name under the zone.
-// The zone apex is not under itself, so a client that claims the zone name is
-// refused along with one that claims someone else's zone: both are either a
-// misconfiguration or an attempt to have the server write where it should not.
+// The zone apex is not under itself: a client claiming the zone name is
+// refused the same as one claiming a different zone.
 func hostFQDN(raw, zone string) (string, error) {
 	name := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(raw), "."))
 	if name == "" {
@@ -80,7 +67,6 @@ func hostFQDN(raw, zone string) (string, error) {
 	return fqdn, nil
 }
 
-// canonicalZone lowercases a configured zone and gives it a trailing dot.
 func canonicalZone(raw string) (string, error) {
 	name := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(raw), "."))
 	if err := validName(name); err != nil {
@@ -89,7 +75,7 @@ func canonicalZone(raw string) (string, error) {
 	return name + ".", nil
 }
 
-// validName checks a lowercase name that carries no trailing dot.
+// name must already be lowercase with no trailing dot.
 func validName(name string) error {
 	if name == "" {
 		return fmt.Errorf("%w: the name is empty", ErrInvalidHostname)
@@ -105,7 +91,7 @@ func validName(name string) error {
 	return nil
 }
 
-// validLabel checks one lowercase label.
+// label must already be lowercase.
 func validLabel(label string) error {
 	if label == "" || len(label) > maxLabel {
 		return fmt.Errorf("%w: label %q has to be 1 to %d octets", ErrInvalidHostname, label, maxLabel)
@@ -119,10 +105,8 @@ func validLabel(label string) error {
 	return nil
 }
 
-// onlyNameBytes reports whether label is made of the characters a host name
-// is allowed to use here. The set is deliberately narrower than what DNS
-// permits: these names go into a zone from packets anyone on the segment can
-// send, so anything that is not an unambiguous host name is refused.
+// Narrower than what DNS allows: these names come from packets anyone on the
+// segment can send, so anything but an unambiguous host name is refused.
 func onlyNameBytes(label string) bool {
 	for i := 0; i < len(label); i++ {
 		c := label[i]
@@ -134,10 +118,7 @@ func onlyNameBytes(label string) bool {
 	return true
 }
 
-// arpaLabels returns the labels of addr's reverse name, least significant
-// first, and the tree they sit in. For 10.0.0.5 that is ["5","0","0","10"]
-// under in-addr.arpa.; for an IPv6 address it is the 32 nibbles in the same
-// order under ip6.arpa.
+// Labels are ordered least-significant first, matching arpa zone convention.
 func arpaLabels(addr netip.Addr) ([]string, string) {
 	if addr.Is4() {
 		b := addr.As4()
@@ -156,13 +137,11 @@ func arpaLabels(addr netip.Addr) ([]string, string) {
 	return labels, arpaV6
 }
 
-// ptrName returns the PTR owner name for addr, with a trailing dot.
 func ptrName(addr netip.Addr) string {
 	labels, suffix := arpaLabels(addr)
 	return joinName(labels, suffix)
 }
 
-// reverseZone returns the reverse zone that covers pfx.
 func reverseZone(pfx netip.Prefix) (string, error) {
 	units, err := reverseUnits(pfx)
 	if err != nil {
@@ -172,13 +151,8 @@ func reverseZone(pfx netip.Prefix) (string, error) {
 	return joinName(labels[len(labels)-units:], suffix), nil
 }
 
-// reverseUnits returns how many reverse labels pfx's prefix length names.
-//
-// A reverse zone cuts on a label boundary: one octet in in-addr.arpa. and one
-// nibble in ip6.arpa. A prefix that ends anywhere else has no zone of its own
-// and is served by an RFC 2317 style delegation whose name this plugin cannot
-// guess, so it is refused at setup instead of being quietly rounded to
-// something that would send updates to the wrong server.
+// A prefix that doesn't end on a label boundary has no zone of its own; it
+// would need an RFC 2317 delegation whose name this plugin cannot guess.
 func reverseUnits(pfx netip.Prefix) (int, error) {
 	per := 4
 	unit := "4"
@@ -191,7 +165,6 @@ func reverseUnits(pfx netip.Prefix) (int, error) {
 	return pfx.Bits() / per, nil
 }
 
-// joinName joins labels and the tree they sit in into a fully qualified name.
 func joinName(labels []string, suffix string) string {
 	if len(labels) == 0 {
 		return suffix
@@ -199,8 +172,6 @@ func joinName(labels []string, suffix string) string {
 	return strings.Join(labels, ".") + "." + suffix
 }
 
-// packName returns the uncompressed, lowercase wire form of a fully qualified
-// name. The root by itself is ".".
 func packName(name string) ([]byte, error) {
 	if !strings.HasSuffix(name, ".") {
 		return nil, fmt.Errorf("%w: %q has no trailing dot", ErrBadName, name)
@@ -214,22 +185,15 @@ func packName(name string) ([]byte, error) {
 		if label == "" || len(label) > maxLabel {
 			return nil, fmt.Errorf("%w: label %q in %q has to be 1 to %d octets", ErrBadName, label, name, maxLabel)
 		}
-		//nolint:gosec // The length is checked against maxLabel, which is 63,
-		// on the line above.
+		//nolint:gosec // length already bounded by maxLabel (63) above.
 		out = append(out, byte(len(label)))
 		out = append(out, label...)
 	}
 	return append(out, 0), nil
 }
 
-// readName reads one uncompressed name from the front of b and returns it in
-// presentation form, lowercased and with a trailing dot, together with the
-// number of octets it consumed.
-//
-// Compression pointers are refused. Both callers read a name out of a
-// standalone byte string rather than out of a message -- a TSIG RDATA, where
-// RFC 8945 section 4.2 forbids compression, and a DHCP option, which has no
-// message to point into -- so a pointer there is malformed either way.
+// Compression pointers are refused: RFC 8945 section 4.2 forbids them in TSIG
+// RDATA, and a bare DHCP option has no message to point into anyway.
 func readName(b []byte) (string, int, error) {
 	var out strings.Builder
 	for off := 0; off < len(b); {
@@ -251,7 +215,6 @@ func readName(b []byte) (string, int, error) {
 	return "", 0, fmt.Errorf("%w: the name is not terminated", ErrBadName)
 }
 
-// orRoot names the empty name, which is the DNS root.
 func orRoot(name string) string {
 	if name == "" {
 		return "."

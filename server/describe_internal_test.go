@@ -18,8 +18,6 @@ import (
 	"github.com/coredhcp/coredhcp/events"
 )
 
-// --- addAddresses6 / addPrefixes6 / reply6 ---
-
 func TestReply6GetInnerMessageError(t *testing.T) {
 	r := &requestReport{}
 	// A relay with no inner message option: GetInnerMessage fails, so the
@@ -142,8 +140,6 @@ func TestAddPrefixes6(t *testing.T) {
 	}
 }
 
-// --- request6 ---
-
 func TestRequest6GetInnerMessageError(t *testing.T) {
 	r := &requestReport{}
 	r.request6(&dhcpv6.RelayMessage{MessageType: dhcpv6.MessageTypeRelayForward})
@@ -151,8 +147,6 @@ func TestRequest6GetInnerMessageError(t *testing.T) {
 	assert.Empty(t, r.ev.ClientID)
 	assert.Empty(t, r.ev.Hostname)
 }
-
-// --- shorterLease ---
 
 func TestShorterLease(t *testing.T) {
 	tests := []struct {
@@ -172,8 +166,6 @@ func TestShorterLease(t *testing.T) {
 		})
 	}
 }
-
-// --- addrFrom ---
 
 func TestAddrFrom(t *testing.T) {
 	tests := []struct {
@@ -227,8 +219,6 @@ func TestAddrFrom(t *testing.T) {
 	}
 }
 
-// --- capHostname ---
-
 func TestCapHostname(t *testing.T) {
 	t.Run("shorter than the cap is left alone", func(t *testing.T) {
 		assert.Equal(t, "client-1", capHostname("client-1"))
@@ -242,8 +232,6 @@ func TestCapHostname(t *testing.T) {
 	})
 }
 
-// --- peerAddrPort ---
-
 func TestPeerAddrPort(t *testing.T) {
 	t.Run("nil peer gives the zero AddrPort", func(t *testing.T) {
 		assert.False(t, peerAddrPort(nil).IsValid())
@@ -254,8 +242,6 @@ func TestPeerAddrPort(t *testing.T) {
 		assert.Equal(t, "192.0.2.1:68", got.String())
 	})
 }
-
-// --- replyPath4 ---
 
 func TestReplyPath4(t *testing.T) {
 	tests := []struct {
@@ -273,8 +259,6 @@ func TestReplyPath4(t *testing.T) {
 		})
 	}
 }
-
-// --- fqdn6 ---
 
 func TestFQDN6(t *testing.T) {
 	t.Run("no FQDN option", func(t *testing.T) {

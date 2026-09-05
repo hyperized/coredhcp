@@ -19,10 +19,8 @@ import (
 	rangeplugin "github.com/coredhcp/coredhcp/plugins/range"
 )
 
-// seedDB creates the leases4 table (matching what storage.go creates) and
-// inserts rows directly with SQL, bypassing any of the plugin's own
-// validation, to set up scenarios setupRange must handle when reloading
-// leases from a pre-existing database.
+// seedDB writes rows directly with SQL, bypassing the plugin's own
+// validation, to set up pre-existing-database scenarios setupRange must handle.
 func seedDB(t *testing.T, path string, rows [][4]any) {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+path)
@@ -89,7 +87,6 @@ func TestPluginSetupAndHandler4NewAllocationThenRenewal(t *testing.T) {
 	assert.False(t, stop)
 	assert.NotNil(t, result.YourIPAddr)
 
-	// Renewal: the same MAC asking again must get the same address back.
 	resp2 := &dhcpv4.DHCPv4{Options: make(dhcpv4.Options)}
 	result2, stop2 := h4(req, resp2)
 	require.NotNil(t, result2)
@@ -104,8 +101,8 @@ func TestPluginSetupReloadsExistingLeases(t *testing.T) {
 	h4, err := rangeplugin.Plugin.Setup4(dbPath, "10.0.1.1", "10.0.1.2", "1h")
 	require.NoError(t, err)
 
-	// The first address was already re-allocated to the record loaded from
-	// storage, so a new client must get the second one.
+	// The first address is already re-allocated to the loaded record, so a
+	// new client must get the second one.
 	hwaddr, err := net.ParseMAC("02:00:00:00:02:01")
 	require.NoError(t, err)
 	req := &dhcpv4.DHCPv4{ClientHWAddr: hwaddr}
@@ -126,9 +123,8 @@ func TestPluginSetupLoadRecordsFailure(t *testing.T) {
 
 func TestPluginSetupReallocationExhausted(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "leases.db")
-	// Two different MACs sharing the same IP, but the range only has room
-	// for one address: re-allocating the second record must fail with "no
-	// address available".
+	// Two MACs share one IP in a single-address range, so re-allocating the
+	// second record must fail.
 	seedDB(t, dbPath, [][4]any{
 		{"02:00:00:00:03:00", "10.0.2.1", 1, "a"},
 		{"02:00:00:00:03:01", "10.0.2.1", 1, "b"},
@@ -141,9 +137,8 @@ func TestPluginSetupReallocationExhausted(t *testing.T) {
 
 func TestPluginSetupReallocationMismatch(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "leases.db")
-	// Two different MACs sharing the same IP, with a second address free in
-	// the range: the allocator falls back to it instead of the requested
-	// hint, which setupRange treats as a reallocation mismatch.
+	// Two MACs share one IP, but a second address is free: the allocator
+	// falls back to it, which setupRange treats as a mismatch.
 	seedDB(t, dbPath, [][4]any{
 		{"02:00:00:00:04:00", "10.0.3.1", 1, "a"},
 		{"02:00:00:00:04:01", "10.0.3.1", 1, "b"},
@@ -154,9 +149,8 @@ func TestPluginSetupReallocationMismatch(t *testing.T) {
 	assert.Contains(t, err.Error(), "did not re-allocate requested leased ip")
 }
 
-// TestPluginSetupSweepArgument covers the optional fifth argument end to end.
-// Anything that is not a sweep argument is rejected rather than silently
-// ignored, so a typo in the config surfaces at startup.
+// Anything that isn't a recognized sweep spec is rejected rather than
+// silently ignored, so a config typo surfaces at startup.
 func TestPluginSetupSweepArgument(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -184,10 +178,8 @@ func TestPluginSetupSweepArgument(t *testing.T) {
 	}
 }
 
-// TestPluginSetupRejectsURIInDatabasePath covers the lease path check end to
-// end: the sqlite driver parses the DSN as a URI, so a '?' in a configured
-// path sets connection options rather than naming a file. Setup must refuse it
-// instead of quietly running on a store that is not the one configured.
+// The sqlite driver parses the DSN as a URI, so '?' or '#' in a path change
+// its meaning; Setup must refuse it rather than silently open the wrong store.
 func TestPluginSetupRejectsURIInDatabasePath(t *testing.T) {
 	for _, tc := range []struct{ name, file string }{
 		{"a query string turns the store in-memory", "leases.db?mode=memory"},
@@ -203,8 +195,6 @@ func TestPluginSetupRejectsURIInDatabasePath(t *testing.T) {
 	}
 }
 
-// TestPluginSetupDeclineProbationArgument covers the second optional argument
-// end to end, in both orders and with the sweep argument alongside it.
 func TestPluginSetupDeclineProbationArgument(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -232,8 +222,6 @@ func TestPluginSetupDeclineProbationArgument(t *testing.T) {
 	}
 }
 
-// TestPluginSetupDeclineMaxArgument covers the third optional argument end to
-// end, alongside the other two and in the wrong shapes.
 func TestPluginSetupDeclineMaxArgument(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

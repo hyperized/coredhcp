@@ -18,28 +18,19 @@ import (
 	"github.com/coredhcp/coredhcp/plugins"
 )
 
-// maxHostname caps the name copied into an event. The name comes from the
-// client and is only ever displayed, so this is about not carrying an
-// oversized string around rather than about validating it: the observer still
-// has to sanitise whatever it renders. A DHCPv4 option cannot exceed this
-// anyway; a DHCPv6 FQDN can.
+// A cap, not validation: the observer still has to sanitise what it renders.
+// A DHCPv4 option cannot exceed this anyway; a DHCPv6 FQDN can.
 const maxHostname = 255
 
-// requestReport builds the events.Request for one packet as the handler walks
-// it, and hands the finished event to the observer on the way out.
-//
-// A nil *requestReport is the case where nobody is watching. Every method
-// returns at once on a nil receiver, so an unobserved server pays one nil
-// check per exit point and allocates nothing.
+// requestReport builds the events.Request for one packet as the handler walks it.
+// A nil receiver means nobody is watching, and every method returns at once.
 type requestReport struct {
 	obs     events.Observer
 	ev      events.Request
 	chainAt time.Time
 }
 
-// newReport starts the event for one packet. Callers have already established
-// that an observer is attached. Time is taken here, which is as close to the
-// read from the socket as the handler gets.
+// The clock is read here, as close to the socket read as the handler gets.
 func newReport(obs events.Observer, family events.Family, iface string, peer *net.UDPAddr) *requestReport {
 	return &requestReport{
 		obs: obs,
@@ -52,8 +43,7 @@ func newReport(obs events.Observer, family events.Family, iface string, peer *ne
 	}
 }
 
-// chainStart marks the point the plugin chain is entered. Duration covers the
-// chain and nothing else, so parsing and sending stay out of it.
+// Duration covers the chain and nothing else: parsing and sending stay out.
 func (r *requestReport) chainStart() {
 	if r == nil {
 		return
@@ -61,9 +51,8 @@ func (r *requestReport) chainStart() {
 	r.chainAt = time.Now()
 }
 
-// chainDone4 records what the DHCPv4 chain cost and which plugin, if any,
-// stopped it. at is the index applyHandlers4 stopped on, or -1 when every
-// plugin ran. Position is 1-based because it is shown to people.
+// at is applyHandlers4's stop index, -1 when every plugin ran. Position is
+// 1-based because it is shown to people.
 func (r *requestReport) chainDone4(chain []plugins.Link4, at int) {
 	if r == nil {
 		return
@@ -75,7 +64,6 @@ func (r *requestReport) chainDone4(chain []plugins.Link4, at int) {
 	}
 }
 
-// chainDone6 is chainDone4 for the DHCPv6 chain.
 func (r *requestReport) chainDone6(chain []plugins.Link6, at int) {
 	if r == nil {
 		return
@@ -87,9 +75,8 @@ func (r *requestReport) chainDone6(chain []plugins.Link6, at int) {
 	}
 }
 
-// emit hands the finished event to the observer. Every exit path through the
-// handlers ends in exactly one of these, so an observer sees one event per
-// datagram.
+// Every exit path through the handlers ends in exactly one of these, so an
+// observer sees one event per datagram.
 func (r *requestReport) emit(outcome events.Outcome, path events.ReplyPath, err error) {
 	if r == nil {
 		return
@@ -102,9 +89,7 @@ func (r *requestReport) emit(outcome events.Outcome, path events.ReplyPath, err 
 	r.obs.Request(r.ev)
 }
 
-// emit4 is emit for a DHCPv4 datagram, reading off the destination whether the
-// reply was broadcast or unicast. Raw frames do not come through here: they
-// report events.PathLayer2 themselves.
+// Raw frames do not come through here: they report events.PathLayer2 themselves.
 func (r *requestReport) emit4(outcome events.Outcome, peer *net.UDPAddr, err error) {
 	if r == nil {
 		return
@@ -112,7 +97,6 @@ func (r *requestReport) emit4(outcome events.Outcome, peer *net.UDPAddr, err err
 	r.emit(outcome, replyPath4(peer), err)
 }
 
-// request4 fills in what the DHCPv4 request says about the client.
 func (r *requestReport) request4(req *dhcpv4.DHCPv4) {
 	if r == nil {
 		return
@@ -123,7 +107,6 @@ func (r *requestReport) request4(req *dhcpv4.DHCPv4) {
 	r.ev.Relay = addrFrom(req.GatewayIPAddr)
 }
 
-// reply4 fills in what the DHCPv4 reply hands out.
 func (r *requestReport) reply4(resp *dhcpv4.DHCPv4) {
 	if r == nil {
 		return
@@ -135,16 +118,14 @@ func (r *requestReport) reply4(resp *dhcpv4.DHCPv4) {
 	}
 }
 
-// request6 fills in what the DHCPv6 request says about the client. It reads
-// the inner message, so a relayed request describes the client rather than
-// the relay. A request whose inner message does not parse still produces an
-// event, with the fields the server could read left empty.
+// Reads the inner message, so a relayed request describes the client rather
+// than the relay. An inner message that will not parse still produces an event.
 func (r *requestReport) request6(req dhcpv6.DHCPv6) {
 	if r == nil {
 		return
 	}
-	// The outermost wrapper is the relay closest to the server, which is the
-	// one whose link address says where the request entered the network.
+	// The outermost wrapper is the relay nearest the server, whose link
+	// address says where the request entered the network.
 	if relay, ok := req.(*dhcpv6.RelayMessage); ok {
 		r.ev.Relay = addrFrom(relay.LinkAddr)
 	}
@@ -159,9 +140,8 @@ func (r *requestReport) request6(req dhcpv6.DHCPv6) {
 	r.ev.Hostname = capHostname(fqdn6(msg))
 }
 
-// reply6 fills in what the DHCPv6 reply hands out. resp may already be
-// wrapped in a relay-reply by the time it gets here, so it is unwrapped: what
-// the client receives sits in the inner message either way.
+// resp may already be wrapped in a relay-reply here; what the client receives
+// sits in the inner message either way.
 func (r *requestReport) reply6(resp dhcpv6.DHCPv6) {
 	if r == nil {
 		return
@@ -182,7 +162,6 @@ func (r *requestReport) reply6(resp dhcpv6.DHCPv6) {
 	}
 }
 
-// addAddresses6 adds every address of one identity association as a /128.
 func (r *requestReport) addAddresses6(addrs []*dhcpv6.OptIAAddress) {
 	for _, a := range addrs {
 		addr := addrFrom(a.IPv6Addr)
@@ -194,8 +173,7 @@ func (r *requestReport) addAddresses6(addrs []*dhcpv6.OptIAAddress) {
 	}
 }
 
-// addPrefixes6 adds every delegated prefix of one identity association, at the
-// length it was delegated with.
+// Prefixes keep the length they were delegated with, unlike addresses.
 func (r *requestReport) addPrefixes6(prefixes []*dhcpv6.OptIAPrefix) {
 	for _, p := range prefixes {
 		if p.Prefix == nil {
@@ -211,9 +189,7 @@ func (r *requestReport) addPrefixes6(prefixes []*dhcpv6.OptIAPrefix) {
 	}
 }
 
-// fqdn6 is the name the client sent in its FQDN option, empty when it sent
-// none. rfc1035label renders its labels as a Go slice literal, so they are
-// joined here instead.
+// rfc1035label renders its labels as a Go slice literal, so they are joined here.
 func fqdn6(msg *dhcpv6.Message) string {
 	opt := msg.Options.FQDN()
 	if opt == nil || opt.DomainName == nil {
@@ -222,9 +198,8 @@ func fqdn6(msg *dhcpv6.Message) string {
 	return strings.Join(opt.DomainName.Labels, ".")
 }
 
-// shorterLease keeps the shortest non-zero of two lifetimes. A DHCPv6 reply
-// can hand out several addresses with different lifetimes while the event
-// holds one number, so it holds the one that expires first.
+// A DHCPv6 reply can carry several lifetimes while the event holds one, so it
+// holds the one that expires first.
 func shorterLease(cur, next time.Duration) time.Duration {
 	if cur == 0 || (next > 0 && next < cur) {
 		return next
@@ -232,9 +207,8 @@ func shorterLease(cur, next time.Duration) time.Duration {
 	return cur
 }
 
-// addrFrom converts a net.IP to a netip.Addr, unmapping 4-in-6 so a DHCPv4
-// address never reads as ::ffff:a.b.c.d. An unset, malformed or all-zero
-// address becomes the zero Addr, which the event contract reads as "not set".
+// Unmaps 4-in-6 so a DHCPv4 address never reads as ::ffff:a.b.c.d. Anything
+// unset or malformed becomes the zero Addr, which the event reads as "not set".
 func addrFrom(ip net.IP) netip.Addr {
 	addr, ok := netip.AddrFromSlice(ip)
 	if !ok {
@@ -247,9 +221,8 @@ func addrFrom(ip net.IP) netip.Addr {
 	return addr
 }
 
-// peerAddrPort is the datagram's source address. A DHCPv4 peer arrives as a
-// 4-in-6 address on a dual-stack socket, so it is unmapped here to read as
-// 192.0.2.1:68 rather than [::ffff:192.0.2.1]:68.
+// A DHCPv4 peer arrives 4-in-6 on a dual-stack socket, so it is unmapped to
+// read as 192.0.2.1:68 rather than [::ffff:192.0.2.1]:68.
 func peerAddrPort(peer *net.UDPAddr) netip.AddrPort {
 	if peer == nil {
 		return netip.AddrPort{}
@@ -258,9 +231,8 @@ func peerAddrPort(peer *net.UDPAddr) netip.AddrPort {
 	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
 }
 
-// capHostname trims a client-supplied name to maxHostname bytes. The bytes
-// are left as they arrived: sanitising them is the display's job, and the
-// event should say what the client actually sent.
+// The bytes are left as they arrived: the event should say what the client
+// sent, and sanitising is the display's job.
 func capHostname(name string) string {
 	if len(name) > maxHostname {
 		return name[:maxHostname]
@@ -268,9 +240,7 @@ func capHostname(name string) string {
 	return name
 }
 
-// replyPath4 says how a DHCPv4 datagram left: broadcast when it went to
-// 255.255.255.255, unicast to the client, its current address or a relay
-// otherwise.
+// Anything not sent to 255.255.255.255 counts as unicast, relays included.
 func replyPath4(peer *net.UDPAddr) events.ReplyPath {
 	if peer != nil && peer.IP.Equal(net.IPv4bcast) {
 		return events.PathBroadcast

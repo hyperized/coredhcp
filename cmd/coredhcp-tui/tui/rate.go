@@ -13,12 +13,10 @@ import (
 	"github.com/coredhcp/coredhcp/events"
 )
 
-// rateLabelW is the width of the "req" / "err" labels on the sparkline rows.
 const rateLabelW = 4
 
-// rateLines renders the two per-second histories and the chain timings. Each
-// sparkline is scaled against its own peak, which the label spells out: the
-// shape says when the traffic came, the label says how much it was.
+// Each sparkline is scaled against its own peak, so the label has to carry the
+// magnitude the shape cannot.
 func rateLines(s snapshot, width int) []string {
 	reqPeak := peak(s.reqRate)
 	errTotal := sum(s.errRate)
@@ -30,8 +28,7 @@ func rateLines(s snapshot, width int) []string {
 	}
 }
 
-// errLabel describes the error history in words, since its peak is usually
-// one and a sparkline of ones says nothing.
+// The error peak is usually one, and a sparkline of ones says nothing.
 func errLabel(total uint64) string {
 	if total == 0 {
 		return "none in 60 s"
@@ -40,8 +37,6 @@ func errLabel(total uint64) string {
 	return humanCount(total) + " in 60 s"
 }
 
-// sparkRow lays out one history: label, the blocks, and the scale on the
-// right.
 func sparkRow(label string, values []uint32, top uint32, tail string, width int) string {
 	l := newLine(width)
 	l.col(tagDim, label, rateLabelW)
@@ -61,9 +56,6 @@ func sparkRow(label string, values []uint32, top uint32, tail string, width int)
 	return l.String()
 }
 
-// chainLatencyLine reports how long the plugin chain took over the traffic
-// still in the ring. The median is what the server normally costs a client;
-// the maximum is the one that would show up as a timeout.
 func chainLatencyLine(traffic []events.Request, width int) string {
 	l := newLine(width)
 	l.col(tagDim, "chain", rateLabelW+2)
@@ -83,12 +75,10 @@ func chainLatencyLine(traffic []events.Request, width int) string {
 	return l.String()
 }
 
-// slowChain is where a chain stops being fast enough to ignore. A DHCP client
-// waits seconds, so this is not a deadline, it is the point where a plugin is
-// doing blocking work worth looking at.
+// A DHCP client waits seconds, so this is not a deadline: it is where a plugin
+// is doing blocking work worth looking at.
 const slowChain = 250 * time.Millisecond
 
-// latencyTag grades the slowest chain run in the ring.
 func latencyTag(d time.Duration) string {
 	if d >= slowChain {
 		return tagWarn
@@ -97,7 +87,6 @@ func latencyTag(d time.Duration) string {
 	return tagPlain
 }
 
-// chainLatency returns the median and maximum chain duration in the ring.
 func chainLatency(traffic []events.Request) (median, top time.Duration, ok bool) {
 	durations := make([]time.Duration, 0, len(traffic))
 

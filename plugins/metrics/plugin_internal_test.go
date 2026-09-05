@@ -21,13 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ResetRegistry stops every listener started so far and empties the
-// package-level registry, immediately and again when the test finishes.
-//
-// It is exported from a _test.go file rather than from plugin.go on purpose:
-// the black-box test package needs it to keep tests independent of each other,
-// while shipped code has no way to stop a metrics listener at all. See the
-// comment on the serve goroutine in newCollector for why.
+// ResetRegistry stops every listener and clears the registry; it lives here because shipped code can't do this.
 func ResetRegistry(t *testing.T) {
 	t.Helper()
 	resetRegistry()
@@ -39,8 +33,7 @@ func resetRegistry() {
 	defer registry.mu.Unlock()
 	for addr, c := range registry.listeners {
 		_ = c.srv.Close()
-		// Serve has to have returned before the port is free for the next
-		// test; waiting on done is how we avoid a sleep here.
+		// Waiting for Serve to return frees the port before the next test starts.
 		<-c.done
 		delete(registry.listeners, addr)
 	}
@@ -119,7 +112,6 @@ func TestObtain(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "127.0.0.1:0")
 		assert.Contains(t, err.Error(), "127.0.0.2:9754")
-		// The conflicting address is rejected before anything is bound.
 		assert.Len(t, registry.listeners, 1)
 		assert.NotEqual(t, running, "127.0.0.2:9754")
 	})
@@ -156,7 +148,6 @@ func TestCollectorExpose(t *testing.T) {
 }
 
 func TestCollectorExposeWithoutSamples(t *testing.T) {
-	// HELP and TYPE are emitted before the first packet arrives.
 	assert.Equal(t, strings.Join([]string{
 		"# HELP coredhcp_build_info Version information about the running coredhcp binary.",
 		"# TYPE coredhcp_build_info gauge",
@@ -180,8 +171,7 @@ func TestCollectorCountIsRaceFree(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range perRoutine {
-				// Half the goroutines race to create the same new series,
-				// the other half hammer an existing one.
+				// i%2 splits goroutines: half create a new series, half hammer an existing one.
 				c.count(family4, fmt.Sprintf("type-%d", i%2))
 			}
 		}()
@@ -220,7 +210,6 @@ func TestMsgType6(t *testing.T) {
 		{name: "unrecognised type keeps the number", req: unknown, want: "unknown_(200)"},
 		{
 			name: "undecapsulatable relay counts as unknown",
-			// A relay message with no embedded RelayMessage option.
 			req:  &dhcpv6.RelayMessage{MessageType: dhcpv6.MessageTypeRelayForward},
 			want: typeUnknown,
 		},
@@ -263,8 +252,7 @@ func TestHandlersDoNotTouchTheResponse(t *testing.T) {
 	})
 }
 
-// failingResponseWriter fails every write, standing in for a scraper that hung
-// up halfway through the body.
+// failingResponseWriter fails every write, simulating a scraper that disconnects mid-response.
 type failingResponseWriter struct {
 	header http.Header
 }
@@ -286,8 +274,7 @@ func TestServeMetricsWriteFailure(t *testing.T) {
 	c := newTestCollector()
 	w := &failingResponseWriter{}
 
-	// A failed write must not panic or alter the counters; it is logged and
-	// dropped.
+	// A write failure must not panic or touch counters; it's logged and dropped.
 	c.serveMetrics(w, httpGet(t, "/metrics"))
 	assert.Equal(t, contentType, w.Header().Get("Content-Type"))
 }
@@ -297,14 +284,11 @@ func TestServeLoopLogsAListenerFailure(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.srv.Close() })
 
-	// Closing the listener out from under Serve makes it return something
-	// other than ErrServerClosed, which is the branch that logs.
+	// Closing the listener under Serve triggers something other than ErrServerClosed, the branch that logs.
 	require.NoError(t, c.ln.Close())
 	<-c.done
 }
 
-// newTestCollector builds a collector with no listener attached, for the tests
-// that only exercise counting and rendering.
 func newTestCollector() *collector {
 	return &collector{
 		done:     make(chan struct{}),
@@ -319,17 +303,13 @@ func httpGet(t *testing.T, target string) *http.Request {
 	return req
 }
 
-// wantGoVersion reproduces the sanitising expose applies to runtime.Version()
-// without going through sanitizeLabelValue, so the assertion is independent of
-// the code under test.
+// wantGoVersion reproduces expose's sanitising by hand so the assertion doesn't depend on sanitizeLabelValue.
 func wantGoVersion() string {
 	return strings.ReplaceAll(strings.ToLower(runtime.Version()), " ", "_")
 }
 
 func TestSeriesIsIdempotent(t *testing.T) {
-	// Covers the double check inside series: a goroutine that loses the race
-	// between dropping the read lock and taking the write one must get the
-	// counter the winner created, not a second one.
+	// The loser of the read-to-write lock race in series must get the winner's counter, not create one.
 	c := newTestCollector()
 	k := requestKey{family: family4, msgType: "discover"}
 

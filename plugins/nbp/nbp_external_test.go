@@ -65,8 +65,7 @@ func TestHandler6URLRequestedNoParams(t *testing.T) {
 	urlOpt := resp.(*dhcpv6.Message).Options.GetOne(dhcpv6.OptionBootfileURL)
 	require.NotNil(t, urlOpt)
 	assert.Equal(t, "http://[2001:db8::1]/nbp", string(urlOpt.ToBytes()))
-	// No params were configured, so opt60 must not be added even though it
-	// was requested.
+	// No params were configured, so opt60 must not be added even though requested.
 	assert.Nil(t, resp.(*dhcpv6.Message).Options.GetOne(dhcpv6.OptionBootfileParam))
 }
 
@@ -93,9 +92,7 @@ func TestHandler6DecapsulateError(t *testing.T) {
 	handler, err := nbp.Plugin.Setup6("http://[2001:db8::1]/nbp")
 	require.NoError(t, err)
 
-	// A relay-forward message with no embedded relay-message option is
-	// malformed: GetInnerMessage() cannot decapsulate it, and the plugin
-	// must drop the request rather than panicking or replying.
+	// Malformed: no relay-message option to decapsulate; the plugin must drop it, not panic or reply.
 	req := &dhcpv6.RelayMessage{MessageType: dhcpv6.MessageTypeRelayForward}
 	stub, err := dhcpv6.NewMessage()
 	require.NoError(t, err)
@@ -151,9 +148,7 @@ func TestHandler4HTTPSchemeTFTPRequestedNotAdded(t *testing.T) {
 	resp, stop := handler(req, stub)
 	require.NotNil(t, resp)
 	assert.True(t, stop)
-	// The http scheme never populates opt66 (TFTP server name), so
-	// requesting it must not add anything even though the plugin is
-	// otherwise configured.
+	// The http scheme never populates opt66, so requesting it adds nothing even though configured.
 	assert.Empty(t, resp.TFTPServerName())
 }
 

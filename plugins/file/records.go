@@ -2,9 +2,6 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// Lease-file parsing: the plain-text record format shared by the DHCPv4 and
-// DHCPv6 variants, and the exported loaders that read it from disk.
-
 package file
 
 import (
@@ -18,23 +15,18 @@ import (
 	"unicode"
 )
 
-// LoadDHCPv4Records loads the DHCPv4Records global map with records stored on
-// the specified file. The records have to be one per line, a mac address and an
-// IPv4 address.
+// LoadDHCPv4Records reads MAC-keyed IPv4 reservations, one per line, from filename.
 func LoadDHCPv4Records(filename string) (map[string]netip.Addr, error) {
 	return loadRecords(filename, false, keyMAC)
 }
 
-// LoadDHCPv6Records loads the DHCPv6Records global map with records stored on
-// the specified file. The records have to be one per line, a mac address and an
-// IPv6 address.
+// LoadDHCPv6Records reads MAC-keyed IPv6 reservations, one per line, from filename.
 func LoadDHCPv6Records(filename string) (map[string]netip.Addr, error) {
 	return loadRecords(filename, true, keyMAC)
 }
 
-// loadRecords reads filename for the given family and key mode. The map it
-// returns is keyed the way mode canonicalises the first field of a line,
-// which is what the handlers look up.
+// The map is keyed the way mode canonicalises the first field of a line, which
+// is what the handlers look up.
 func loadRecords(filename string, v6 bool, mode keyMode) (map[string]netip.Addr, error) {
 	log.Infof("reading IPv%d leases from %s", protoVersion(v6), filename)
 	f, err := os.Open(filename)
@@ -50,7 +42,6 @@ func loadRecords(filename string, v6 bool, mode keyMode) (map[string]netip.Addr,
 	return records, nil
 }
 
-// protoVersion is the IP version of a family, for the messages that name it.
 func protoVersion(v6 bool) int {
 	if v6 {
 		return 6
@@ -58,8 +49,6 @@ func protoVersion(v6 bool) int {
 	return 4
 }
 
-// addressCheck returns the test an address has to pass to belong to the
-// family being loaded.
 func addressCheck(v6 bool) func(netip.Addr) bool {
 	if v6 {
 		return netip.Addr.Is6
@@ -67,13 +56,9 @@ func addressCheck(v6 bool) func(netip.Addr) bool {
 	return netip.Addr.Is4
 }
 
-// parseDHCPRecords parses the identifier<->IP mappings out of r. The records
-// have to be one per line, an identifier of the kind mode names followed by
-// an IP address of the family v6 names.
 func parseDHCPRecords(r io.Reader, v6 bool, mode keyMode) (map[string]netip.Addr, error) {
-	// Resolved once and carried into the loop: both are the same for every
-	// line, and looking them up per line costs about a tenth of the parse
-	// time on a 10k-record file (BenchmarkLoadDHCPv4Records).
+	// Resolved once: both are the same for every line, and looking them up per
+	// line costs about a tenth of the parse time on a 10k-record file.
 	protVer, check := protoVersion(v6), addressCheck(v6)
 	addresses := make(map[string]int)
 	records := make(map[string]netip.Addr)
@@ -100,10 +85,8 @@ func parseDHCPRecords(r io.Reader, v6 bool, mode keyMode) (map[string]netip.Addr
 		}
 
 		records[key] = ipaddr
-		// The identifier is counted in canonical form, so two lines naming
-		// the same client in different spellings still warn. The address is
-		// counted as written, which costs nothing on a file that is already
-		// lowercase.
+		// Counted in canonical form, so two lines naming the same client in
+		// different spellings still warn.
 		addresses[key]++
 		addresses[strings.ToLower(tokens[1])]++
 	}
@@ -117,8 +100,6 @@ func parseDHCPRecords(r io.Reader, v6 bool, mode keyMode) (map[string]netip.Addr
 	return records, nil
 }
 
-// parseRecord turns the two fields of one lease line into the canonical
-// lookup key of the first and the address of the second.
 func parseRecord(tokens []string, protVer int, check func(netip.Addr) bool, mode keyMode) (string, netip.Addr, error) {
 	key, err := mode.parseKeyField(tokens[0])
 	if err != nil {

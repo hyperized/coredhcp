@@ -15,10 +15,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestFreeToIndexError exercises the wrapped error path in both toIndex and
-// Free: a page length outside the valid prefix range (0-128) makes the
-// underlying allocators.Offset call fail. The exported constructor never
-// produces such an Allocator, so it's built by hand here.
+// A page outside 0-128 makes the underlying Offset call fail; the exported
+// constructor never produces one, so this Allocator is built by hand.
 func TestFreeToIndexError(t *testing.T) {
 	pool := net.IPNet{IP: net.ParseIP("2001:db8::").To16(), Mask: net.CIDRMask(48, 128)}
 	alloc := &Allocator{
@@ -36,11 +34,8 @@ func TestFreeToIndexError(t *testing.T) {
 	assert.Contains(t, err.Error(), "could not find prefix in pool")
 }
 
-// TestAllocateToPrefixBug exercises the defensive "BUG" branch in Allocate:
-// an index that the bitmap considers free but that toPrefix can't turn back
-// into a valid prefix. page=0 makes allocators.AddPrefixes fail for any
-// non-zero index (unit==0 && n!=0 => ErrOverflow), so pre-occupying bit 0
-// forces the next allocation to hit index 1.
+// Exercises the defensive BUG branch: page=0 makes AddPrefixes fail for any
+// non-zero index, so occupying bit 0 forces the next allocation to hit index 1.
 func TestAllocateToPrefixBug(t *testing.T) {
 	pool := net.IPNet{IP: net.ParseIP("2001:db8::").To16(), Mask: net.CIDRMask(48, 128)}
 	alloc := &Allocator{
@@ -73,11 +68,9 @@ func prefixSizeForAllocs(allocs int) int {
 }
 
 func BenchmarkParallelAllocPartiallyFilled(b *testing.B) {
-	// We'll make a bitmap with 2x the number of allocs we want to make.
-	// Then randomly fill it to about 50% utilization
+	// +1 doubles the pool so the random fill below lands around 50% utilization.
 	alloc := getAllocator(b, prefixSizeForAllocs(b.N)+1)
 
-	// Build a replacement bitmap that we'll put in the allocator, with approx. 50% of values filled
 	newbmap := make([]uint64, alloc.bitmap.Len())
 	for i := uint(0); i < alloc.bitmap.Len(); i++ {
 		newbmap[i] = rand.Uint64()

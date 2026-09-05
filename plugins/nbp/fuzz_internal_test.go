@@ -9,11 +9,8 @@ import (
 	"testing"
 )
 
-// FuzzParseArgs feeds arbitrary strings to parseArgs (wrapped as the single
-// argument it requires - the argument-count validation itself is already
-// covered by TestParseArgs). The invariant: never panic, and on success the
-// result is a *url.URL that url.Parse itself considers well-formed enough to
-// round-trip through String() and be re-parsed without error.
+// Checks that parseArgs never panics, and that any URL it returns round-trips
+// through String() and re-parsing without error.
 func FuzzParseArgs(f *testing.F) {
 	seeds := []string{
 		"http://a/b",
@@ -28,13 +25,8 @@ func FuzzParseArgs(f *testing.F) {
 		"http://[::1%25eth0]/nbp",
 		"\x00\x01http://a",
 		"a b c",
-		// Found by fuzzing: url.Parse accepts an IPv6 host with a
-		// percent-escaped zone ID ("%25" = escaped '%') even when the zone
-		// ID itself is raw, invalid UTF-8 (here \xf1) - but u.String()
-		// re-escapes that same zone ID into a form url.Parse then rejects
-		// ("invalid URL escape"). That is a round-trip gap in net/url's own
-		// IPv6-zone handling, not in parseArgs, which does nothing but call
-		// url.Parse/u.String() - see the skip below.
+		// Found by fuzzing: net/url itself has a String()/Parse round-trip gap for
+		// an IPv6 zone ID with invalid-UTF-8 bytes; not a parseArgs bug (see skip below).
 		"//[::%25\xf1]",
 	}
 	for _, s := range seeds {
@@ -51,10 +43,7 @@ func FuzzParseArgs(f *testing.F) {
 		}
 
 		if strings.ContainsRune(u.Host, '%') {
-			// url.Parse stores an IPv6 zone ID's escaped '%25' back as a
-			// literal '%' in u.Host, so this is the decoded form of the
-			// same zone-ID case: net/url's own String()/Parse round trip
-			// is not guaranteed here (see the seed comment above).
+			// Decoded zone-ID case from the seed above; round trip isn't guaranteed here either.
 			return
 		}
 

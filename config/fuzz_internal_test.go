@@ -10,18 +10,8 @@ import (
 	"testing"
 )
 
-// FuzzSplitHostPort feeds arbitrary strings to splitHostPort. Beyond "never
-// panics", the invariant checked here is a round trip: re-joining the
-// returned (ip, zone, port) with net.JoinHostPort and splitting the result
-// again must reproduce the exact same triple with no error.
-//
-// This holds because splitHostPort's own splitting logic is exactly "split
-// host:port with net.SplitHostPort (falling back to a synthetic :0 port),
-// then cut the zone off the host at the last '%'" - net.JoinHostPort is the
-// inverse of net.SplitHostPort (it brackets a host containing ':' and always
-// emits a "host:port" or "[host]:port" shape), so reassembling ip+"%"+zone
-// (when zone is set) and joining it with port must parse back to the same
-// pieces. Verified against every case in TestSplitHostPort before fuzzing.
+// The invariant: the output round-trips through net.JoinHostPort and back
+// unchanged.
 func FuzzSplitHostPort(f *testing.F) {
 	seeds := []string{
 		"0.0.0.0:67",
@@ -45,11 +35,8 @@ func FuzzSplitHostPort(f *testing.F) {
 		"",
 		"a%b%c:80",
 		"[a:b:c%foo]:5",
-		// Found by fuzzing: splitHostPort("%%") = ("%", "", "") - the
-		// returned ip still holds a literal '%'. That is indistinguishable,
-		// from the returned triple alone, from an ip that never had a zone
-		// marker at all (also zone==""), so round-tripping it is inherently
-		// lossy. See the skip below.
+		// splitHostPort("%%") = ("%", "", ""): the ip still holding "%" makes zone==""
+		// ambiguous with "no zone marker present", so round-tripping it is lossy - see the skip below.
 		"%%",
 	}
 	for _, s := range seeds {
@@ -62,12 +49,8 @@ func FuzzSplitHostPort(f *testing.F) {
 			return
 		}
 
-		// A returned ip that still contains a literal '%' (only reachable
-		// through non-address garbage such as "%%", never through a real
-		// listen address) makes zone=="" ambiguous: it could mean "no zone
-		// marker was present" or "the zone marker's content was empty".
-		// splitHostPort's return values can't tell those apart, so the
-		// round trip below does not apply; only "no panic" is checked here.
+		// An ip that still contains '%' (only from non-address garbage like "%%")
+		// makes zone=="" ambiguous, so the round trip below doesn't apply here.
 		if strings.ContainsRune(ip, '%') {
 			return
 		}

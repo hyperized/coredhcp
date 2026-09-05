@@ -25,23 +25,19 @@ import (
 	"github.com/coredhcp/coredhcp/plugins/leasehook"
 )
 
-// The worker a successful setup starts has no public stop, the same way it
-// has none in the server: plugins are set up once and live for the lifetime
-// of the process. Every test here that sets the plugin up successfully
-// therefore leaves one goroutine parked on its queue until the test binary
-// exits, which is why there are two of them rather than one per case.
+// A successful setup's worker has no public stop, same as in the server, so
+// each test that sets the plugin up successfully leaves a goroutine parked
+// on its queue until the binary exits — kept to two tests for that reason.
 
 const testSecret = "s3cr3t"
 
 var testMAC = net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}
 
-// posted is one request the endpoint under test received.
 type posted struct {
 	body   []byte
 	header http.Header
 }
 
-// newEndpoint starts a webhook endpoint that reports what it was sent.
 func newEndpoint(t *testing.T) (*httptest.Server, <-chan posted) {
 	t.Helper()
 	got := make(chan posted, 4)
@@ -58,7 +54,6 @@ func newEndpoint(t *testing.T) (*httptest.Server, <-chan posted) {
 	return srv, got
 }
 
-// await returns the next request the endpoint received, or fails the test.
 func await(t *testing.T, got <-chan posted) posted {
 	t.Helper()
 	select {
@@ -70,7 +65,6 @@ func await(t *testing.T, got <-chan posted) posted {
 	}
 }
 
-// signatureOf is the header value a receiver would compute for itself.
 func signatureOf(secret string, body []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(body)
@@ -81,9 +75,8 @@ func TestPluginIsRegisteredForBothFamilies(t *testing.T) {
 	assert.Equal(t, "leasehook", leasehook.Plugin.Name)
 	assert.NotNil(t, leasehook.Plugin.Setup4)
 	assert.NotNil(t, leasehook.Plugin.Setup6)
-	// The plugin reads nothing but the packets, so it takes the plain setup
-	// functions and the server can skip building a request context for a
-	// chain that only holds plugins like this one.
+	// Plain setup functions: the plugin reads nothing but the packets, so a
+	// chain holding only plugins like this one needs no request context.
 	assert.Nil(t, leasehook.Plugin.Setup4Ctx)
 	assert.Nil(t, leasehook.Plugin.Setup6Ctx)
 }
@@ -157,8 +150,7 @@ func TestSetup4ReportsAnAck(t *testing.T) {
 	require.NoError(t, err)
 	assert.WithinDuration(t, time.Now(), stamped, time.Minute)
 
-	// An offer is outside the configured allow-list, so nothing is posted for
-	// it and the endpoint stays quiet.
+	// Outside the "events:ack" allow-list configured above, so nothing is posted.
 	offer, err := dhcpv4.NewReplyFromRequest(req,
 		dhcpv4.WithMessageType(dhcpv4.MessageTypeOffer),
 		dhcpv4.WithYourIP(net.IPv4(10, 0, 0, 5)),

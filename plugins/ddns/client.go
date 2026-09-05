@@ -14,19 +14,16 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-// Failures of the exchange itself.
 var (
 	// ErrNoAnswer is a server that did not answer within the timeout, twice.
 	ErrNoAnswer = errors.New("ddns: no answer from the DNS server")
 
-	// ErrResponseID is an answer whose message ID is not the one that was
-	// asked with. Off-path, that is a forgery; on-path, it is a stray
-	// datagram from an earlier exchange.
+	// ErrResponseID is an answer whose message ID does not match the request:
+	// off-path, a forgery; on-path, a stray datagram from an earlier exchange.
 	ErrResponseID = errors.New("ddns: response does not answer this request")
 
-	// ErrTruncated is an answer with the TC bit set. This plugin speaks UDP
-	// only, so there is nothing to retry over TCP with; see the package
-	// documentation for why that is enough here.
+	// ErrTruncated is an answer with the TC bit set. UDP only; see the
+	// package doc for why TCP retry is not needed.
 	ErrTruncated = errors.New("ddns: response is truncated")
 
 	// ErrRCode is an answer the server refused, carrying its reason.
@@ -34,24 +31,16 @@ var (
 )
 
 const (
-	// attempts is how many times one update is sent before it is given up
-	// on. UDP loses datagrams; a second try costs one packet and covers the
-	// common case, and anything beyond that is better handled by the client
-	// renewing its lease.
+	// One retry covers the common lost-datagram case; further loss is
+	// better handled by the client renewing its lease.
 	attempts = 2
 
-	// maxResponse bounds a response read. An UPDATE answer is a header, an
-	// echo of the zone section and a TSIG record; 4096 leaves room for a
-	// server that echoes the whole request back.
+	// Room for a server that echoes the whole request back in its answer.
 	maxResponse = 4096
 )
 
-// exchange sends one signed message to the configured server and returns the
-// answer.
 func (p *pluginState) exchange(msg []byte) ([]byte, error) {
-	//nolint:gosec // G704: the address is operator configuration, not user
-	// input. applyServer has already held it to a literal IP address and a
-	// port in range, and nothing out of a DHCP packet reaches it.
+	//nolint:gosec // G704: address is operator config, already validated as a literal IP:port.
 	conn, err := net.DialTimeout("udp", p.server, p.timeout)
 	if err != nil {
 		return nil, fmt.Errorf("dialling %s: %w", p.server, err)
@@ -60,9 +49,8 @@ func (p *pluginState) exchange(msg []byte) ([]byte, error) {
 	return p.roundTrip(conn, msg)
 }
 
-// roundTrip writes msg and reads one answer, retrying once when the read
-// times out. A read that fails for any other reason is not retried: a refused
-// port or a closed socket will not answer the second datagram either.
+// Retries only on read timeout: a refused port or closed socket will not
+// answer a second datagram either.
 func (p *pluginState) roundTrip(conn net.Conn, msg []byte) ([]byte, error) {
 	buf := make([]byte, maxResponse)
 	for attempt := 1; attempt <= attempts; attempt++ {
@@ -84,14 +72,8 @@ func (p *pluginState) roundTrip(conn net.Conn, msg []byte) ([]byte, error) {
 	return nil, fmt.Errorf("%w %s after %d attempts", ErrNoAnswer, p.server, attempts)
 }
 
-// checkResponse decides whether an answer says what it appears to say.
-//
-// The RCODE is read last on purpose. It is not covered by the MAC until the
-// MAC has been checked, and a spoofed REFUSED that is believed turns into a
-// DNS record that silently never appears. The message ID is checked first
-// because it is the cheap filter that keeps stray datagrams out, and the
-// truncation flag right after it because a truncated answer may not carry a
-// TSIG record to verify at all.
+// RCODE is checked only after the MAC verifies: a spoofed REFUSED accepted
+// before that would silently drop a record that was never actually rejected.
 func (p *pluginState) checkResponse(resp, requestMAC []byte, requestID uint16) error {
 	var parser dnsmessage.Parser
 	hdr, err := parser.Start(resp)
@@ -106,12 +88,8 @@ func (p *pluginState) checkResponse(resp, requestMAC []byte, requestID uint16) e
 	}
 	rec, err := findTSIG(resp)
 	if err != nil {
-		// A name server that is asked about a zone it does not hold has no
-		// key to sign with and answers NOTAUTH unsigned, which both Knot and
-		// BIND do. The code it claims is worth putting in the log, so the
-		// operator sees "you pointed me at the wrong server" rather than
-		// only "unsigned", but it is named as a claim: nothing in an
-		// unsigned answer has been proved.
+		// Knot and BIND both answer NOTAUTH unsigned for a zone they don't hold;
+		// the claimed code is logged but not trusted, since it is unsigned.
 		return fmt.Errorf("%w (it claims %s, which is not proof of anything)", err, rcodeName(hdr.RCode))
 	}
 	if err := p.key.verify(resp, rec, requestMAC); err != nil {
@@ -123,10 +101,8 @@ func (p *pluginState) checkResponse(resp, requestMAC []byte, requestID uint16) e
 	return nil
 }
 
-// rcodes names the response codes an UPDATE can come back with. dnsmessage
-// only names the six that predate RFC 2136, and the ones it does not name are
-// exactly the ones worth reading in a log: NOTZONE for a name outside the
-// zone, NOTAUTH for a key the server does not accept for it.
+// dnsmessage only names the six RCODEs that predate RFC 2136; NOTAUTH and
+// NOTZONE below fill in the ones an UPDATE actually needs for its log lines.
 var rcodes = map[dnsmessage.RCode]string{
 	0:  "NOERROR",
 	1:  "FORMERR",
@@ -141,7 +117,6 @@ var rcodes = map[dnsmessage.RCode]string{
 	10: "NOTZONE",
 }
 
-// rcodeName names a response code for the log.
 func rcodeName(code dnsmessage.RCode) string {
 	if name, ok := rcodes[code]; ok {
 		return name

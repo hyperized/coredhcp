@@ -16,9 +16,8 @@ import (
 	"github.com/rivo/tview"
 )
 
-// Colour tags handed to tview's markup. They are the whole palette: the panes
-// grade with them and nothing else, so a terminal that renders "gray" oddly
-// only costs us the dim text.
+// The whole palette: a terminal that renders "gray" oddly costs us the dim text
+// and nothing more.
 const (
 	tagGood  = "green"
 	tagWarn  = "yellow"
@@ -28,52 +27,39 @@ const (
 	tagPlain = ""
 )
 
-// resetTag closes every attribute a tag could have opened. tview's "[-]"
-// resets the foreground only, which would leak bold into the rest of the row.
+// tview's "[-]" resets the foreground only, which would leak bold into the rest
+// of the row.
 const resetTag = "[-:-:-]"
 
-// maxDisplayRune is the highest rune we print as itself. Everything above it
-// is replaced with a dot: the panes lay out in fixed columns and we count a
-// rune as one cell, which stops being true around the East Asian blocks. A
-// width table would fix that at the price of another dependency, and no DHCP
-// hostname needs one.
+// Above this a rune stops being one cell wide, which the fixed columns assume.
+// A width table would fix that at the price of a dependency no hostname needs.
 const maxDisplayRune = 0x10ff
 
-// ellipsis marks a value the column was too narrow for.
 const ellipsis = '…'
 
-// uiGlyphs are the characters the panes draw themselves that sit above
-// maxDisplayRune. They are all one cell wide, so letting them through does not
-// break a column: the point of the ceiling is width, not provenance.
+// All one cell wide, so they pass the ceiling: it is about width, not provenance.
 var uiGlyphs = map[rune]bool{
 	'…': true, '→': true, '↑': true, '↓': true, '✓': true, '✗': true,
 	'▁': true, '▂': true, '▃': true, '▄': true, '▅': true, '▆': true, '▇': true, '█': true,
 }
 
-// lineBuf builds one pane row within a column budget. Every string written
-// through it is sanitised and escaped, so a hostname or a plugin argument
-// cannot smuggle tview markup or control characters onto the screen, and no
-// row can push past the width it was given.
+// Everything written through it is sanitised and escaped, so a hostname or a
+// plugin argument cannot smuggle tview markup or control characters onscreen.
 type lineBuf struct {
 	sb   strings.Builder
 	left int
 }
 
-// newLine starts a row that may use at most width columns.
 func newLine(width int) *lineBuf {
 	return &lineBuf{left: max(width, 0)}
 }
 
-// left reports how many columns are still free.
 func (l *lineBuf) room() int { return l.left }
 
-// text writes s in the given tag, truncated to whatever room is left. Pass
-// tagPlain for the terminal's default colour.
 func (l *lineBuf) text(tag, s string) {
 	l.emit(tag, s, l.left)
 }
 
-// tail writes an identifier, keeping its end when it does not fit.
 func (l *lineBuf) tail(tag, s string) {
 	if l.left <= 0 {
 		return
@@ -83,9 +69,6 @@ func (l *lineBuf) tail(tag, s string) {
 	l.emit(tag, clipped, n)
 }
 
-// col writes s in a column exactly width wide, padded with spaces. A value
-// that does not fit ends in an ellipsis. When fewer than width columns are
-// left the column is cut short and no padding follows it.
 func (l *lineBuf) col(tag, s string, width int) {
 	if width <= 0 || l.left <= 0 {
 		return
@@ -96,8 +79,6 @@ func (l *lineBuf) col(tag, s string, width int) {
 	l.space(room - used)
 }
 
-// colRight is col with the value pushed against the column's right edge, for
-// numbers.
 func (l *lineBuf) colRight(tag, s string, width int) {
 	if width <= 0 || l.left <= 0 {
 		return
@@ -109,7 +90,6 @@ func (l *lineBuf) colRight(tag, s string, width int) {
 	l.emit(tag, clipped, n)
 }
 
-// space writes n spaces, or as many as still fit.
 func (l *lineBuf) space(n int) {
 	n = min(n, l.left)
 	if n <= 0 {
@@ -120,8 +100,7 @@ func (l *lineBuf) space(n int) {
 	l.left -= n
 }
 
-// emit is the single write path: clip to limit, escape, wrap in the tag.
-// Returns the columns consumed.
+// The single write path, which is what makes lineBuf's escaping total.
 func (l *lineBuf) emit(tag, s string, limit int) int {
 	limit = min(limit, l.left)
 	if limit <= 0 || s == "" {
@@ -147,15 +126,11 @@ func (l *lineBuf) emit(tag, s string, limit int) int {
 	return n
 }
 
-// String returns the finished row. Trailing padding is kept: it costs
-// nothing and stops a shorter row from showing the one underneath it.
+// Trailing padding is kept so a short row cannot show the one underneath it.
 func (l *lineBuf) String() string { return l.sb.String() }
 
-// clip returns s with every rune we refuse to print replaced, cut to at most
-// limit columns, plus the number of columns the result takes. A negative
-// limit means "no limit", which is only useful for sanitising. Truncation
-// stops reading the input as soon as the budget is full, so a megabyte of
-// hostname costs us the budget and not the megabyte.
+// A negative limit means no limit, for sanitising alone. Reading stops once the
+// budget is full, so a megabyte of hostname costs the budget, not the megabyte.
 func clip(s string, limit int) (string, int) {
 	if limit == 0 {
 		return "", 0
@@ -185,10 +160,8 @@ func clip(s string, limit int) (string, int) {
 	return string(runes), len(runes)
 }
 
-// clipTail is clip for a value whose end is the part that tells it apart: the
-// last octets of a MAC, or the link-layer address at the end of a DUID. It
-// drops the front and puts the mark there, and it reads at most limit runes,
-// so a long identifier costs the column and not the string.
+// The end is the telling part of a MAC or a DUID, so the front is what goes.
+// At most limit runes are read, so a long identifier costs the column, not the string.
 func clipTail(s string, limit int) (string, int) {
 	if limit <= 0 {
 		return "", 0
@@ -217,7 +190,6 @@ func clipTail(s string, limit int) (string, int) {
 	return string(runes), len(runes)
 }
 
-// printable maps one rune to something safe to put in a cell.
 func printable(r rune) rune {
 	switch {
 	case r == '\t' || r == '\n' || r == '\r':
@@ -231,7 +203,6 @@ func printable(r rune) rune {
 	return r
 }
 
-// humanCount formats a counter with thousands separators.
 func humanCount(n uint64) string {
 	s := strconv.FormatUint(n, 10)
 	if len(s) <= 3 {
@@ -256,8 +227,7 @@ func humanCount(n uint64) string {
 	return b.String()
 }
 
-// Durations are shown at three significant figures at most: the operator
-// wants to see 0.4ms against 2.1s, not six decimals of either.
+// Three significant figures at most: 0.4ms against 2.1s, not six decimals of either.
 func humanDuration(d time.Duration) string {
 	switch {
 	case d <= 0:
@@ -277,7 +247,6 @@ func humanDuration(d time.Duration) string {
 	}
 }
 
-// pad2 zero-pads a number below 100 to two digits.
 func pad2(n int) string {
 	if n < 10 {
 		return "0" + strconv.Itoa(n)
@@ -286,8 +255,7 @@ func pad2(n int) string {
 	return strconv.Itoa(n)
 }
 
-// humanUptime formats a running time as hh:mm:ss, with the hours allowed to
-// run past 24 rather than rolling over into days.
+// Hours run past 24 rather than rolling over into days.
 func humanUptime(d time.Duration) string {
 	if d < 0 {
 		d = 0
@@ -298,7 +266,6 @@ func humanUptime(d time.Duration) string {
 	return pad2(sec/3600) + ":" + pad2(sec/60%60) + ":" + pad2(sec%60)
 }
 
-// humanSince renders how long ago t was, for a "last seen" column.
 func humanSince(now, t time.Time) string {
 	if t.IsZero() {
 		return "-"
@@ -312,8 +279,7 @@ func humanSince(now, t time.Time) string {
 	return humanDuration(d) + " ago"
 }
 
-// humanRemaining counts a lease down. Leases whose time we never learned show
-// a dash; ones that ran out say so rather than counting up.
+// A lease that ran out says so rather than counting up.
 func humanRemaining(now, expiry time.Time) string {
 	if expiry.IsZero() {
 		return "-"
@@ -326,8 +292,6 @@ func humanRemaining(now, expiry time.Time) string {
 	return humanDuration(expiry.Sub(now))
 }
 
-// addrText renders one address the way an operator writes it: a host route
-// as the bare address, a delegated prefix with its length.
 func addrText(p netip.Prefix) string {
 	if !p.IsValid() {
 		return ""
@@ -340,12 +304,10 @@ func addrText(p netip.Prefix) string {
 	return p.String()
 }
 
-// maxShownAddrs bounds the address column. A DHCPv6 reply can carry an IA_NA
-// and several prefixes; past a handful the column is noise and the count is
-// the useful part.
+// A DHCPv6 reply can carry an IA_NA and several prefixes; past a handful the
+// count is more use than the addresses.
 const maxShownAddrs = 3
 
-// joinAddrs renders a reply's addresses as one comma separated field.
 func joinAddrs(ps []netip.Prefix) string {
 	if len(ps) == 0 {
 		return ""
@@ -367,11 +329,9 @@ func joinAddrs(ps []netip.Prefix) string {
 	return strings.Join(parts, ",")
 }
 
-// sparkRunes is the eight step block ramp, lowest first.
 var sparkRunes = [...]rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
 
-// sparkline draws the newest width values as blocks scaled against peak. A
-// non-zero value never renders as the empty step, so a single request in a
+// A non-zero value never renders as the empty step, so a single request in a
 // quiet minute is still visible.
 func sparkline(values []uint32, peak uint32, width int) string {
 	if width <= 0 || len(values) == 0 {
@@ -391,7 +351,6 @@ func sparkline(values []uint32, peak uint32, width int) string {
 	return b.String()
 }
 
-// sparkRune picks the block for one value.
 func sparkRune(v, peak uint32) rune {
 	steps := uint64(len(sparkRunes) - 1)
 	if v == 0 || peak == 0 {
@@ -403,9 +362,7 @@ func sparkRune(v, peak uint32) rune {
 	return sparkRunes[min(idx, steps)]
 }
 
-// visible picks the rows a pane shows out of every row it could show, and
-// reports the index the window starts at so the scroll keys have something to
-// move relative to. A following pane is pinned to the newest row.
+// The start index goes back to the model so the scroll keys can move relative to it.
 func visible(lines []string, height, offset int, follow bool) ([]string, int) {
 	if height <= 0 || len(lines) == 0 {
 		return nil, 0
@@ -423,9 +380,8 @@ func visible(lines []string, height, offset int, follow bool) ([]string, int) {
 	return lines[start:min(start+height, len(lines))], start
 }
 
-// cell writes a fixed width column built from more than one piece. The
-// callback gets its own budget; whatever it leaves is padded out, so a column
-// made of a client id plus a dim hostname still lines up with its neighbours.
+// Whatever budget the callback leaves is padded out, so a column built from a
+// client id and a dim hostname still lines up with its neighbours.
 func (l *lineBuf) cell(width int, write func(b *lineBuf)) {
 	if width <= 0 || l.left <= 0 {
 		return

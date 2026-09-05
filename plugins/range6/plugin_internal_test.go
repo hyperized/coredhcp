@@ -31,9 +31,8 @@ const (
 	poolFirst = "2001:db8:1::100"
 	poolLast  = "2001:db8:1::1ff"
 
-	// testLeaseTime is the lease term every expiry test runs on. The fake
-	// clock makes the value itself arbitrary, so one shared term keeps the
-	// "advance past expiry" arithmetic in the tests readable.
+	// Value is arbitrary since tests use the fake clock; one shared term
+	// keeps expiry arithmetic readable.
 	testLeaseTime = time.Hour
 )
 
@@ -43,8 +42,6 @@ var (
 	iaidX = [4]byte{0x00, 0x00, 0x00, 0x01}
 )
 
-// mockAllocator is an allocator whose Allocate call always succeeds with
-// whatever net.IPNet the test set up, and whose Free never fails.
 type mockAllocator struct {
 	mock.Mock
 }
@@ -58,9 +55,7 @@ func (m *mockAllocator) Free(ip net.IPNet) error {
 	return nil
 }
 
-// mockFailingAllocator is an allocator whose calls return whatever error the
-// test configured, used to drive the failure branches a real bitmap
-// allocator can't be made to hit deterministically.
+// Drives failure branches a real bitmap allocator can't be made to hit deterministically.
 type mockFailingAllocator struct {
 	mock.Mock
 }
@@ -75,18 +70,15 @@ func (m *mockFailingAllocator) Free(ip net.IPNet) error {
 	return args.Error(0)
 }
 
-// fakeClock is a manually advanced clock, so lease lifetimes can be
-// exercised without sleeping. Safe for concurrent use because the
-// background sweeper reads it from its own goroutine while a test advances
-// it.
+// So lease lifetimes can be exercised without sleeping. Safe for concurrent
+// use: the background sweeper reads it from its own goroutine while a test advances it.
 type fakeClock struct {
 	mu sync.Mutex
 	t  time.Time
 }
 
-// newFakeClock starts on a whole second. Lease expiry is stored with second
-// granularity, so this keeps the arithmetic in the tests exact instead of
-// leaving sub-second truncation to reason about.
+// Starts on a whole second, matching the second granularity lease expiry is
+// stored with, so test arithmetic stays exact.
 func newFakeClock() *fakeClock {
 	return &fakeClock{t: time.Date(2026, time.August, 19, 12, 0, 0, 0, time.UTC)}
 }
@@ -103,9 +95,6 @@ func (c *fakeClock) Advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// newTestPluginState builds a plugin instance over the inclusive range
-// [first, last], backed by a real bitmap allocator, an in-memory lease
-// database and a fake clock the test can drive without sleeping.
 func newTestPluginState(t *testing.T, first, last net.IP) (*pluginState, *fakeClock) {
 	t.Helper()
 
@@ -147,11 +136,8 @@ func TestTimeNowSeam(t *testing.T) {
 	})
 }
 
-// TestClientHostname covers the paths a request's own FQDN option, rather
-// than the whole Handler6 pipeline, drives: no option at all, an option with
-// no name in it, and a name long enough to trip the RFC 1035 truncation.
-// Filtering itself is already pinned end to end by
-// TestStoredHostnameIsSanitised.
+// Exercises clientHostname directly; end-to-end filtering is already
+// pinned by TestStoredHostnameIsSanitised.
 func TestClientHostname(t *testing.T) {
 	longLabels := []string{
 		strings.Repeat("a", 60),
@@ -183,9 +169,8 @@ func TestClientHostname(t *testing.T) {
 	}
 }
 
-// TestOnLink covers the address shapes bytes.Compare can't be handed
-// directly: onLink must reject anything that is neither a 4- nor a 16-byte
-// address before it ever compares it against the pool bounds.
+// A non-4/16-byte address must be rejected before onLink ever compares it
+// against the pool bounds.
 func TestOnLink(t *testing.T) {
 	p := &pluginState{first: net.ParseIP(poolFirst).To16(), last: net.ParseIP(poolLast).To16()}
 	for _, tc := range []struct {
@@ -204,10 +189,8 @@ func TestOnLink(t *testing.T) {
 	}
 }
 
-// TestExtendReturnsNoAddrsAvailWhenNothingCanBeReclaimed covers extend's
-// rec == nil branch: the binding had lapsed, but there was nothing left to
-// give the client back, which the allocator itself can't be made to do
-// through a real bitmap without a lot of setup, so a failing mock stands in.
+// The allocator can't be made to run dry deterministically through a real
+// bitmap, so a failing mock stands in.
 func TestExtendReturnsNoAddrsAvailWhenNothingCanBeReclaimed(t *testing.T) {
 	db, err := loadDB(":memory:")
 	require.NoError(t, err)
@@ -236,10 +219,6 @@ func TestExtendReturnsNoAddrsAvailWhenNothingCanBeReclaimed(t *testing.T) {
 	mockAlloc.AssertExpectations(t)
 }
 
-// TestReallocateExpiredKeepsAddressForLateClient is reallocateExpired's
-// success path: a client that comes back after its binding lapsed, but
-// before anyone else took the address, gets it back through the allocator
-// hint.
 func TestReallocateExpiredKeepsAddressForLateClient(t *testing.T) {
 	p, clock := newTestPluginState(t, net.ParseIP(poolFirst), net.ParseIP(poolLast))
 	key := leaseKey(duidA, iaidX)
@@ -257,10 +236,6 @@ func TestReallocateExpiredKeepsAddressForLateClient(t *testing.T) {
 	assert.Equal(t, int(clock.Now().Add(testLeaseTime).Unix()), got.expires)
 }
 
-// TestReallocateExpiredReleaseLeaseFailureKeepsClientOnOldRecord covers the
-// fallback of reallocateExpired: when the stale binding can't be forgotten on
-// disk, re-allocating would risk handing the address to a second client, so
-// the caller is left on its old record instead.
 func TestReallocateExpiredReleaseLeaseFailureKeepsClientOnOldRecord(t *testing.T) {
 	p, clock := newTestPluginState(t, net.ParseIP(poolFirst), net.ParseIP(poolLast))
 	key := leaseKey(duidA, iaidX)
@@ -277,9 +252,6 @@ func TestReallocateExpiredReleaseLeaseFailureKeepsClientOnOldRecord(t *testing.T
 	assert.Same(t, rec, p.Records6[key])
 }
 
-// TestAllocateLeaseSaveIPAddressFailureStillServesLease covers a storage
-// failure on the new-lease path: the client still gets an address for this
-// session, and only the log records that it wasn't persisted.
 func TestAllocateLeaseSaveIPAddressFailureStillServesLease(t *testing.T) {
 	db, err := loadDB(":memory:")
 	require.NoError(t, err)
@@ -296,9 +268,6 @@ func TestAllocateLeaseSaveIPAddressFailureStillServesLease(t *testing.T) {
 	assert.Same(t, rec, p.Records6[key])
 }
 
-// TestAllocateRetrySucceedsAfterReclaimingExpired covers allocate's first
-// retry path: the allocator has nothing left, but a lapsed binding frees up
-// exactly enough room for the retry to succeed.
 func TestAllocateRetrySucceedsAfterReclaimingExpired(t *testing.T) {
 	p, clock := newTestPluginState(t, net.ParseIP("2001:db8:1::100"), net.ParseIP("2001:db8:1::101"))
 
@@ -317,9 +286,6 @@ func TestAllocateRetrySucceedsAfterReclaimingExpired(t *testing.T) {
 	assert.False(t, stillTracked, "the stale binding is gone once reclaimed")
 }
 
-// TestAllocateRetrySucceedsAfterEvictingOldestDeclined covers allocate's
-// second retry path: nothing has expired, so the address that has been
-// quarantined longest is the one that gives the retry room.
 func TestAllocateRetrySucceedsAfterEvictingOldestDeclined(t *testing.T) {
 	p, clock := newTestPluginState(t, net.ParseIP("2001:db8:1::100"), net.ParseIP("2001:db8:1::101"))
 
@@ -338,9 +304,6 @@ func TestAllocateRetrySucceedsAfterEvictingOldestDeclined(t *testing.T) {
 	assert.Empty(t, p.declined, "the entry is dropped once evicted")
 }
 
-// TestAllocateGivesUpWhenNothingCanBeReclaimed covers the path where neither
-// reclamation trick frees anything: a full pool with no lapsed binding and no
-// quarantined address must fail the allocation outright.
 func TestAllocateGivesUpWhenNothingCanBeReclaimed(t *testing.T) {
 	p, clock := newTestPluginState(t, net.ParseIP("2001:db8:1::100"), net.ParseIP("2001:db8:1::101"))
 
@@ -351,9 +314,6 @@ func TestAllocateGivesUpWhenNothingCanBeReclaimed(t *testing.T) {
 	assert.Error(t, err)
 }
 
-// TestRenewSaveIPAddressFailureStillExtendsInMemory covers renew's storage
-// failure: the in-memory binding is extended and handed to the client
-// regardless, with only the log recording that it wasn't persisted.
 func TestRenewSaveIPAddressFailureStillExtendsInMemory(t *testing.T) {
 	db, err := loadDB(":memory:")
 	require.NoError(t, err)
@@ -368,12 +328,8 @@ func TestRenewSaveIPAddressFailureStillExtendsInMemory(t *testing.T) {
 	assert.Equal(t, int(now.Add(testLeaseTime).Round(time.Second).Unix()), rec.expires)
 }
 
-// TestRenewLeavesFullTermBindingUntouched pins renew's no-op branch: a
-// binding that already outlives the term about to be advertised is not
-// rewritten, so a client hammering REQUEST does not hammer sqlite. A fake
-// "now" keeps this deterministic; driven off the wall clock, whether the
-// following renewal call lands in this branch or the update one depends on
-// which way the previous expiry happened to round.
+// A fake now keeps this deterministic — off the wall clock, which branch a
+// renewal lands in would depend on rounding.
 func TestRenewLeavesFullTermBindingUntouched(t *testing.T) {
 	db, err := loadDB(":memory:")
 	require.NoError(t, err)
@@ -388,11 +344,6 @@ func TestRenewLeavesFullTermBindingUntouched(t *testing.T) {
 	assert.Equal(t, int(now.Add(2*testLeaseTime).Unix()), rec.expires)
 }
 
-// TestReleaseLeaseFailureBranches covers releaseLease's two error returns.
-// Storage goes first on purpose: a binding that can't be forgotten on disk
-// must stay tracked, since a restart would reload the row and hand the
-// address to a second client. The allocator is asked to free regardless of
-// whether it succeeds, since the row is already gone by then.
 func TestReleaseLeaseFailureBranches(t *testing.T) {
 	t.Run("storage delete fails", func(t *testing.T) {
 		db, err := loadDB(":memory:")
@@ -428,9 +379,6 @@ func TestReleaseLeaseFailureBranches(t *testing.T) {
 	})
 }
 
-// TestReleaseIANAStorageFailureReturnsUnspecFail covers releaseIANA's error
-// branch: a release that names a real binding but can't be persisted answers
-// with StatusUnspecFail instead of Success.
 func TestReleaseIANAStorageFailureReturnsUnspecFail(t *testing.T) {
 	db, err := loadDB(":memory:")
 	require.NoError(t, err)
@@ -449,8 +397,6 @@ func TestReleaseIANAStorageFailureReturnsUnspecFail(t *testing.T) {
 	assert.Equal(t, dhcpIana.StatusUnspecFail, status.StatusCode)
 }
 
-// TestDeclineIANAStorageFailureReturnsUnspecFail mirrors
-// TestReleaseIANAStorageFailureReturnsUnspecFail for the decline path.
 func TestDeclineIANAStorageFailureReturnsUnspecFail(t *testing.T) {
 	db, err := loadDB(":memory:")
 	require.NoError(t, err)
@@ -475,8 +421,7 @@ func TestDeclineIANAStorageFailureReturnsUnspecFail(t *testing.T) {
 	assert.Equal(t, dhcpIana.StatusUnspecFail, status.StatusCode)
 }
 
-// TestQuarantineFreeIPAddressFailure covers quarantine's own storage error,
-// reached only when probation and the quarantine bound are both non-zero.
+// Reached only when probation and the quarantine bound are both non-zero.
 func TestQuarantineFreeIPAddressFailure(t *testing.T) {
 	db, err := loadDB(":memory:")
 	require.NoError(t, err)
@@ -496,9 +441,6 @@ func TestQuarantineFreeIPAddressFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), "removing the declined binding from storage")
 }
 
-// TestFreeDeclinedDropsEntryEvenOnAllocatorError pins the documented
-// contract: keeping a declined entry the allocator refuses to free would
-// wedge the quarantine at its bound forever.
 func TestFreeDeclinedDropsEntryEvenOnAllocatorError(t *testing.T) {
 	const ip = "2001:db8:1::50"
 	mockAlloc := &mockFailingAllocator{}
@@ -511,9 +453,6 @@ func TestFreeDeclinedDropsEntryEvenOnAllocatorError(t *testing.T) {
 	mockAlloc.AssertExpectations(t)
 }
 
-// TestSweepExpiredSkipsUndeletableRecordButReclaimsOthers covers both of
-// sweepExpired's outcomes in one pass: a record whose row a trigger refuses
-// to delete stays tracked, while a normal lapsed record is reclaimed.
 func TestSweepExpiredSkipsUndeletableRecordButReclaimsOthers(t *testing.T) {
 	db, err := loadDB(":memory:")
 	require.NoError(t, err)
@@ -535,8 +474,7 @@ func TestSweepExpiredSkipsUndeletableRecordButReclaimsOthers(t *testing.T) {
 		p.Records6[rec.key()] = rec
 	}
 
-	// A trigger that refuses to delete one record's row, standing in for any
-	// storage failure that hits a single row mid-sweep.
+	// Standing in for any storage failure that hits a single row mid-sweep.
 	_, err = db.Exec(fmt.Sprintf(`
 		CREATE TRIGGER prevent_delete
 		BEFORE DELETE ON leases6
@@ -556,9 +494,6 @@ func TestSweepExpiredSkipsUndeletableRecordButReclaimsOthers(t *testing.T) {
 	assert.False(t, tracked)
 }
 
-// TestSweepDeclinedFreesOnlyEndedProbation covers both branches of
-// sweepDeclined: an address whose probation has run out is freed, one that
-// hasn't is left parked.
 func TestSweepDeclinedFreesOnlyEndedProbation(t *testing.T) {
 	const endedIP, activeIP = "2001:db8:1::10", "2001:db8:1::11"
 	now := time.Now()
@@ -600,9 +535,6 @@ func TestDefaultSweepInterval(t *testing.T) {
 	}
 }
 
-// TestSweeperReclaimsInBackground drives the real ticker at a very short
-// interval: without any client asking for an address, an expired binding
-// must disappear from the map on its own.
 func TestSweeperReclaimsInBackground(t *testing.T) {
 	p, clock := newTestPluginState(t, net.ParseIP("2001:db8:1::100"), net.ParseIP("2001:db8:1::100"))
 
@@ -620,8 +552,6 @@ func TestSweeperReclaimsInBackground(t *testing.T) {
 	}, 5*time.Second, 2*time.Millisecond, "the background sweeper must reclaim the expired binding")
 }
 
-// TestStopSweeperHaltsTheLoopImmediately covers the select's stop branch: a
-// sweeper stopped before its ticker has any chance to fire must still exit.
 func TestStopSweeperHaltsTheLoopImmediately(t *testing.T) {
 	p, _ := newTestPluginState(t, net.ParseIP("2001:db8:1::100"), net.ParseIP("2001:db8:1::100"))
 	p.startSweeper(time.Hour)
@@ -634,8 +564,6 @@ func TestStopSweeperHaltsTheLoopImmediately(t *testing.T) {
 	}
 }
 
-// TestRestoreRefusesToSwapRunningDB covers restore's own failure branch: a
-// pluginState whose leasedb is already set must not silently swap it out.
 func TestRestoreRefusesToSwapRunningDB(t *testing.T) {
 	db, err := loadDB(":memory:")
 	require.NoError(t, err)
@@ -648,10 +576,8 @@ func TestRestoreRefusesToSwapRunningDB(t *testing.T) {
 	assert.Contains(t, err.Error(), "cannot swap out a lease database while running")
 }
 
-// TestNewPluginStateAllocatorCreationError substitutes the newIPv6Allocator
-// seam to simulate bitmap.NewIPv6Allocator failing. newPluginState's own
-// pool-bounds validation already guarantees the real allocator constructor
-// can't fail, so this is otherwise unreachable through the public API.
+// The real allocator constructor can't fail once pool-bounds validation
+// passes, so this substitutes the newIPv6Allocator seam to reach the error path at all.
 func TestNewPluginStateAllocatorCreationError(t *testing.T) {
 	orig := newIPv6Allocator
 	t.Cleanup(func() { newIPv6Allocator = orig })
@@ -665,8 +591,6 @@ func TestNewPluginStateAllocatorCreationError(t *testing.T) {
 	assert.Contains(t, err.Error(), "could not create an allocator")
 }
 
-// TestSetup6ReturnsAWorkingHandler is the happy path setup6 itself adds on
-// top of newPluginState: a working handler once the sweeper has started.
 func TestSetup6ReturnsAWorkingHandler(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "leases6.sqlite3")
 	h, err := setup6(dbPath, poolFirst, poolLast, "1h")
@@ -674,9 +598,8 @@ func TestSetup6ReturnsAWorkingHandler(t *testing.T) {
 	assert.NotNil(t, h)
 }
 
-// TestLoadDBOpenErrorSeam substitutes the sqlOpen seam, since the real
-// sqlite driver defers connecting until first use and sql.Open itself never
-// actually fails for it.
+// The real sqlite driver defers connecting until first use, so sql.Open
+// itself never fails; this substitutes the sqlOpen seam instead.
 func TestLoadDBOpenErrorSeam(t *testing.T) {
 	orig := sqlOpen
 	t.Cleanup(func() { sqlOpen = orig })
@@ -689,9 +612,7 @@ func TestLoadDBOpenErrorSeam(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to open database")
 }
 
-// TestLoadDBTableCreationFailure covers the other way opening a lease
-// database can fail: the path exists but isn't a usable sqlite file. A
-// directory can never be opened as one.
+// A directory can never be opened as a sqlite file, forcing table creation to fail.
 func TestLoadDBTableCreationFailure(t *testing.T) {
 	_, err := loadDB(t.TempDir())
 	require.Error(t, err)
@@ -708,10 +629,8 @@ func TestLoadRecordsQueryError(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to query leases database")
 }
 
-// TestLoadRecordsScanFailure seeds a row with an iaid value sqlite can't
-// coerce to an integer, which loadRecords can only ever see by scanning
-// straight into a mismatched type: a row written through saveIPAddress
-// could never carry one.
+// A row with a non-numeric iaid can't happen through saveIPAddress; this is
+// the only way to reach the Scan failure.
 func TestLoadRecordsScanFailure(t *testing.T) {
 	db, err := loadDB(":memory:")
 	require.NoError(t, err)
@@ -727,10 +646,8 @@ func TestLoadRecordsScanFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to scan row")
 }
 
-// errRowsDriver is a minimal database/sql/driver implementation whose Rows
-// always fail iteration with a non-io.EOF error, exercising loadRecords'
-// rows.Err() branch deterministically. A real sqlite query result is
-// materialized up front, so that branch can't be triggered through the
+// Exercises loadRecords' rows.Err() branch: a real sqlite result is
+// materialized up front, so the branch can't be triggered through the
 // sqlite driver itself.
 type errRowsDriver struct{}
 
@@ -772,13 +689,9 @@ func TestLoadRecordsRowsIterationError(t *testing.T) {
 	assert.Contains(t, err.Error(), "simulated row iteration failure")
 }
 
-// TestRestoreFailsWhenReallocationExhaustsThePool covers restore's other
-// re-allocation failure: two stored rows naming the same address in a
-// single-address pool. The first reclaims it, and the second finds the
-// allocator with nothing left to give back at all, rather than merely
-// getting handed a different address (which is what
-// TestSetupRejectsUnusableStoredRows's "address outside the pool" case
-// covers).
+// Two rows name the same address in a single-address pool: the first
+// reclaims it, the second finds nothing left — unlike
+// TestSetupRejectsUnusableStoredRows's "outside the pool" case, which gets handed a different address instead.
 func TestRestoreFailsWhenReallocationExhaustsThePool(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "leases6.sqlite3")
 	db, err := loadDB(dbPath)
@@ -830,9 +743,6 @@ func TestRegisterBackingDBDoubleRegistration(t *testing.T) {
 	assert.Contains(t, err.Error(), "cannot swap out a lease database")
 }
 
-// TestRecordFromRow covers every one of recordFromRow's rejections, plus the
-// happy path, as the cheapest way to document what a stored row must look
-// like.
 func TestRecordFromRow(t *testing.T) {
 	validDUID := []byte{0xaa, 0xbb}
 

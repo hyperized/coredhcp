@@ -22,8 +22,7 @@ import (
 	"github.com/coredhcp/coredhcp/logger"
 )
 
-// fakeClock is the seam the drop limiter reads time through, so the tests
-// step over the rate-limit interval instead of sleeping across it.
+// The seam the drop limiter reads time through, so tests can step over the interval instead of sleeping.
 type fakeClock struct {
 	mu sync.Mutex
 	t  time.Time
@@ -45,9 +44,8 @@ func (c *fakeClock) advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// captureLog redirects the shared logger to a buffer for the duration of the
-// test. The logger's console writer is process-wide, so a test using this may
-// not run in parallel with another one that logs.
+// The logger's console writer is process-wide, so a test using this must not
+// run in parallel with another one that logs.
 func captureLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
@@ -56,7 +54,6 @@ func captureLog(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// nestedRelay wraps an empty client message in depth Relay-forward layers.
 func nestedRelay(t *testing.T, depth int, linkAddr net.IP) *dhcpv6.RelayMessage {
 	t.Helper()
 	inner, err := dhcpv6.NewMessage()
@@ -212,8 +209,7 @@ func TestSetupState(t *testing.T) {
 	}
 }
 
-// prefixStrings renders a prefix list for comparison, returning nil for an
-// empty one so the table can leave the field out.
+// Returns nil for an empty list so the table can leave the field unset.
 func prefixStrings(prefixes []netip.Prefix) []string {
 	if len(prefixes) == 0 {
 		return nil
@@ -326,8 +322,7 @@ func TestRelayDepth(t *testing.T) {
 }
 
 func TestRelayDepthWithoutInnerMessage(t *testing.T) {
-	// A Relay-forward carrying no Relay-Message option cannot be decoded any
-	// further, and the walk stops rather than looping.
+	// No Relay-Message option means nothing left to decode, so the walk stops instead of looping.
 	relay := &dhcpv6.RelayMessage{MessageType: dhcpv6.MessageTypeRelayForward}
 	assert.Equal(t, 1, relayDepth(relay))
 }

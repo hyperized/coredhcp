@@ -1,19 +1,12 @@
-# Integration test stack for the redis plugin: a real Redis server and a Go
-# container that runs the plugin's integration tests against it. Nothing DHCP
-# happens on the wire here; the tests drive the plugin's handlers in-process
-# and only the backend is real.
-#
-# Drive it with `make test-redis` from the repo root, which tears the stack down
-# afterwards. Knobs, all with defaults: COMPOSE_PROJECT_NAME, REDIS_TAG,
-# GO_TAG, REDIS_TEST_PASSWORD.
+# Integration stack for the redis plugin. Nothing DHCP happens on the wire; the
+# tests drive the plugin's handlers in-process and only the backend is real.
 
 name: ${COMPOSE_PROJECT_NAME:-coredhcp-redis-itest}
 
 services:
   redis:
     image: redis:${REDIS_TAG:-8.10.0-alpine}
-    # A password is set on purpose so the AUTH path gets exercised, not just
-    # the anonymous one.
+    # A password on purpose, so the AUTH path gets exercised too.
     command: ["redis-server", "--requirepass", "${REDIS_TEST_PASSWORD:-coredhcp-itest}", "--save", "", "--appendonly", "no"]
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_TEST_PASSWORD:-coredhcp-itest}", "--no-auth-warning", "ping"]
@@ -21,8 +14,7 @@ services:
       timeout: 2s
       retries: 30
 
-  # Exits with the test result: `up --exit-code-from tester` returns this
-  # container's exit code.
+  # Exits with the test result: `up --exit-code-from tester` returns its code.
   tester:
     image: golang:${GO_TAG:-1.26}
     depends_on:
@@ -38,8 +30,6 @@ services:
     command: ["go", "test", "-count=1", "-race", "-tags=integration", "-run", "Integration", "-v", "./plugins/redis/"]
     volumes:
       - ../..:/src:ro
-      # Module and build caches persist between runs so a rerun does not
-      # download the world again.
       - gomodcache:/go/pkg/mod
       - gobuildcache:/root/.cache/go-build
 

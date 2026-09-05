@@ -1,7 +1,6 @@
 #!/bin/sh
-# Render the coredhcp configuration and the static lease file from the
-# templates in config/ into the shared /etc/coredhcp volume. This runs to
-# completion before the server container starts.
+# Render the coredhcp config and the static lease file from the templates in
+# config/ into the shared /etc/coredhcp volume.
 # busybox ash implements pipefail even though POSIX does not define it.
 # shellcheck disable=SC3040
 set -euo pipefail
@@ -23,9 +22,7 @@ render() {
         -e "s|@MAC_C@|${MAC_C}|g" \
         "$1" >"$2"
 
-    # A marker left in the output means the template asks for a value this
-    # script does not substitute. Fail here instead of letting coredhcp parse a
-    # half-rendered config.
+    # Fail here instead of letting coredhcp parse a half-rendered config.
     if grep -q '@[A-Z_]\{1,\}@' "$2"; then
         echo "render-config: unsubstituted markers in $2:" >&2
         grep -n '@[A-Z_]\{1,\}@' "$2" >&2

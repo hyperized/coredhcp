@@ -27,8 +27,6 @@ var Plugin = plugins.Plugin{
 	Setup4: setup4,
 }
 
-// pluginState holds the NTP servers handed out by one setup instance of
-// the plugin.
 type pluginState struct {
 	ntpServers []net.IP
 }
@@ -66,7 +64,7 @@ func setup4(args ...string) (handler.Handler4, error) {
 	return p.Handler4, nil
 }
 
-// Handler6 handles DHCPv6 packets for the ntp plugin
+// Handler6 handles DHCPv6 packets for the ntp plugin.
 func (p *pluginState) Handler6(_, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	opt := dhcpv6.OptNTPServer{Suboptions: make(dhcpv6.Options, 0, len(p.ntpServers))}
 	for _, server := range p.ntpServers {
@@ -77,7 +75,7 @@ func (p *pluginState) Handler6(_, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	return resp, false
 }
 
-// Handler4 handles DHCPv4 packets for the ntp plugin
+// Handler4 handles DHCPv4 packets for the ntp plugin.
 func (p *pluginState) Handler4(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	resp.Options.Update(dhcpv4.OptNTPServers(p.ntpServers...))
 	return resp, false

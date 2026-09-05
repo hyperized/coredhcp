@@ -20,9 +20,8 @@ import (
 	"github.com/coredhcp/coredhcp/logger"
 )
 
-// captureLog redirects the logger's console stream into a buffer and raises
-// the level to debug for the duration of one test. The logger is process
-// wide, so this only holds because no test in this package runs in parallel.
+// captureLog only holds because the logger is process-wide and no test in
+// this package runs in parallel.
 func captureLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
@@ -35,8 +34,6 @@ func captureLog(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// lineWith returns the first logged line containing want, and fails the test
-// when there is none.
 func lineWith(t *testing.T, log, want string) string {
 	t.Helper()
 	for line := range strings.SplitSeq(log, "\n") {
@@ -48,9 +45,8 @@ func lineWith(t *testing.T, log, want string) string {
 	return ""
 }
 
-// A plugin's arguments carry its secrets, so the line the server prints at
-// its default level names the plugin and counts the arguments and nothing
-// else. The values, redacted, are a debug detail.
+// A plugin's arguments carry its secrets, so the default level only names
+// the plugin and counts its arguments; redacted values are a debug detail.
 func TestLoadKeepsPluginArgumentsOutOfTheDefaultLog(t *testing.T) {
 	buf := captureLog(t)
 
@@ -137,9 +133,8 @@ func TestLoadWithDefaultSearchPath(t *testing.T) {
 }
 
 func TestLoadSearchOrderPrefersXDGOverWorkingDirectory(t *testing.T) {
-	// The working directory is searched last, so a config sitting in
-	// $XDG_CONFIG_HOME/coredhcp/ must win over one in the directory the
-	// test happens to be running from.
+	// The working directory is searched last, so the XDG config here must
+	// win over the one written to the working directory.
 	xdgParent := t.TempDir()
 	xdgDir := filepath.Join(xdgParent, "coredhcp")
 	require.NoError(t, os.MkdirAll(xdgDir, 0o700))
@@ -187,8 +182,7 @@ func TestErrorIs(t *testing.T) {
 	assert.True(t, errors.Is(e, sentinel))
 }
 
-// wrappedErr is a concrete error type used to prove that errors.As can see
-// through config.Error via its Unwrap method.
+// wrappedErr exists to prove errors.As can see through config.Error via its Unwrap method.
 type wrappedErr struct{ msg string }
 
 func (w *wrappedErr) Error() string { return w.msg }

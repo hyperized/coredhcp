@@ -9,9 +9,8 @@ import (
 	"testing"
 )
 
-// discardConsole swaps out.console for io.Discard for the duration of the
-// benchmark, so the timed loop measures formatting rather than terminal
-// I/O, and restores the previous writer once the benchmark ends.
+// discardConsole swaps out.console for io.Discard so the timed loop measures
+// formatting, not terminal I/O.
 func discardConsole(b *testing.B) {
 	b.Helper()
 
@@ -27,8 +26,7 @@ func discardConsole(b *testing.B) {
 	})
 }
 
-// BenchmarkLoggerPrintf measures the printf-style logging path: format,
-// slog attribute construction, and text-handler encoding.
+// Measures the printf path: formatting, slog attribute construction, and text-handler encoding.
 func BenchmarkLoggerPrintf(b *testing.B) {
 	b.ReportAllocs()
 	discardConsole(b)
@@ -40,8 +38,7 @@ func BenchmarkLoggerPrintf(b *testing.B) {
 	}
 }
 
-// BenchmarkLoggerWith measures attaching structured context via With before
-// logging a line, the pattern plugins use to tag messages per request.
+// The pattern plugins use to tag messages per request.
 func BenchmarkLoggerWith(b *testing.B) {
 	b.ReportAllocs()
 	discardConsole(b)

@@ -19,12 +19,8 @@ import (
 	"github.com/coredhcp/coredhcp/plugins/relay"
 )
 
-// allowArgs is the configuration most cases run against: one relay by
-// address, one relay network, and link-local for the DHCPv6 side.
 var allowArgs = []string{"allow", "10.0.1.1", "10.0.2.0/24", "fe80::/10"}
 
-// ctxFrom builds the context the server would hand a handler for a datagram
-// received from peer.
 func ctxFrom(t *testing.T, peer string) context.Context {
 	t.Helper()
 	return handler.WithRequestInfo(context.Background(), handler.RequestInfo{
@@ -35,7 +31,6 @@ func ctxFrom(t *testing.T, peer string) context.Context {
 	})
 }
 
-// v4Exchange builds a request and the reply the chain has produced so far.
 func v4Exchange(t *testing.T, mods ...dhcpv4.Modifier) (*dhcpv4.DHCPv4, *dhcpv4.DHCPv4) {
 	t.Helper()
 	req, err := dhcpv4.New(mods...)
@@ -45,11 +40,8 @@ func v4Exchange(t *testing.T, mods ...dhcpv4.Modifier) (*dhcpv4.DHCPv4, *dhcpv4.
 	return req, resp
 }
 
-// request6 builds the DHCPv6 request one table case describes: a plain client
-// message when depth is zero, otherwise that message wrapped in depth
-// Relay-forward layers whose outermost one carries linkAddr and hopCount. An
-// empty linkAddr leaves the field absent, which is how a relay says it has
-// none.
+// depth 0 returns a plain client message; otherwise it's wrapped in depth
+// Relay-forward layers, and an empty linkAddr leaves that field absent.
 func request6(t *testing.T, depth int, linkAddr string, hopCount uint8) dhcpv6.DHCPv6 {
 	t.Helper()
 	inner, err := dhcpv6.NewMessage()

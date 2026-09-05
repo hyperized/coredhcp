@@ -1,11 +1,6 @@
 #!/bin/sh
 # Reads what the clients captured and asserts it against the server's own
-# rendered configuration: every MAC with a static lease must have been offered
-# exactly that address, every other client an address out of the range pool,
-# and all of them the same router, netmask, DNS, server id and lease time the
-# server was configured with.
-#
-# Prints a table and exits non-zero on any mismatch.
+# rendered configuration. Prints a table and exits non-zero on any mismatch.
 # busybox ash implements pipefail even though POSIX does not define it.
 # shellcheck disable=SC3040
 set -euo pipefail
@@ -27,10 +22,8 @@ for f in "$conf" "$leases"; do
     }
 done
 
-# Expectations come from the server's configuration rather than a second copy
-# of the same values, so a config change that the clients do not see shows up
-# as a failure here. This is a narrow parse of the "- <plugin>: <args>" lines
-# of a file rendered from a template in this directory, not a YAML parser.
+# Expectations come from the server's own config, not a second copy of the same
+# values. A narrow parse of "- <plugin>: <args>" lines, not a YAML parser.
 plugin_args() {
     sed -n "s/^[[:space:]]*-[[:space:]]*$1:[[:space:]]*//p" "$conf" | head -n 1
 }
@@ -43,13 +36,11 @@ want_lease=$(plugin_args lease_time | tr -d 's')
 pool_start=$(plugin_args range | awk '{print $2}')
 pool_end=$(plugin_args range | awk '{print $3}')
 
-# value <file> <key>: reads one key from a captured result file.
 value() {
     sed -n "s/^$2=//p" "$1" | head -n 1
 }
 
-# lease_for_mac <mac>: the statically configured address for a MAC, empty if
-# the MAC has no static lease.
+# Empty when the MAC has no static lease.
 lease_for_mac() {
     awk -v mac="$1" '
         { sub(/#.*/, "") }
@@ -77,8 +68,8 @@ printf '  %-10s %s\n' \
     "pool" "$pool_start - $pool_end"
 echo
 
-# Wait for every client to report. A client that failed to get a lease writes a
-# result too, so this normally only waits for the DHCP exchange itself.
+# A failed client writes a result too, so this normally only waits for the
+# DHCP exchange itself.
 deadline=$(($(date +%s) + timeout))
 while :; do
     missing=
@@ -155,9 +146,8 @@ for client in $EXPECTED_CLIENTS; do
     [ -z "$ip" ] || offered_ips="$offered_ips $ip"
 done
 
-# Two clients holding the same address means the server handed out a lease
-# twice, which the per-client checks above cannot see on their own.
-# Unquoted on purpose: the list is split into one address per line.
+# A duplicate address means the server leased one twice, which the per-client
+# checks cannot see. Unquoted on purpose: the list splits into one per line.
 # shellcheck disable=SC2086
 duplicates=$(printf '%s\n' $offered_ips | sort | uniq -d)
 if [ -n "$duplicates" ]; then

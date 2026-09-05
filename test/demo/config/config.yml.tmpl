@@ -1,33 +1,22 @@
-# coredhcp configuration for the docker compose demo.
-#
-# Template: scripts/render-config.sh substitutes each placeholder with the
-# matching environment variable before the server starts. The network prefix is
-# the only address knob, so the whole plan follows one value.
-#
-# The chain is longer than the demo needs to hand out addresses. That is the
-# point: the plugins pane of the UI lists it in order, and each client below
-# ends up in a different part of it.
+# Config template for the demo; scripts/render-config.sh fills in the markers.
+# The chain is longer than needed on purpose, so the UI's plugin pane shows it.
 
 server4:
-    # Bind to the compose network interface (eth0 inside the container). A
-    # bound listener means replies leave through the interface the request
-    # arrived on, which is what makes the layer-2 unicast path work.
+    # Bound to eth0, so replies leave through the interface the request arrived
+    # on, which is what makes the layer-2 unicast path work.
     listen:
         - "%eth0"
 
     plugins:
-        # First in the chain, so it counts the requests macfilter drops as
-        # well. The listener is on loopback inside the container and nothing
+        # First in the chain, so it also counts what macfilter drops. Nothing
         # scrapes it here; it is in the config to be seen in the UI.
         - metrics: 127.0.0.1:9754
 
-        # client-denied's address. Its requests are dropped before any plugin
-        # touches lease state, and the UI names macfilter as the plugin that
-        # ended the chain.
+        # client-denied's MAC. The UI names macfilter as the plugin that ended
+        # the chain.
         - macfilter: deny @MAC_DENIED@
 
-        # Short on purpose. At 60 seconds the renewing client renews every 30,
-        # and leases that nobody released expire while you are watching.
+        # Short on purpose, so renewals and expiries happen while watching.
         - lease_time: @LEASE_TIME@
         - server_id: @NET@.2
         - dns: @NET@.1 9.9.9.9
@@ -37,12 +26,10 @@ server4:
         - options: 15:string:demo.lan
         - ntp: @NET@.1
 
-        # Static leases, keyed on MAC. Everything that decorates the reply has
-        # to come before this, because the file plugin stops the chain as soon
-        # as it matches an address.
+        # Everything that decorates the reply comes before this, because the
+        # file plugin stops the chain as soon as it matches a MAC.
         - file: "/etc/coredhcp/leases-v4.txt"
 
-        # Ten addresses, which client-churn empties in under a minute. The
-        # lease database lives on a writable volume; /etc/coredhcp is mounted
-        # read-only.
+        # A small pool on purpose, so client-churn can empty it. The lease
+        # database goes on a writable volume; /etc/coredhcp is read-only.
         - range: /var/lib/coredhcp/leases.sqlite3 @NET@.100 @NET@.109 @LEASE_TIME@

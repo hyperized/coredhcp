@@ -58,8 +58,7 @@ func TestPluginStateHandler6(t *testing.T) {
 	})
 
 	t.Run("decapsulation error", func(t *testing.T) {
-		// A relay message with no embedded RelayMessage option fails to
-		// decapsulate.
+		// No embedded RelayMessage option, so decapsulation fails.
 		relay := &dhcpv6.RelayMessage{MessageType: dhcpv6.MessageTypeRelayForward}
 
 		stub, err := dhcpv6.NewMessage()

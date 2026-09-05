@@ -2,16 +2,15 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// Package relayinfo hands out addresses by the port a request came in on
-// instead of by the client that sent it.
+// Package relayinfo hands out addresses by the port a request came in on,
+// not by the client that sent it.
 //
-// A switch or BNG that relays DHCP stamps every request with the port it
-// arrived on: circuit-id, remote-id or subscriber-id inside the DHCPv4 relay
-// agent information option (option 82, RFC 3046 and RFC 3993), interface-id
-// or remote-id among the DHCPv6 relay options (RFC 8415 section 21.18 and
-// RFC 4649). This plugin maps those values to fixed addresses read from a
-// text file, so a subscriber's address follows the wire they are plugged
-// into and survives the modem being swapped for one with a different MAC.
+// A relay stamps every request with the port it arrived on: circuit-id,
+// remote-id or subscriber-id in the DHCPv4 relay agent information option
+// (RFC 3046, RFC 3993), or interface-id or remote-id among the DHCPv6 relay
+// options (RFC 8415 section 21.18, RFC 4649). This plugin maps those values
+// to fixed addresses read from a text file, so a subscriber's address
+// follows the wire it is plugged into rather than the modem's MAC.
 //
 // # Configuration
 //
@@ -19,22 +18,19 @@
 //	  plugins:
 //	    - relayinfo: file:/etc/coredhcp/ports.txt key:circuit-id autorefresh
 //
-// Arguments may be given in any order. Anything that is not one of the three
-// below fails setup by name.
+// Arguments may be given in any order; anything else fails setup by name.
 //
-//   - file:<path> is the mapping file, required. A relative path is resolved
+//   - file:<path> is the mapping file, required. A relative path resolves
 //     against the working directory coredhcp was started in.
-//   - key:<name> is the piece of relay information to match on, required.
-//     server4 accepts circuit-id, remote-id and subscriber-id (option 82
+//   - key:<name> is the relay information to match on, required. server4
+//     accepts circuit-id, remote-id and subscriber-id (option 82
 //     sub-options 1, 2 and 6); server6 accepts interface-id and remote-id
-//     (options 18 and 37). The two lists are separate, and a name from the
-//     other family fails setup.
-//   - autorefresh reloads the file whenever it changes on disk. Without it
+//     (options 18 and 37) - the two lists are separate.
+//   - autorefresh reloads the file whenever it changes on disk; without it
 //     the file is read once, at startup.
 //
-// The plugin is configured per family, so a dual-stack server that wants both
-// needs a relayinfo entry in server4 and another in server6, each with its
-// own file.
+// A dual-stack server needs a relayinfo entry in both server4 and server6,
+// each with its own file.
 //
 // # File format
 //
@@ -46,64 +42,53 @@
 //	0x0004010203     192.0.2.32                 # same, written as raw bytes
 //	docsis-cm-0042   192.0.2.33                 # inherits the 1h default
 //
-// The key value is matched against the raw bytes the relay sent, and can be
-// written two ways. As text it is printable ASCII with no whitespace, which
-// covers the human-readable circuit-ids most switches produce. As hex it is
-// "0x" followed by an even number of hex digits, for the binary forms (a
-// DOCSIS remote-id is six raw bytes of MAC, and Cisco's default circuit-id is
-// a packed VLAN and port number). A key that really does start with the two
-// characters "0x" has to be written in the hex form, and so does one
-// containing a '#', since the comment is stripped first.
+// The key value is matched against the raw bytes the relay sent, written
+// either as text (printable ASCII, no whitespace) or, for binary forms like
+// a DOCSIS remote-id or a packed VLAN/port circuit-id, as "0x" followed by
+// an even number of hex digits. A key starting with "0x", or containing a
+// '#', has to use the hex form, since the comment is stripped first.
 //
-// The lease is optional and takes any duration time.ParseDuration accepts,
-// with a resolution of one second. It becomes the DHCPv4 lease time (option
-// 51) or both DHCPv6 lifetimes for that one mapping, and defaults to 1h.
-//
-// The address has to be of the family the section serves. Two lines mapping
-// the same key, or the same address, are both accepted with a warning: the
-// last line wins, which is not usually what was meant.
+// The lease is optional, takes any duration time.ParseDuration accepts, and
+// defaults to 1h; it becomes the DHCPv4 lease time (option 51) or both
+// DHCPv6 lifetimes for that mapping. The address has to be of the family the
+// section serves. Two lines mapping the same key or address are both
+// accepted with a warning: the last line wins.
 //
 // # Behaviour
 //
-// The plugin answers a request whose key is in the file with the address
-// mapped to it. On DHCPv4 it sets yiaddr and the lease time and ends the
-// chain, the way the file plugin does, so plugins that add options belong
-// before it. On DHCPv6 it adds an IA_NA for the IAID the client asked with
-// and lets the chain continue, since option order in the response is up to
-// the plugins that follow.
+// The plugin answers a request whose key is in the file with the mapped
+// address. On DHCPv4 it sets yiaddr and the lease time and ends the chain,
+// the way the file plugin does, so plugins that add options belong before
+// it. On DHCPv6 it adds an IA_NA for the client's IAID and lets the chain
+// continue, since option order is up to the plugins that follow.
 //
-// Anything else is passed on untouched: a request with no relay information,
-// one whose key is not in the file, and one whose key is longer than 255
-// bytes. That bound is what an option 82 sub-option can hold anyway (its
-// length is one byte), and it keeps a relay that stuffs a 64KB interface-id
-// into every packet from turning each request into a large map lookup.
-// DHCPv4 RELEASE, DECLINE and INFORM, and DHCPv6 Release and Decline, are
-// passed on as well. The mapping is static, so there is nothing to reclaim
-// when a client gives an address up, and INFORM asks for options only.
+// Anything else passes on untouched: no relay information, a key not in the
+// file, or a key over 255 bytes - the largest an option 82 sub-option can
+// hold, and a bound against a relay stuffing a large interface-id into every
+// packet. DHCPv4 RELEASE, DECLINE and INFORM, and DHCPv6 Release and
+// Decline, pass on too: the mapping is static, so there is nothing to
+// reclaim, and INFORM asks for options only.
 //
-// The enterprise number of a DHCPv6 remote-id is not part of the key, only
-// the identifier bytes after it. A relay fleet uses one enterprise number
-// throughout, and carrying it in the file would make every line quote a
-// vendor code that never varies.
+// A DHCPv6 remote-id's enterprise number is not part of the key, only the
+// identifier bytes after it - a relay fleet uses one enterprise number
+// throughout, so carrying it would make every line quote a code that never
+// varies.
 //
 // # Trusting the relay
 //
-// Nothing in the protocol authenticates relay information. On a segment where
-// an untrusted device can reach the server directly, every byte of it is
-// under the client's control: a client can send an option 82 of its own
-// making, and a server that believes it hands that client whichever address
-// it asked for. Two things have to hold before this plugin is worth
-// deploying.
+// Nothing in the protocol authenticates relay information: on a segment
+// where an untrusted device can reach the server directly, a client can send
+// an option 82 of its own making and receive whichever address it asks for.
+// Two things have to hold before this plugin is worth deploying.
 //
-// The relay has to be the only path to the server. Restrict the listening
-// address, filter DHCP at the network edge, or put the server on a network
-// only relays can reach. RFC 3046 section 2.1 says a relay agent discards a
-// request that already carries an option 82 from a downstream port, and most
-// switches do that by default, but that only helps for requests that actually
-// pass through the relay.
+// The relay has to be the only path to the server: restrict the listening
+// address, filter DHCP at the network edge, or put the server on a
+// relay-only network. RFC 3046 section 2.1 has a relay agent discard a
+// request that already carries option 82 from a downstream port, but that
+// only helps for requests that actually pass through the relay.
 //
-// The relay's own address has to be checked, which this plugin does not do.
-// Pair it with a plugin or a firewall that admits only known relay addresses.
+// The relay's own address has to be checked, which this plugin does not do;
+// pair it with a plugin or a firewall that admits only known relay addresses.
 package relayinfo
 
 import (
@@ -128,9 +113,8 @@ const (
 	fileArgPrefix  = "file:"
 	keyArgPrefix   = "key:"
 
-	// maxKeyLen bounds the key taken off the wire. An option 82 sub-option
-	// cannot exceed this anyway, and a DHCPv6 interface-id that does is not
-	// something an operator writes down in a mapping file.
+	// An option 82 sub-option cannot exceed this anyway, and a DHCPv6
+	// interface-id that does is not something an operator writes into a mapping file.
 	maxKeyLen = 255
 )
 
@@ -143,34 +127,27 @@ var Plugin = plugins.Plugin{
 	Setup4: setup4,
 }
 
-// Setup errors that callers and tests can match with errors.Is. Errors that
-// have to quote the offending argument are built with fmt.Errorf instead.
+// Matched with errors.Is; an error that has to quote the offending argument
+// is built with fmt.Errorf instead.
 var (
 	errNoFile = errors.New("need a mapping file, as file:<path>")
 	errNoKey  = errors.New("need a key to match on, as key:<name>")
 )
 
-// fsnotifyNewWatcher and watcherAdd are indirections over the two fsnotify
-// calls autorefresh needs. Production code always uses the real
-// implementations assigned here; tests substitute them to simulate the
-// watcher failing to initialize or attach, which real filesystem operations
-// cannot trigger deterministically.
+// Indirections over fsnotify so tests can simulate the watcher failing to
+// initialize or attach - not reliably triggerable with real filesystem calls.
 var (
 	fsnotifyNewWatcher = fsnotify.NewWatcher
 	watcherAdd         = (*fsnotify.Watcher).Add
 )
 
-// keyFunc4 pulls the configured relay option out of a DHCPv4 request. It
-// returns nil when the request does not carry it, which is distinct from an
-// option that is present and empty.
+// Returns nil when the request doesn't carry the option - distinct from present-but-empty.
 type keyFunc4 func(*dhcpv4.DHCPv4) []byte
 
-// keyFunc6 is keyFunc4 for the outermost relay of a DHCPv6 request.
 type keyFunc6 func(*dhcpv6.RelayMessage) []byte
 
-// keys4 and keys6 are the allow-lists behind the key: argument. They differ
-// per family because the two protocols carry different relay options, and a
-// name is only ever looked up in the list for the family being set up.
+// Differ per family: the two protocols carry different relay options, and a
+// name is only looked up in the list for the family being set up.
 var (
 	keys4 = map[string]keyFunc4{
 		"circuit-id":    relaySubOption(dhcpv4.AgentCircuitIDSubOption),
@@ -191,7 +168,6 @@ var (
 	}
 )
 
-// relaySubOption builds the extractor for one option 82 sub-option.
 func relaySubOption(code dhcpv4.OptionCode) keyFunc4 {
 	return func(req *dhcpv4.DHCPv4) []byte {
 		info := req.RelayAgentInfo()
@@ -202,14 +178,8 @@ func relaySubOption(code dhcpv4.OptionCode) keyFunc4 {
 	}
 }
 
-// pluginState holds the key -> address mapping backing one instance of the
-// plugin, and the lock protecting it against the autorefresh goroutine.
-// setupState creates one instance per call, so the server4 and server6
-// entries of a dual-stack configuration keep their mappings apart.
-//
-// Exactly one of extract4 and extract6 is set, the one for the family this
-// instance was set up for. Both are fixed at setup time and read without the
-// lock, which only guards recs.
+// One instance per setup call keeps server4 and server6 mappings apart.
+// Exactly one of extract4/extract6 is set, fixed at setup and read lock-free; the lock only guards recs.
 type pluginState struct {
 	mu   sync.RWMutex
 	recs map[string]record
@@ -219,17 +189,14 @@ type pluginState struct {
 	extract6 keyFunc6
 }
 
-// numRecords returns the number of currently loaded mappings.
 func (s *pluginState) numRecords() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.recs)
 }
 
-// match looks up a key taken off the wire. It rejects a missing or oversized
-// key before the map is touched, and logs the reason a request is passed on,
-// since from the outside every one of these looks the same: the plugin did
-// nothing.
+// Rejects a missing or oversized key before touching the map, logging why -
+// from outside, every case looks like the plugin doing nothing.
 func (s *pluginState) match(key []byte) (record, bool) {
 	switch {
 	case key == nil:
@@ -250,10 +217,8 @@ func (s *pluginState) match(key []byte) (record, bool) {
 	return rec, ok
 }
 
-// passthrough4 reports whether a DHCPv4 message has to be left alone. INFORM
-// asks for options only, and a static mapping has nothing to reclaim when a
-// client releases or declines an address. The server sends no reply to the
-// last two at all.
+// INFORM asks for options only; a static mapping has nothing to reclaim on
+// RELEASE/DECLINE, which get no reply anyway.
 func passthrough4(mt dhcpv4.MessageType) bool {
 	return mt == dhcpv4.MessageTypeInform ||
 		mt == dhcpv4.MessageTypeRelease ||
@@ -296,10 +261,8 @@ func (s *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 		return resp, false
 	}
 
-	// The request as handed to the plugin is the outermost relay, the one
-	// closest to the server. With relays chained, that is the aggregation
-	// device rather than the access switch the client is plugged into, and
-	// its options are the ones the operator provisions against.
+	// req is the outermost relay - closest to the server, not the access switch
+	// the client is plugged into - so its options are what the operator provisions against.
 	relay, ok := req.(*dhcpv6.RelayMessage)
 	if !ok {
 		log.Debug("request did not come through a relay, passing")
@@ -341,17 +304,14 @@ func setup6(args ...string) (handler.Handler6, error) {
 	return s.Handler6, nil
 }
 
-// pluginArgs is the parsed argument list.
 type pluginArgs struct {
 	filename string
 	key      string
 	refresh  bool
 }
 
-// parseArgs picks the file, the key and the autorefresh flag out of the
-// argument list, in whatever order they were given. An argument that is none
-// of the three is an error naming it, so that a typo fails the server at
-// startup instead of quietly disabling autorefresh.
+// An unrecognized argument errors by name, so a typo fails startup instead
+// of quietly disabling autorefresh.
 func parseArgs(args []string) (pluginArgs, error) {
 	var a pluginArgs
 	for _, arg := range args {
@@ -376,9 +336,8 @@ func parseArgs(args []string) (pluginArgs, error) {
 	return a, nil
 }
 
-// keySource resolves a configured key name against one family's allow-list.
-// The error lists the names that would have worked, because the two families
-// accept different ones and remote-id is the only name they share.
+// The error lists the names that would have worked; the two families accept
+// different ones, and remote-id is the only one they share.
 func keySource[F any](family, name string, allowed map[string]F) (F, error) {
 	fn, ok := allowed[name]
 	if !ok {
@@ -389,9 +348,8 @@ func keySource[F any](family, name string, allowed map[string]F) (F, error) {
 	return fn, nil
 }
 
-// setupState builds one plugin instance: it validates the arguments, loads
-// the mapping file once so a broken file fails startup, and starts the
-// autorefresh watcher if it was asked for.
+// Loads the file once here so a broken mapping fails startup, before
+// autorefresh (if requested) takes over.
 func setupState(v6 bool, args ...string) (*pluginState, error) {
 	a, err := parseArgs(args)
 	if err != nil {
@@ -421,14 +379,8 @@ func setupState(v6 bool, args ...string) (*pluginState, error) {
 	return s, nil
 }
 
-// watch reloads the mapping file on every event fsnotify reports for it. A
-// reload that fails keeps the mapping that was already loaded, so a file
-// caught halfway through being written does not empty the server's idea of
-// the network.
-//
-// The goroutine runs until the watcher is closed, which nothing does: a
-// plugin is set up once and lives as long as the process, and the file plugin
-// watches its lease file the same way.
+// A failed reload keeps the mapping already loaded, so a file caught
+// mid-write doesn't empty the server's view. The goroutine runs until the process exits.
 func (s *pluginState) watch(v6 bool, filename string) error {
 	watcher, err := fsnotifyNewWatcher()
 	if err != nil {
@@ -450,7 +402,6 @@ func (s *pluginState) watch(v6 bool, filename string) error {
 	return nil
 }
 
-// loadFromFile reads the mapping file and swaps it in under the write lock.
 // The new map is built first, so a failed parse leaves the old one in place.
 func (s *pluginState) loadFromFile(v6 bool, filename string) error {
 	records, err := loadRecords(filename, v6)

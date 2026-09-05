@@ -13,29 +13,25 @@ import (
 	"time"
 )
 
-// maxLogLineLen bounds one log line. Lines longer than this are cut: the
-// writer keeps the head, which is where the timestamp, level and message are.
+// A longer line is cut at the head, which is where the timestamp, level and
+// message are.
 const maxLogLineLen = 512
 
-// Widths of the log columns. The prefix is wide enough for the names the
-// server logs under, such as "plugins/file".
+// The prefix column fits the names the server logs under, such as "plugins/file".
 const (
 	logTimeW   = 8
 	logLevelW  = 5
 	logPrefixW = 14
 )
 
-// logEntry is one line as it arrived, with the time we received it. Parsing
-// happens when the line is drawn, not when it lands: the ring holds far more
-// lines than the pane shows.
+// Held raw: parsing happens at draw time, and the ring keeps far more lines
+// than the pane ever shows.
 type logEntry struct {
 	at  time.Time
 	raw string
 }
 
-// logWriter turns a stream of bytes into whole lines in the model. It is what
-// LogWriter hands to the server's slog handler, so it is written to from every
-// goroutine that logs and has to hold its own lock.
+// Written to from every goroutine that logs, so it carries its own lock.
 type logWriter struct {
 	mu  sync.Mutex
 	buf []byte
@@ -43,9 +39,8 @@ type logWriter struct {
 	now func() time.Time
 }
 
-// Write splits p into lines and stores the complete ones. A partial line is
-// held until its newline arrives; a line that never ends is capped rather than
-// buffered without limit.
+// Write holds a partial line until its newline arrives, capping one that never
+// ends rather than buffering it without limit.
 func (w *logWriter) Write(p []byte) (int, error) {
 	total := len(p)
 
@@ -70,19 +65,15 @@ func (w *logWriter) Write(p []byte) (int, error) {
 	return total, nil
 }
 
-// hold appends a fragment to the partial line, ignoring whatever runs past
-// the cap.
 func (w *logWriter) hold(p []byte) {
 	if room := maxLogLineLen - len(w.buf); room > 0 {
 		w.buf = append(w.buf, p[:min(room, len(p))]...)
 	}
 }
 
-// Ensure logWriter satisfies the writer contract slog expects.
 var _ io.Writer = (*logWriter)(nil)
 
-// logFields is what a slog text-handler line says. parsed is false for a line
-// that did not look like key=value pairs, which is drawn as it came in.
+// parsed is false for a line that was not key=value shaped; it is drawn raw.
 type logFields struct {
 	at     time.Time
 	level  string
@@ -92,13 +83,8 @@ type logFields struct {
 	parsed bool
 }
 
-// parseLogLine reads a slog text-handler line such as
-//
-//	time=2026-08-19T12:09:32.986+02:00 level=INFO msg="Listen [::]:547" prefix=server
-//
-// The scanner is deliberately forgiving: anything that is not a key=value
-// pair, or a line with no message at all, is reported as unparsed and shown
-// raw instead of being dropped or half rendered.
+// Deliberately forgiving: anything not key=value shaped is reported unparsed
+// and shown raw rather than dropped or half rendered.
 func parseLogLine(raw string) logFields {
 	var (
 		f     logFields
@@ -138,7 +124,6 @@ func parseLogLine(raw string) logFields {
 	return f
 }
 
-// scanPair reads one key=value pair off the front of s.
 func scanPair(s string) (key, value, rest string, ok bool) {
 	eq := strings.IndexByte(s, '=')
 	space := strings.IndexByte(s, ' ')
@@ -152,8 +137,6 @@ func scanPair(s string) (key, value, rest string, ok bool) {
 	return s[:eq], value, s[eq+1+n:], true
 }
 
-// scanValue reads a value, which is either quoted with Go's quoting rules or
-// runs to the next space.
 func scanValue(s string) (string, int) {
 	if s == "" || s[0] != '"' {
 		if i := strings.IndexByte(s, ' '); i >= 0 {
@@ -179,8 +162,7 @@ func scanValue(s string) (string, int) {
 	return s, len(s)
 }
 
-// parseLogTime reads the handler's timestamp, returning the zero time when it
-// is in some other format. The pane then falls back to when the line arrived.
+// A zero return means the pane falls back to when the line arrived.
 func parseLogTime(v string) time.Time {
 	if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
 		return t
@@ -189,7 +171,6 @@ func parseLogTime(v string) time.Time {
 	return time.Time{}
 }
 
-// levelTag colours a log level.
 func levelTag(level string) string {
 	switch strings.ToUpper(level) {
 	case "INFO":
@@ -205,7 +186,6 @@ func levelTag(level string) string {
 	return tagPlain
 }
 
-// logLines renders the log ring, oldest first.
 func logLines(s snapshot, width int) []string {
 	if len(s.logs) == 0 {
 		return []string{newDim(width, "no log lines yet")}
@@ -219,8 +199,6 @@ func logLines(s snapshot, width int) []string {
 	return lines
 }
 
-// logLine renders one log line as time, level, prefix and message, with any
-// remaining attributes dimmed at the end.
 func logLine(e logEntry, width int) string {
 	l := newLine(width)
 

@@ -121,7 +121,6 @@ func TestFreeIPAddress(t *testing.T) {
 	_, exists := parsedRecords[hwaddr.String()]
 	assert.True(t, exists, "Record should exist before deletion")
 
-	// Now free the IP address
 	if err := pl.freeIPAddress(hwaddr.String(), record); err != nil {
 		t.Errorf("Failed to free IP address: %v", err)
 	}
@@ -175,7 +174,6 @@ func TestFreeIPAddressVerifyDeletion(t *testing.T) {
 	}
 	assert.Len(t, parsedRecords, 6, "Should have 6 records from testDBSetup")
 
-	// Delete the middle record (records[2] = "02:00:00:00:00:02" with IP 10.0.0.2)
 	hwaddrToDelete, _ := net.ParseMAC(records[2].mac)
 	recordToDelete := records[2].ip
 
@@ -192,7 +190,6 @@ func TestFreeIPAddressVerifyDeletion(t *testing.T) {
 	_, exists := parsedRecords[hwaddrToDelete.String()]
 	assert.False(t, exists, "Deleted record should not exist")
 
-	// Verify some other records still exist
 	otherMacs := []string{records[1].mac, records[3].mac}
 	for _, mac := range otherMacs {
 		_, exists := parsedRecords[mac]
@@ -201,9 +198,6 @@ func TestFreeIPAddressVerifyDeletion(t *testing.T) {
 }
 
 func TestFreeIPAddressExecutionError(t *testing.T) {
-	// This test triggers a statement execution failure using a SQLite trigger
-	// that aborts DELETE operations for records[0]
-
 	db, err := testDBSetup()
 	if err != nil {
 		t.Fatalf("Failed to set up test database: %v", err)
@@ -211,7 +205,6 @@ func TestFreeIPAddressExecutionError(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	const triggerErrorMsg = "Custom deletion prevention trigger"
-	// Create a trigger that will cause DELETE operations to fail for records[0]
 	triggerSQL := fmt.Sprintf(`
 		CREATE TRIGGER prevent_delete
 		BEFORE DELETE ON leases4
@@ -241,9 +234,8 @@ func TestFreeIPAddressExecutionError(t *testing.T) {
 	assert.Contains(t, err.Error(), triggerErrorMsg, "Error should contain trigger message")
 }
 
-// TestLoadRecordsMalformedRows covers loadRecords' validation of rows that
-// were written directly with raw SQL, bypassing saveIPAddress's guarantees
-// (mac/ip are just TEXT columns as far as SQLite is concerned).
+// Rows written directly with SQL bypass saveIPAddress's guarantees; SQLite
+// enforces no real types on TEXT columns, so malformed data can land here.
 func TestLoadRecordsMalformedRows(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -284,11 +276,8 @@ func TestLoadRecordsQueryError(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to query leases database")
 }
 
-// errRowsDriver is a minimal database/sql/driver implementation whose Rows
-// always fail iteration with a non-io.EOF error, so that we can
-// deterministically exercise loadRecords' rows.Err() branch. Real SQLite
-// query results are materialized up front, so this can't be triggered
-// through the sqlite driver itself.
+// errRowsDriver fakes iteration failure to exercise loadRecords' rows.Err()
+// branch; real sqlite materializes results up front and can't trigger it.
 type errRowsDriver struct{}
 
 func (errRowsDriver) Open(string) (driver.Conn, error) { return &errRowsConn{}, nil }
@@ -374,10 +363,8 @@ func TestValidateDBPath(t *testing.T) {
 	}
 }
 
-// TestLoadDBRejectsURIPathBeforeOpen pins where the check happens. The driver
-// reads the DSN as a URI, so "leases.db?mode=memory" would open an in-memory
-// store and lose every lease at the next restart without a word in the log.
-// A rejected path must never reach sql.Open at all.
+// The driver reads the DSN as a URI, so an unrejected "?mode=memory" path
+// would silently open an in-memory store and lose every lease on restart.
 func TestLoadDBRejectsURIPathBeforeOpen(t *testing.T) {
 	orig := sqlOpen
 	t.Cleanup(func() { sqlOpen = orig })

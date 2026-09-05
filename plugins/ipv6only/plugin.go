@@ -6,16 +6,9 @@
 // preferred option (RFC 8925) to DHCPv4 clients.
 package ipv6only
 
-// This plugin implements RFC8925: if the client has requested the
-// IPv6-Only Preferred option, then add the option response and then
-// terminate processing immediately.
-//
-// This module should be invoked *before* any IP address
-// allocation has been done, so that the yiaddr is 0.0.0.0 and
-// no pool addresses are consumed for compatible clients.
-//
-// The optional argument is the V6ONLY_WAIT configuration variable,
-// described in RFC8925 section 3.2.
+// Place this before any address allocation, so yiaddr stays 0.0.0.0 and no
+// pool addresses are consumed for compatible clients. The optional argument
+// is V6ONLY_WAIT, RFC 8925 section 3.2.
 
 import (
 	"errors"
@@ -36,7 +29,6 @@ var Plugin = plugins.Plugin{
 	Setup4: setup4,
 }
 
-// pluginState holds the configuration of an instance of the ipv6only plugin.
 type pluginState struct {
 	v6onlyWait time.Duration
 }

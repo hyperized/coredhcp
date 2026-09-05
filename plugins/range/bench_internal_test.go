@@ -16,9 +16,8 @@ import (
 	"github.com/coredhcp/coredhcp/plugins/allocators/bitmap"
 )
 
-// benchMACs pregenerates a large batch of distinct hardware addresses so
-// BenchmarkHandler4NewLease can hand out a fresh one per iteration and the
-// in-memory lease map genuinely grows instead of staying warm.
+// benchMACs gives each iteration a fresh MAC so the lease map keeps growing
+// instead of staying warm.
 func benchMACs() []net.HardwareAddr {
 	const n = 200_000
 	macs := make([]net.HardwareAddr, n)
@@ -28,17 +27,11 @@ func benchMACs() []net.HardwareAddr {
 	return macs
 }
 
-// BenchmarkHandler4NewLease drives the new-allocation path of Handler4 with
-// a fresh MAC every call: allocator lookup, sqlite insert, and the in-memory
-// map write. The sqlite write goes to a real temp-dir file, so it's part of
-// the honest per-lease cost being measured.
 func BenchmarkHandler4NewLease(b *testing.B) {
 	b.ReportAllocs()
 
-	// Handler4 logs one line per request at the default Info level;
-	// silencing the console isolates the allocator/sqlite cost from
-	// terminal I/O. The sqlite writes themselves still go to a real
-	// temp-dir file below, so that part of the cost stays honest.
+	// Handler4 logs at Info level per request; silence it so terminal I/O
+	// doesn't skew the timed allocator/sqlite cost.
 	logger.WithNoStdOutErr()
 
 	db, err := loadDB(filepath.Join(b.TempDir(), "leases.db"))
@@ -69,9 +62,6 @@ func BenchmarkHandler4NewLease(b *testing.B) {
 	}
 }
 
-// BenchmarkHandler4Renewal drives the renewal path of Handler4 with the same
-// MAC on every call, including the sqlite update that persists the extended
-// lease each time.
 func BenchmarkHandler4Renewal(b *testing.B) {
 	b.ReportAllocs()
 	logger.WithNoStdOutErr()

@@ -2,11 +2,8 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// This allocator only returns prefixes of a single size
-// This is much simpler to implement (reduces the problem to an equivalent of
-// single ip allocations), probably makes sense in cases where the available
-// range is much larger than the expected number of clients. Also is what KEA
-// does so at least it's not worse than that
+// Prefixes come out at a single fixed size, which reduces the problem to
+// single-address allocation. KEA does the same.
 
 // Package bitmap provides bitmap-backed allocators for IPv4 addresses and
 // IPv6 prefixes.
@@ -27,9 +24,8 @@ import (
 
 var log = logger.GetLogger("plugins/allocators/bitmap")
 
-// Allocator is a prefix allocator allocating in chunks of a fixed size
-// regardless of the size requested by the client.
-// It consumes an amount of memory proportional to the total amount of available prefixes
+// Allocator hands out fixed-size chunks whatever the client asks for, and
+// costs memory proportional to the number of prefixes in the pool.
 type Allocator struct {
 	containing net.IPNet
 	page       int
@@ -48,7 +44,7 @@ func (a *Allocator) toIndex(base net.IP) (uint, error) {
 }
 
 func (a *Allocator) toPrefix(idx uint) (net.IP, error) {
-	// page is a prefix length: non-negative and at most 128, set at construction.
+	// page is a prefix length fixed at construction: 0 <= page <= 128.
 	return allocators.AddPrefixes(a.containing.IP, uint64(idx), uint64(a.page)) //nolint:gosec // see above
 }
 
@@ -56,14 +52,12 @@ func (a *Allocator) toPrefix(idx uint) (net.IP, error) {
 // min(maxsize, hint.size)
 func (a *Allocator) Allocate(hint net.IPNet) (ret net.IPNet, err error) {
 
-	// Ensure size is max(maxsize, hint.size)
 	reqSize, hintErr := hint.Mask.Size()
 	if reqSize < a.page || hintErr != 128 {
 		reqSize = a.page
 	}
 	ret.Mask = net.CIDRMask(reqSize, 128)
 
-	// Try to allocate the requested prefix
 	a.l.Lock()
 	defer a.l.Unlock()
 	if hint.IP.To16() != nil && a.containing.Contains(hint.IP) {
@@ -75,7 +69,6 @@ func (a *Allocator) Allocate(hint net.IPNet) (ret net.IPNet, err error) {
 		}
 	}
 
-	// Find a free prefix
 	next, ok := a.bitmap.NextClear(0)
 	if !ok {
 		err = allocators.ErrNoAddrAvail
@@ -84,7 +77,7 @@ func (a *Allocator) Allocate(hint net.IPNet) (ret net.IPNet, err error) {
 	a.bitmap.Set(next)
 	ret.IP, err = a.toPrefix(next)
 	if err != nil {
-		// This violates the assumption that every index in the bitmap maps back to a valid prefix
+		// Breaks the invariant that every bitmap index maps to a valid prefix.
 		err = fmt.Errorf("BUG: could not get prefix from allocation: %w", err)
 		a.bitmap.Clear(next)
 	}
@@ -108,8 +101,7 @@ func (a *Allocator) Free(prefix net.IPNet) error {
 	return nil
 }
 
-// NewBitmapAllocator creates a new allocator, allocating /`size` prefixes
-// carved out of the given `pool` prefix
+// NewBitmapAllocator hands out /size prefixes carved out of pool.
 func NewBitmapAllocator(pool net.IPNet, size int) (*Allocator, error) {
 
 	poolSize, _ := pool.Mask.Size()
@@ -124,8 +116,7 @@ func NewBitmapAllocator(pool net.IPNet, size int) (*Allocator, error) {
 		log.Warningln("Using a pool of more than 2^32 elements may result in large memory consumption")
 	}
 
-	// A bitset can always hold 1<<allocOrder items here: Cap() is the max
-	// uint, and allocOrder was bounded below strconv.IntSize above.
+	// 1<<allocOrder always fits: allocOrder was bounded above by strconv.IntSize.
 
 	alloc := Allocator{
 		containing: pool,

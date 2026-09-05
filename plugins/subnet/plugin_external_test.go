@@ -81,8 +81,7 @@ func TestSetup6Ctx(t *testing.T) {
 	})
 }
 
-// withinRange asserts that ip falls inside [start, end], inclusive, treating
-// all three as IPv4 addresses.
+// Treats all three addresses as IPv4.
 func withinRange(t *testing.T, ip net.IP, start, end string) {
 	t.Helper()
 	addr, ok := netip.AddrFromSlice(ip.To4())
@@ -93,9 +92,6 @@ func withinRange(t *testing.T, ip net.IP, start, end string) {
 		"%s is not within %s-%s", ip, start, end)
 }
 
-// TestEndToEndDHCPv4TwoSubnets proves that each configured subnet gets its
-// own range instance rather than sharing one: a request relayed through each
-// subnet's gateway must be allocated from that subnet's own pool.
 func TestEndToEndDHCPv4TwoSubnets(t *testing.T) {
 	officeDB := filepath.Join(t.TempDir(), "office.sqlite3")
 	guestDB := filepath.Join(t.TempDir(), "guest.sqlite3")
@@ -142,8 +138,6 @@ func TestEndToEndDHCPv4TwoSubnets(t *testing.T) {
 	withinRange(t, got2.YourIPAddr, "10.0.2.100", "10.0.2.200")
 }
 
-// TestEndToEndDHCPv6PrefixDelegation covers a subnet matched by interface
-// that delegates to its own prefix pool and carries its configured resolver.
 func TestEndToEndDHCPv6PrefixDelegation(t *testing.T) {
 	body := "subnets:\n" +
 		"  - name: v6\n" +

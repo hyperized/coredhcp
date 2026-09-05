@@ -23,31 +23,10 @@
 //	max-prefixes:<count>   how many delegations one client may hold at a
 //	                       time. Defaults to 4.
 //
-// Delegations used to be handed out and never taken back. The expiry was
-// written and pushed out on renewal, but nothing read it and the allocator was
-// never asked to free anything, so a pool of 65536 /64s served 70000 clients
-// and then served nobody, with the lease map still holding every client that
-// had ever asked. Prefixes now go back to the pool from two places: the
-// background sweeper, and the request path for the client in front of us.
-//
-// # What one packet may cost
-//
-// Nothing in DHCPv6 authenticates a client, so the work and the addresses one
-// datagram can claim are all capped.
-//
-// A message is answered for at most maxIAPDsPerMessage IA_PD options. Every
-// IA_PD in a message used to be served: a 146-byte SOLICIT carrying eight of
-// them emptied a /62 pool of four /64s, and roughly 4096 fit in a full
-// datagram, at which point the reply grew too large to send and the sender
-// paid nothing at all.
-//
-// One client, meaning one DUID, holds at most max-prefixes delegations. An
-// IA_PD that would take it past that is answered with NoPrefixAvail rather
-// than served, which is the same answer an exhausted pool gives.
-//
-// A client DUID longer than RFC 8415 §11.1 allows is dropped, since the lease
-// map is keyed by the DUID's wire form and would otherwise grow by whatever a
-// sender cared to put in the option.
+// Nothing in DHCPv6 authenticates a client, so what one datagram can claim is
+// capped throughout: at most maxIAPDsPerMessage IA_PD options are answered,
+// one DUID holds at most max-prefixes delegations, and a DUID longer than RFC
+// 8415 §11.1 allows is dropped rather than used as a lease-map key.
 package prefix
 
 import (
@@ -81,40 +60,28 @@ var Plugin = plugins.Plugin{
 }
 
 const (
-	// sweepArg names the optional argument that overrides the background sweep
-	// interval, e.g. "sweep:5m".
 	sweepArg = "sweep"
 
-	// maxPrefixesArg names the optional argument that overrides how many
-	// delegations one client may hold, e.g. "max-prefixes:8".
 	maxPrefixesArg = "max-prefixes"
 
-	// optionSyntax spells the named arguments out for error messages.
 	optionSyntax = sweepArg + ":<duration> or " + maxPrefixesArg + ":<count>"
 
-	// defaultLeaseDuration is what a delegation lasts when the config does not
-	// say. It is the value this plugin hardcoded before the argument existed.
 	defaultLeaseDuration = time.Hour
 
-	// minSweepInterval floors the derived sweep interval, so a short lease
-	// duration does not turn the sweeper into a hot loop taking the plugin
-	// lock.
+	// A short lease duration must not turn the sweeper into a hot loop taking
+	// the plugin lock.
 	minSweepInterval = 30 * time.Second
 
-	// defaultMaxPrefixes is how many delegations one client may hold unless
-	// the config says otherwise. A home router asks for one, and four leaves
-	// room for a site that genuinely subnets behind itself without letting a
-	// single DUID walk off with a pool.
+	// A home router asks for one; four leaves room for a site that genuinely
+	// subnets behind itself without letting one DUID walk off with the pool.
 	defaultMaxPrefixes = 4
 
-	// maxIAPDsPerMessage caps how many IA_PD options one message is answered
-	// for. Eight is more than any client legitimately asks for in one go, and
-	// low enough that the reply still fits in a datagram.
+	// More IA_PDs than any client legitimately asks for at once, and few
+	// enough that the reply still fits in a datagram.
 	maxIAPDsPerMessage = 8
 
-	// maxDUIDLength is the longest client DUID this plugin will key its lease
-	// map on: the 128 octets RFC 8415 §11.1 allows, plus the two-octet type
-	// code that the wire form recordKey uses carries in front of them.
+	// The 128 octets RFC 8415 §11.1 allows, plus the two-octet type code the
+	// wire form recordKey keys on carries in front of them.
 	maxDUIDLength = 130
 )
 
@@ -123,54 +90,38 @@ type lease struct {
 	Expire time.Time
 }
 
-// expired reports whether the lease had already lapsed at t.
 func (l lease) expired(t time.Time) bool {
 	return !l.Expire.After(t)
 }
 
-// pluginState holds the pool and the lease set of a single setup6 instance of
-// the plugin. Two prefix plugins in the same config carve from their own pool
-// and keep their own leases.
+// Two prefix plugins in one config carve from their own pool and keep their
+// own leases.
 type pluginState struct {
-	// Mutex here is the simplest implementation fit for purpose.
-	// We can revisit for perf when we move lease management to separate plugins
 	sync.Mutex
-	// Records has a string'd []byte as key, because []byte can't be a key itself
-	// Since it's not valid utf-8 we can't use any other string function though
+	// Keyed by the DUID's wire form as a string. It is not valid UTF-8, so no
+	// string function may be used on it.
 	Records   map[string][]lease
 	allocator allocators.Allocator
 
-	// leaseDuration is how long a delegation lasts, sweepInterval how often
-	// lapsed ones are reclaimed in the background, and maxPrefixes how many
-	// delegations one client may hold. All three are set during setup and
-	// read-only afterwards.
+	// Set during setup, read-only afterwards.
 	leaseDuration time.Duration
 	sweepInterval time.Duration
 	maxPrefixes   int
 
-	// name identifies this instance to a lease reader, poolRange spells the
-	// pool out for one, and poolBlocks is how many prefixes of the
-	// allocation size the pool holds. All three are built during setup and
-	// read-only afterwards; see leases.go.
 	name       string
 	poolRange  string
 	poolBlocks int
 
-	// now is the clock seam. It is written once during setup, before the
-	// sweeper goroutine starts, and only read afterwards. Use timeNow rather
-	// than calling it directly: a zero-valued pluginState leaves it nil.
+	// Clock seam. Read it through timeNow: a zero-valued pluginState leaves
+	// it nil.
 	now func() time.Time
 
-	// stop closes to shut the background sweeper down; done closes once it has
-	// exited. The server never stops a plugin, so nothing closes stop in
-	// production. It exists so tests can reap the goroutine deterministically
-	// instead of leaking one per test.
+	// Nothing in the server stops a plugin, so these exist only so tests can
+	// reap the sweeper instead of leaking one goroutine per test.
 	stop chan struct{}
 	done chan struct{}
 }
 
-// timeNow reads the clock through the seam, falling back to time.Now so a
-// zero-valued pluginState still works.
 func (h *pluginState) timeNow() time.Time {
 	if h.now == nil {
 		return time.Now()
@@ -178,8 +129,7 @@ func (h *pluginState) timeNow() time.Time {
 	return h.now()
 }
 
-// samePrefix returns true if both prefixes are defined and equal
-// The empty prefix is equal to nothing, not even itself
+// The empty prefix is equal to nothing, not even itself.
 func samePrefix(a, b *net.IPNet) bool {
 	if a == nil || b == nil {
 		return false
@@ -187,12 +137,11 @@ func samePrefix(a, b *net.IPNet) bool {
 	return a.IP.Equal(b.IP) && bytes.Equal(a.Mask, b.Mask)
 }
 
-// recordKey computes the key for the Records array from the client ID
 func recordKey(d dhcpv6.DUID) string {
 	return string(d.ToBytes())
 }
 
-// Handle processes DHCPv6 packets for the prefix plugin for a given allocator/leaseset
+// Handle processes DHCPv6 packets for the prefix plugin.
 func (h *pluginState) Handle(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	msg, err := req.GetInnerMessage()
 	if err != nil {
@@ -215,14 +164,11 @@ func (h *pluginState) Handle(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 		h.handleRelease(client, msg, resp)
 		return resp, false
 	case dhcpv6.MessageTypeDecline:
-		// RFC 8415 §18.3.8: DECLINE reports an address the client found
-		// already in use, and applies to IA_NA and IA_TA only. There is
-		// nothing for a delegating router to do with one, so the message
-		// passes to the next plugin without an IA_PD.
+		// RFC 8415 §18.3.8: DECLINE applies to IA_NA and IA_TA only, so a
+		// delegating router has nothing to do with it.
 		return resp, false
 	}
 
-	// Each request IA_PD requires an IA_PD response
 	for _, iapd := range iapdsToAnswer(msg) {
 		resp.AddOption(h.respondToIAPD(client, iapd))
 	}
@@ -230,10 +176,8 @@ func (h *pluginState) Handle(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	return resp, false
 }
 
-// iapdsToAnswer returns the IA_PD options of msg that will be answered, at
-// most maxIAPDsPerMessage of them. The rest are ignored rather than answered
-// with a status, because the point is to keep the reply from growing with
-// whatever the sender put in the request.
+// The surplus is ignored rather than answered with a status: the point is to
+// keep the reply from growing with whatever the sender put in the request.
 func iapdsToAnswer(msg *dhcpv6.Message) []*dhcpv6.OptIAPD {
 	iapds := msg.Options.IAPD()
 	if len(iapds) <= maxIAPDsPerMessage {
@@ -243,11 +187,8 @@ func iapdsToAnswer(msg *dhcpv6.Message) []*dhcpv6.OptIAPD {
 	return iapds[:maxIAPDsPerMessage]
 }
 
-// handleRelease frees the prefixes a RELEASE lists and answers per RFC 8415
-// §18.3.7: every IA_PD in the message gets one back carrying a Status Code,
-// and the Reply itself carries Success. The response is then handed on rather
-// than ending the chain, because a lease hook or a DDNS plugin further down
-// still has to see the release.
+// RFC 8415 §18.3.7: every IA_PD in the message gets one back carrying a Status
+// Code, and the Reply itself carries Success.
 func (h *pluginState) handleRelease(client dhcpv6.DUID, msg *dhcpv6.Message, resp dhcpv6.DHCPv6) {
 	h.Lock()
 	defer h.Unlock()
@@ -262,19 +203,11 @@ func (h *pluginState) handleRelease(client dhcpv6.DUID, msg *dhcpv6.Message, res
 	})
 }
 
-// releaseIAPD frees the prefixes of one released IA_PD and builds the answer
-// for it.
-//
-// Leases carry no IAID of their own, so "do we have a binding for this IA_PD"
-// can only be answered by whether any prefix it lists is one this client
-// holds. An IA_PD listing no prefixes at all therefore also gets NoBinding,
-// which is the answer that stops a client retrying. The caller must hold h's
-// lock.
-//
-// NoBinding carries no message text. It is the one status a sender can ask
-// for over and over, by releasing prefixes it never held, and RFC 8415 §21.13
-// leaves the text optional. Text there made the reply grow to three times the
-// request, which is a reflector anyone on the segment can point somewhere.
+// Leases carry no IAID, so a binding exists only if the IA_PD lists a prefix
+// this client holds; an empty IA_PD therefore also gets NoBinding. That status
+// is left textless (RFC 8415 §21.13 makes text optional) because a sender can
+// ask for it endlessly, and text turns the reply into a reflector. Caller
+// holds h's lock.
 func (h *pluginState) releaseIAPD(key string, iapd *dhcpv6.OptIAPD) *dhcpv6.OptIAPD {
 	answer := &dhcpv6.OptIAPD{IaId: iapd.IaId}
 	if h.releasePrefixes(key, iapd.Options.Prefixes()) == 0 {
@@ -289,15 +222,12 @@ func (h *pluginState) releaseIAPD(key string, iapd *dhcpv6.OptIAPD) *dhcpv6.OptI
 	return answer
 }
 
-// releasePrefixes frees whichever of the listed prefixes this client actually
-// holds and reports how many went back to the pool. A prefix the client does
-// not hold is left alone: a release names the sender's own bindings, and must
-// not free somebody else's. The caller must hold h's lock.
+// A prefix the client does not hold is left alone: a release names the
+// sender's own bindings, never somebody else's. Caller holds h's lock.
 func (h *pluginState) releasePrefixes(key string, released []*dhcpv6.OptIAPrefix) int {
 	known := h.Records[key]
-	// Filtering into known[:0] reuses the backing array. It only ever writes
-	// at an index at or below the one being read, so the entries still to be
-	// visited are never clobbered.
+	// Filtering into known[:0] reuses the backing array: it only ever writes
+	// at or below the index being read, so nothing unvisited is clobbered.
 	live, freed := known[:0], 0
 	for _, l := range known {
 		if !listed(released, l) {
@@ -311,7 +241,6 @@ func (h *pluginState) releasePrefixes(key string, released []*dhcpv6.OptIAPrefix
 	return freed
 }
 
-// listed reports whether one of the released prefixes names lease l.
 func listed(released []*dhcpv6.OptIAPrefix, l lease) bool {
 	for _, p := range released {
 		if samePrefix(p.Prefix, &l.Prefix) {
@@ -321,19 +250,16 @@ func listed(released []*dhcpv6.OptIAPrefix, l lease) bool {
 	return false
 }
 
-// free returns a prefix to the pool. A failure is logged rather than
-// propagated: nothing in the exchange can act on it, and the alternative is
-// holding on to a lease we have already stopped honouring.
+// A failure is logged rather than propagated: nothing in the exchange can act
+// on it, and the alternative is keeping a lease we no longer honour.
 func (h *pluginState) free(l lease) {
 	if err := h.allocator.Free(l.Prefix); err != nil {
 		log.Errorf("Could not return prefix %s to the pool: %v", &l.Prefix, err)
 	}
 }
 
-// store writes a client's lease set back, dropping the map entry when the
-// client is left holding nothing. Leaving empty slices behind would let a
-// population of one-off clients grow the map without bound. The caller must
-// hold h's lock.
+// The map entry goes when a client holds nothing: empty slices left behind
+// would let one-off clients grow the map without bound. Caller holds h's lock.
 func (h *pluginState) store(key string, leases []lease) {
 	if len(leases) == 0 {
 		delete(h.Records, key)
@@ -342,13 +268,8 @@ func (h *pluginState) store(key string, leases []lease) {
 	h.Records[key] = leases
 }
 
-// dropExpired returns a client's live leases and the prefixes of the ones that
-// had lapsed at t, which it frees on the way through.
-//
-// The lapsed prefixes are worth carrying for the length of one exchange: a
-// client that comes back late gets its old prefix hinted back at the allocator
-// and keeps it as long as nobody else took it, which is what range's
-// reallocateExpired does for addresses. The caller must hold h's lock.
+// The lapsed prefixes are carried for the length of one exchange so a client
+// coming back late can be hinted its old prefix. Caller holds h's lock.
 func (h *pluginState) dropExpired(key string, t time.Time) ([]lease, []net.IPNet) {
 	known := h.Records[key]
 	// See releasePrefixes for why filtering into known[:0] is safe.
@@ -365,9 +286,7 @@ func (h *pluginState) dropExpired(key string, t time.Time) ([]lease, []net.IPNet
 	return live, recovered
 }
 
-// sweepExpired frees every lapsed delegation, forgets the clients left holding
-// nothing, and reports how many prefixes went back to the pool. The caller
-// must hold h's lock.
+// The caller must hold h's lock.
 func (h *pluginState) sweepExpired(t time.Time) int {
 	var freed int
 	for key := range h.Records {
@@ -378,7 +297,6 @@ func (h *pluginState) sweepExpired(t time.Time) int {
 	return freed
 }
 
-// sweepOnce takes the lock and reclaims every lapsed delegation.
 func (h *pluginState) sweepOnce() {
 	h.Lock()
 	defer h.Unlock()
@@ -387,9 +305,7 @@ func (h *pluginState) sweepOnce() {
 	}
 }
 
-// startSweeper runs the background reclamation loop. It lives for the lifetime
-// of the process, since plugins are never stopped or unregistered, but it
-// still honours h.stop so tests can shut it down.
+// The loop lives for the lifetime of the process; h.stop is there for tests.
 func (h *pluginState) startSweeper(interval time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -406,17 +322,14 @@ func (h *pluginState) startSweeper(interval time.Duration) {
 	}()
 }
 
-// stopSweeper shuts the background sweeper down and waits for it to exit.
-// Nothing in the server calls this; it exists so a test does not leave a
-// goroutine running after it finishes.
+// Nothing in the server calls this; it keeps tests from leaking a goroutine.
 func (h *pluginState) stopSweeper() {
 	close(h.stop)
 	<-h.done
 }
 
-// respondToIAPD builds the IA_PD option answering one requested IA_PD. A request
-// we could not satisfy at all still gets an IA_PD back, carrying a status code
-// instead of prefixes.
+// A request we could not satisfy at all still gets an IA_PD back, carrying a
+// status code instead of prefixes.
 func (h *pluginState) respondToIAPD(client dhcpv6.DUID, iapd *dhcpv6.OptIAPD) *dhcpv6.OptIAPD {
 	iapdResp := &dhcpv6.OptIAPD{
 		IaId: iapd.IaId,
@@ -434,13 +347,10 @@ func (h *pluginState) respondToIAPD(client dhcpv6.DUID, iapd *dhcpv6.OptIAPD) *d
 	return iapdResp
 }
 
-// requestedPrefixes returns the prefixes the client hints at in one IA_PD.
-// An IA_PD without any IAPrefix is still a valid request (just unspecified) and
-// we must attempt to allocate a prefix for it, so it gets a single empty hint,
-// which is equivalent to no hint. A hint whose prefix is absent on the wire
-// (the decoder returns nil for a zero prefix-length) is normalised to the same
-// empty prefix here, in one place: letting nil flow deeper used to crash the
-// handler as soon as the client already held a lease.
+// An IA_PD without any IAPrefix is still a valid request, so it gets one empty
+// hint. Wire-level nil prefixes (the decoder returns nil for a zero prefix
+// length) are normalised to the same empty prefix here, in one place, so no
+// nil reaches the matching passes.
 func requestedPrefixes(iapd *dhcpv6.OptIAPD) []*dhcpv6.OptIAPrefix {
 	hints := iapd.Options.Prefixes()
 	if len(hints) == 0 {
@@ -454,16 +364,10 @@ func requestedPrefixes(iapd *dhcpv6.OptIAPD) []*dhcpv6.OptIAPrefix {
 	return hints
 }
 
-// pdExchange is the working state of one IA_PD reconciliation: the requests
-// (prefix hints asked by the client), what is on offer (the leases we already
-// hold for it), the bookkeeping of what has been matched to what, and the
-// response being filled in.
-//
 // satisfied is indexed by position in hints, givenOut by position in
-// knownLeases. knownLeases aliases the slice held in pluginState.Records, so
-// pushing out an expiry in place is what renews a lease. recovered holds the
-// prefixes this client held until its leases lapsed, offered back to the
-// allocator before any unrelated block is.
+// knownLeases, which aliases the slice in pluginState.Records -- pushing an
+// expiry out in place is what renews a lease. recovered holds prefixes this
+// client held until they lapsed, offered back before any unrelated block.
 type pdExchange struct {
 	client        dhcpv6.DUID
 	iaid          [4]byte
@@ -477,23 +381,13 @@ type pdExchange struct {
 	resp          *dhcpv6.OptIAPD
 }
 
-// reconcile matches the hints of one IA_PD against the leases we already hold
-// for this client, plus new blocks from the pool, and adds every prefix the
-// client ends up with to iapdResp.
-//
-// The matching is, for now, a set of heuristics, run as three passes in order of
-// decreasing confidence. The whole thing runs under the lock: the passes renew
-// leases in place and may append to the client's record.
-//
-// Lapsed leases are dropped before any of it. A lease past its expiry must
-// never be renewed and handed back as if it were valid; it goes back to the
-// pool first and is then re-allocated like any other request, hinting at the
-// prefix the client used to have.
+// Three heuristic passes in order of decreasing confidence, all under the lock
+// because they renew leases in place and may append to the client's record.
+// Lapsed leases are dropped first: one past its expiry must never be renewed
+// and handed back as valid, so it goes to the pool and is re-allocated by hint.
 func (h *pluginState) reconcile(client dhcpv6.DUID, iapd, iapdResp *dhcpv6.OptIAPD) {
 	hints := requestedPrefixes(iapd)
 
-	// A possible simple optimization here would be to be able to lock single map values
-	// individually instead of the whole map, since we lock for some amount of time
 	h.Lock()
 	defer h.Unlock()
 
@@ -519,11 +413,8 @@ func (h *pluginState) reconcile(client dhcpv6.DUID, iapd, iapdResp *dhcpv6.OptIA
 	h.store(key, h.allocateForUnsatisfied(e))
 }
 
-// renewExactMatches extends the leases that exactly match a hint and hands them
-// straight back.
-//
-// This is the safest heuristic, if the lease matches exactly we know we aren't
-// missing assigning it to a better candidate request.
+// The safest heuristic: an exact match cannot be a better fit for some other
+// hint in the same request.
 func (e *pdExchange) renewExactMatches() {
 	for hintIdx, hint := range e.hints {
 		for leaseIdx := range e.knownLeases {
@@ -534,12 +425,8 @@ func (e *pdExchange) renewExactMatches() {
 	}
 }
 
-// giveOutRemaining satisfies the hints that named no particular prefix with the
-// leases this client already holds and that no hint has claimed yet.
-//
-// A hint is never taken out of the running once it has been served, so one
-// unqualified hint can absorb every remaining lease. That is the historical
-// behaviour, pinned by TestHandleZeroIPHintLengthMismatchAllocatesNew.
+// A hint is never taken out of the running once served, so one unqualified
+// hint can absorb every remaining lease.
 func (e *pdExchange) giveOutRemaining() {
 	for hintIdx, hint := range e.hints {
 		if !e.wantsAnyPrefix(hintIdx, hint) {
@@ -554,13 +441,9 @@ func (e *pdExchange) giveOutRemaining() {
 	}
 }
 
-// wantsAnyPrefix reports whether a hint still needs a prefix and takes whichever
-// one we care to give it, which a client says by hinting at the all-zeroes
-// address.
-//
-// The empty hint we synthesise for an IA_PD that carried no IAPrefix at all has
-// no address rather than the zero address, so it does not qualify here and falls
-// through to a fresh allocation.
+// A client says "any prefix" by hinting at the all-zeroes address. The empty
+// hint synthesised for an IA_PD with no IAPrefix has no address at all, so it
+// does not qualify and falls through to a fresh allocation.
 func (e *pdExchange) wantsAnyPrefix(hintIdx int, hint *dhcpv6.OptIAPrefix) bool {
 	if e.satisfied.Test(uint(hintIdx)) {
 		return false
@@ -568,11 +451,8 @@ func (e *pdExchange) wantsAnyPrefix(hintIdx int, hint *dhcpv6.OptIAPrefix) bool 
 	return hint.Prefix.IP.Equal(net.IPv6zero)
 }
 
-// lengthMatches reports whether lease l has the prefix length hint asked for.
 // A hint that named no length takes any lease. hint.Prefix is never nil here:
 // requestedPrefixes normalises wire-level nil prefixes at the edge.
-//
-// This is a bad heuristic depending on the allocator behavior, to be improved.
 func lengthMatches(hint *dhcpv6.OptIAPrefix, l lease) bool {
 	hintPrefixLen, _ := hint.Prefix.Mask.Size()
 	if hintPrefixLen == 0 {
@@ -582,9 +462,8 @@ func lengthMatches(hint *dhcpv6.OptIAPrefix, l lease) bool {
 	return hintPrefixLen == leasePrefixLen
 }
 
-// grant hands the lease at leaseIdx to the hint at hintIdx: it pushes the expiry
-// out to a full lease duration, never shortening a lease that already runs
-// longer, marks both sides as accounted for, and adds the prefix to the response.
+// The expiry is pushed out to a full lease duration, never shortening a lease
+// that already runs longer.
 func (e *pdExchange) grant(hintIdx, leaseIdx int) {
 	expire := e.now.Add(e.leaseDuration)
 	if e.knownLeases[leaseIdx].Expire.Before(expire) {
@@ -595,22 +474,10 @@ func (e *pdExchange) grant(hintIdx, leaseIdx int) {
 	addPrefix(e.resp, e.knownLeases[leaseIdx], e.now)
 }
 
-// allocateForUnsatisfied carves a new prefix out of the pool for every hint no
-// existing lease could satisfy, and returns the client's full lease set.
-//
-// What is left at this point are requests with a hint we can't trivially satisfy,
-// and possibly expired leases that haven't been explicitly requested again.
-// A possible improvement here would be to try to widen existing leases, to
-// satisfy wider requests that contain an existing lease; and to try to break down
-// existing leases into smaller allocations, to satisfy requests for a subnet of an
-// existing lease. We probably don't need such complex behavior (the vast majority
-// of requests will come with an empty, or length-only hint)
-//
-// The accumulator starts from the known leases so that a lease allocated for an
-// earlier hint of the same request survives (7f79c14). Its length is also what
-// the per-client limit is measured against: leases already held count towards
-// it, which is what makes the limit hold across several IA_PDs in one message
-// and across several messages.
+// The accumulator starts from the known leases so a lease allocated for an
+// earlier hint of the same request survives, and so its length measures the
+// per-client limit: prefixes already held count towards it, which is what
+// makes the limit hold across several IA_PDs and several messages.
 func (h *pluginState) allocateForUnsatisfied(e *pdExchange) []lease {
 	newLeases := e.knownLeases
 
@@ -636,10 +503,8 @@ func (h *pluginState) allocateForUnsatisfied(e *pdExchange) []lease {
 	return newLeases
 }
 
-// allocationHint decides what to ask the allocator for. A hint the client
-// actually named wins. Otherwise a prefix this client held until its lease
-// lapsed is offered back, so a client returning after a gap keeps the prefix it
-// had as long as nobody else took it in the meantime.
+// A hint the client actually named wins; otherwise a prefix it held until its
+// lease lapsed is offered back, so a returning client keeps what it had.
 func (e *pdExchange) allocationHint(hint *dhcpv6.OptIAPrefix) net.IPNet {
 	if len(e.recovered) == 0 || !unspecified(hint) {
 		return *hint.Prefix
@@ -649,9 +514,8 @@ func (e *pdExchange) allocationHint(hint *dhcpv6.OptIAPrefix) net.IPNet {
 	return recovered
 }
 
-// unspecified reports whether a hint asks for nothing in particular: neither an
-// address nor a length. A hint that named a length keeps it, so a returning
-// client is never handed back a prefix of a size it did not ask for.
+// A hint that named a length keeps it, so a returning client is never handed
+// back a prefix of a size it did not ask for.
 func unspecified(hint *dhcpv6.OptIAPrefix) bool {
 	if length, _ := hint.Prefix.Mask.Size(); length != 0 {
 		return false
@@ -659,9 +523,8 @@ func unspecified(hint *dhcpv6.OptIAPrefix) bool {
 	return len(hint.Prefix.IP) == 0 || hint.Prefix.IP.Equal(net.IPv6zero)
 }
 
-// newLease carves a prefix out of the pool for a single hint. It reports false
-// when the allocator has nothing to offer, which is not fatal to the request as
-// a whole: the other hints may still be satisfiable.
+// False is not fatal to the request as a whole: the other hints may still be
+// satisfiable.
 func (h *pluginState) newLease(hint net.IPNet, now time.Time, leaseDuration time.Duration) (lease, bool) {
 	allocated, err := h.allocator.Allocate(hint)
 	if err != nil {
@@ -695,9 +558,8 @@ func dup(src *net.IPNet) (dst *net.IPNet) {
 	return dst
 }
 
-// defaultSweepInterval derives the sweep period from the lease duration: half a
-// lease, so a prefix is back in the pool well within one lease of lapsing,
-// floored at minSweepInterval.
+// Half a lease, so a prefix is back in the pool well within one lease of
+// lapsing.
 func defaultSweepInterval(leaseDuration time.Duration) time.Duration {
 	if half := leaseDuration / 2; half > minSweepInterval {
 		return half
@@ -705,11 +567,8 @@ func defaultSweepInterval(leaseDuration time.Duration) time.Duration {
 	return minSweepInterval
 }
 
-// parseLeaseDuration reads the optional third positional argument and returns
-// it along with whatever came after it. The lease duration is the last
-// positional argument and everything after it is named key:value, so an
-// argument carrying a colon means the lease duration was left out. A duration
-// never contains one.
+// The lease duration is the last positional argument and everything after it
+// is named key:value, so an argument carrying a colon means it was left out.
 func parseLeaseDuration(extra []string) (time.Duration, []string, error) {
 	if len(extra) == 0 || strings.Contains(extra[0], ":") {
 		return defaultLeaseDuration, extra, nil
@@ -724,24 +583,17 @@ func parseLeaseDuration(extra []string) (time.Duration, []string, error) {
 	return duration, extra[1:], nil
 }
 
-// pluginOptions holds the settings taken from the named key:value arguments
-// that may follow the positional ones.
 type pluginOptions struct {
 	sweepInterval time.Duration
 	maxPrefixes   int
 }
 
-// optionParsers dispatches on the argument key. parseOptions handles ordering,
-// duplicates and unknown keys for every entry here, so accepting another
-// argument is one line plus its parser.
 var optionParsers = map[string]func(*pluginOptions, string) error{
 	sweepArg:       parseSweepInterval,
 	maxPrefixesArg: parseMaxPrefixes,
 }
 
-// parseOptions reads the named key:value arguments, which may come in any
-// order. extra holds whatever followed the lease duration. An unknown key, or
-// a key given twice, is an error rather than something quietly ignored: a typo
+// An unknown or repeated key is an error rather than quietly ignored: a typo
 // must not leave the operator with a default they believe they overrode.
 func parseOptions(leaseDuration time.Duration, extra []string) (pluginOptions, error) {
 	opts := pluginOptions{
@@ -766,7 +618,6 @@ func parseOptions(leaseDuration time.Duration, extra []string) (pluginOptions, e
 	return opts, nil
 }
 
-// parseSweepInterval reads the value of a "sweep:" argument.
 func parseSweepInterval(opts *pluginOptions, raw string) error {
 	interval, err := time.ParseDuration(raw)
 	if err != nil {
@@ -779,9 +630,8 @@ func parseSweepInterval(opts *pluginOptions, raw string) error {
 	return nil
 }
 
-// parseMaxPrefixes reads the value of a "max-prefixes:" argument. Zero is
-// refused rather than read as "no delegations at all": an operator who wants
-// that leaves the plugin out of the config.
+// Zero is refused rather than read as "no delegations at all": an operator who
+// wants that leaves the plugin out of the config.
 func parseMaxPrefixes(opts *pluginOptions, raw string) error {
 	count, err := strconv.Atoi(raw)
 	if err != nil {
@@ -794,27 +644,22 @@ func parseMaxPrefixes(opts *pluginOptions, raw string) error {
 	return nil
 }
 
-// setupPrefix builds the plugin instance and starts its background sweeper.
 func setupPrefix(args ...string) (handler.Handler6, error) {
 	h, err := newPluginState(args...)
 	if err != nil {
 		return nil, err
 	}
-	// Started only once setup has fully succeeded: a failed setup must not
-	// leave a goroutine behind sweeping a half-built plugin.
+	// Both come after everything that can fail: no goroutine sweeping a
+	// half-built plugin, no half-built instance visible to a lease reader.
 	h.startSweeper(h.sweepInterval)
-	// Registered last, once everything that could fail has succeeded: a
-	// reader must never find a half-built instance in the registry.
 	leases.Register(h)
 	log.Printf("Delegating at most %d prefix(es) per client for %s, reclaiming expired ones every %s", h.maxPrefixes, h.leaseDuration, h.sweepInterval)
 	return h.Handle, nil
 }
 
-// newPluginState validates the plugin arguments and builds a ready but idle
-// instance: no sweeper is running yet. setupPrefix starts it; tests that need
-// to own the goroutine's lifetime call this directly.
+// The instance comes back idle, with no sweeper, so tests that own the
+// goroutine's lifetime can call this directly.
 func newPluginState(args ...string) (*pluginState, error) {
-	// - prefix: 2001:db8::/48 64 1h sweep:30m
 	if len(args) < 2 {
 		return nil, errors.New("need both a subnet and an allocation max size")
 	}
@@ -823,9 +668,8 @@ func newPluginState(args ...string) (*pluginState, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid pool subnet: %w", err)
 	}
-	// Prefix delegation is DHCPv6 only. An IPv4 pool used to pass setup and
-	// then fail every allocation at runtime, because the allocator carves
-	// 128-bit prefixes out of whatever it is given.
+	// The allocator carves 128-bit prefixes out of whatever it is given, so an
+	// IPv4 pool would pass setup and fail every allocation at runtime.
 	if prefix.IP.To4() != nil {
 		return nil, fmt.Errorf("pool subnet %q is not IPv6", args[0])
 	}
@@ -844,7 +688,6 @@ func newPluginState(args ...string) (*pluginState, error) {
 		return nil, err
 	}
 
-	// TODO: select allocators based on heuristics or user configuration
 	alloc, err := bitmap.NewBitmapAllocator(*prefix, allocSize)
 	if err != nil {
 		return nil, fmt.Errorf("could not initialize prefix allocator: %w", err)

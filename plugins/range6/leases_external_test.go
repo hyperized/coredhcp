@@ -18,9 +18,7 @@ import (
 	"github.com/coredhcp/coredhcp/plugins/range6"
 )
 
-// registeredSource returns the source setup registered under name, and drops
-// it again when the test finishes so the next test does not see this
-// instance.
+// registeredSource finds the source setup registered and unregisters it on cleanup.
 func registeredSource(t *testing.T, name string) leases.Source {
 	t.Helper()
 	for _, s := range leases.Sources() {
@@ -75,9 +73,7 @@ func TestDeclinedAddressesAreReportedAsQuarantined(t *testing.T) {
 	resp, _ := exchange(t, h6, newRequest(t, dhcpv6.MessageTypeDecline, duid, newIANA(iaid1, held)))
 	require.NotNil(t, resp)
 
-	// The address is nobody's binding any more, but it is not free either: it
-	// sits in probation, and a pool report that only counted bindings would
-	// show it as available.
+	// Declined: not bound, not free; it must show as quarantined.
 	assert.Empty(t, src.Leases())
 	pool := src.Pools()[0]
 	assert.Equal(t, 0, pool.Used)
@@ -85,8 +81,7 @@ func TestDeclinedAddressesAreReportedAsQuarantined(t *testing.T) {
 	assert.Equal(t, 256, pool.Size)
 }
 
-// duidBytes renders duid the same way the plugin does internally, as the raw
-// wire bytes clientDUID reads off the packet.
+// duidBytes is the DUID in the plugin's internal key form.
 func duidBytes(t *testing.T, duid dhcpv6.DUID) []byte {
 	t.Helper()
 	req, err := dhcpv6.NewMessage(dhcpv6.WithClientID(duid))

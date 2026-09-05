@@ -50,12 +50,9 @@ type PluginConfig struct {
 	Args []string
 }
 
-// Load reads a configuration file and returns a Config object, or an error if
-// any. With no override path, it searches $XDG_CONFIG_HOME/coredhcp/,
-// $HOME/.coredhcp/ and /etc/coredhcp/, in that order, before finally trying
-// the working directory. The working directory goes last so a config file left
-// in whatever directory the server happens to be started from does not quietly
-// win over the one an operator installed.
+// Load reads the configuration file, searching the usual paths when
+// pathOverride is empty. The working directory goes last, so a config left
+// wherever the server was started cannot quietly beat the installed one.
 func Load(pathOverride string) (*Config, error) {
 	log.Print("Loading configuration")
 	c := New()
@@ -99,8 +96,7 @@ func parsePlugins(pluginList []any) ([]PluginConfig, error) {
 		if conf == nil {
 			return nil, ErrorFromString("dhcpv6: plugin #%d is not a string map", idx)
 		}
-		// make sure that only one item is specified, since it's a
-		// map name -> args
+		// Each item is a single-entry map of name -> args.
 		if len(conf) != 1 {
 			return nil, ErrorFromString("dhcpv6: exactly one plugin per item can be specified")
 		}
@@ -108,7 +104,7 @@ func parsePlugins(pluginList []any) ([]PluginConfig, error) {
 			name string
 			args []string
 		)
-		// only one item, as enforced above, so read just that
+		// Exactly one entry, as enforced above.
 		for k, v := range conf {
 			name = k
 			args = strings.Fields(cast.ToString(v))
@@ -138,16 +134,13 @@ func (c *Config) parseConfig(ver protocolVersion) error {
 		// it is valid to have no server configuration defined
 		return nil
 	}
-	// read plugin configuration
 	plugins, err := c.getPlugins(ver)
 	if err != nil {
 		return err
 	}
 	for _, p := range plugins {
-		// The arguments are where a NetBox token or a Redis password is
-		// written, and RedactArgs only recognises the shapes it knows about
-		// (see redact.go). Keep the default level to what loaded, and put the
-		// values themselves, redacted, behind debug.
+		// Arguments carry tokens and passwords, and RedactArgs is only a
+		// heuristic (see redact.go), so the values stay behind debug.
 		log.Infof("DHCPv%d: found plugin `%s` with %d args", ver, p.Name, len(p.Args))
 		log.Debugf("DHCPv%d: plugin `%s` args: %v", ver, p.Name, RedactArgs(p.Args))
 	}

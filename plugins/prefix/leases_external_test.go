@@ -15,8 +15,8 @@ import (
 	"github.com/coredhcp/coredhcp/plugins/prefix"
 )
 
-// registeredSource returns the source setup registered under name, and drops
-// it again when the test finishes so the next test does not see this instance.
+// Unregisters in Cleanup because the source registry is global and would
+// otherwise leak this instance into later tests.
 func registeredSource(t *testing.T, name string) leases.Source {
 	t.Helper()
 	for _, s := range leases.Sources() {
@@ -65,8 +65,7 @@ func TestLeasesCountPrefixesPerClient(t *testing.T) {
 	require.NoError(t, err)
 	src := registeredSource(t, "prefix 2001:db8:10::/60")
 
-	// Three IA_PDs in one message, well inside the per-client maximum: one
-	// client, three delegations, three leases.
+	// Well inside the per-client maximum, so each IA_PD gets its own lease.
 	solicitManyIAPDs(t, h, testDUID(), 3)
 
 	assert.Len(t, src.Leases(), 3)

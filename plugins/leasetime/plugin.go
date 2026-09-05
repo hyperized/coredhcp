@@ -27,7 +27,6 @@ var Plugin = plugins.Plugin{
 
 var log = logger.GetLogger("plugins/lease_time")
 
-// pluginState is the per-instance data held by the lease_time plugin.
 type pluginState struct {
 	leaseTime time.Duration
 }
@@ -40,7 +39,7 @@ func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 	if req.OpCode != dhcpv4.OpcodeBootRequest {
 		return resp, false
 	}
-	// Set lease time unless it has already been set
+	// An earlier plugin's lease time wins.
 	if !resp.Options.Has(dhcpv4.OptionIPAddressLeaseTime) {
 		resp.Options.Update(dhcpv4.OptIPAddressLeaseTime(p.leaseTime))
 	}

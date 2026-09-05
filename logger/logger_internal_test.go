@@ -20,8 +20,6 @@ import (
 // These tests reach into the package's unexported singletons (level, out,
 // base), so they must run sequentially: none of them call t.Parallel.
 
-// captureConsole swaps out.console for a buffer for the duration of the
-// test and restores the previous writer afterwards.
 func captureConsole(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	buf := &bytes.Buffer{}
@@ -37,7 +35,6 @@ func captureConsole(t *testing.T) *bytes.Buffer {
 	return buf
 }
 
-// resetLevel restores the level in effect before the test once it finishes.
 func resetLevel(t *testing.T) {
 	t.Helper()
 	prev := level.Level()
@@ -391,11 +388,8 @@ func TestWithConsole(t *testing.T) {
 	})
 }
 
-// TestFatalExits and TestFatalfExits cover Fatal/Fatalf's os.Exit(1) call by
-// re-executing this test binary in a child process: the guard env vars pick
-// the child out of the normal test run, and the parent inspects the child's
-// exit code and stderr.
-
+// Fatal calls os.Exit(1), so this and TestFatalfExits re-exec the binary in a
+// child process and inspect its exit code and stderr instead of running it in-process.
 func TestFatalExits(t *testing.T) {
 	if os.Getenv("COREDHCP_LOGGER_TEST_FATAL_CHILD") == "1" {
 		l := GetLogger("fataltest")

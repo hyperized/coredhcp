@@ -12,16 +12,8 @@ import (
 	"github.com/coredhcp/coredhcp/plugins/allocators"
 )
 
-// FuzzIPv4AllocatorOps interprets each fuzzed byte as one operation against
-// an IPv4Allocator over a small (16-address) range: the top bit selects
-// Allocate (with the remaining 7 bits as an in-range hint) or Free (with the
-// remaining 7 bits picking, modulo the range size, which offset to free),
-// keeping the op stream dense enough to reliably hit both allocation and
-// double-free paths within a short fuzz run. It tracks which offsets are
-// currently held to check the allocator's own invariants: Allocate never
-// returns an address outside [start,end] or one already held, Free of a
-// held address succeeds and releases it, and Free of a non-held address
-// reports a double free rather than corrupting state.
+// FuzzIPv4AllocatorOps replays each byte as Allocate or Free (top bit selects) and checks
+// the allocator never hands out an out-of-range or already-held address, or double-frees.
 func FuzzIPv4AllocatorOps(f *testing.F) {
 	f.Add([]byte{0x00, 0x00, 0x80, 0x00}) // allocate, allocate, free(offset 0), allocate
 	f.Add([]byte{})

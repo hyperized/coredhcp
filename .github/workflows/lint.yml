@@ -21,16 +21,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The terminal UI is a module of its own with its own .golangci.yml, and
-        # golangci-lint only ever lints one module at a time.
+        # golangci-lint lints one module at a time, and the UI is its own.
         module: ['.', 'cmd/coredhcp-tui']
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: '1.26'
-          # setup-go keys its cache on the root go.mod by default; both modules
-          # have to be in the key or the TUI's dependencies are fetched twice.
+          # setup-go keys its cache on the root go.mod; without both modules in
+          # the key the TUI's dependencies are fetched twice.
           cache-dependency-path: |
             go.sum
             cmd/coredhcp-tui/go.sum

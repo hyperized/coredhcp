@@ -1,9 +1,6 @@
 #!/bin/sh
-# udhcpc event script.
-#
-# Docker's IPAM has already addressed eth0, so this deliberately does not
-# configure the interface the way the stock /usr/share/udhcpc/default.script
-# would. It only records what the server offered, for the checker to assert on.
+# udhcpc event script. Docker's IPAM has already addressed eth0, so unlike the
+# stock default.script this only records what the server offered.
 # busybox ash implements pipefail even though POSIX does not define it.
 # shellcheck disable=SC3040
 set -euo pipefail
@@ -21,8 +18,7 @@ esac
 out="/results/${CLIENT_NAME}.env"
 tmp="${out}.tmp"
 
-# The variables below are exported by udhcpc: $ip is the assigned address,
-# $subnet the netmask, $lease the lease time in seconds, $serverid option 54.
+# These variables are exported into the environment by udhcpc.
 {
     printf 'status=%s\n' "$1"
     printf 'mac=%s\n' "$(cat "/sys/class/net/${interface:-eth0}/address")"

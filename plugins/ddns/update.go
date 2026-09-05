@@ -13,16 +13,12 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-// opCodeUpdate is the UPDATE opcode of RFC 2136. It reuses the header of a
-// query with different meanings for the four section counts: zone,
-// prerequisite, update and additional.
+// RFC 2136's UPDATE opcode reuses a query's header with different meanings
+// for the four section counts: zone, prerequisite, update and additional.
 const opCodeUpdate = dnsmessage.OpCode(5)
 
-// change is one record in the update section.
-//
-// Class says what to do with it. IN adds the record. ANY with no RDATA and a
-// TTL of zero deletes every record of that type at that name, which is the
-// "Delete an RRset" form of RFC 2136 section 2.5.2.
+// Class says what to do with it: IN adds the record; ANY with no RDATA and
+// a zero TTL is RFC 2136 section 2.5.2's "Delete an RRset" form.
 type change struct {
 	name  string
 	rtype dnsmessage.Type
@@ -31,17 +27,14 @@ type change struct {
 	data  []byte
 }
 
-// deleteRRset returns the change that removes every record of rtype at name.
 func deleteRRset(name string, rtype dnsmessage.Type) change {
 	return change{name: name, rtype: rtype, class: dnsmessage.ClassANY}
 }
 
-// addRecord returns the change that adds one record at name.
 func addRecord(name string, rtype dnsmessage.Type, ttl uint32, data []byte) change {
 	return change{name: name, rtype: rtype, class: dnsmessage.ClassINET, ttl: ttl, data: data}
 }
 
-// addressType is the record type that holds addr.
 func addressType(addr netip.Addr) dnsmessage.Type {
 	if addr.Is4() {
 		return dnsmessage.TypeA
@@ -49,14 +42,8 @@ func addressType(addr netip.Addr) dnsmessage.Type {
 	return dnsmessage.TypeAAAA
 }
 
-// forwardChanges returns the update section for the forward zone: drop
-// whatever is at the name today, then put the lease there.
-//
-// The delete comes first and covers the whole RRset rather than one record,
-// because a client that moved to a new address would otherwise end up with
-// both, and a resolver would hand out the stale one half the time. RFC 2136
-// applies the update section in order and as one transaction, so the two
-// travel in a single message.
+// Deletes the whole RRset before adding the lease, in one RFC 2136
+// transaction, so a client moving address never ends up with both records.
 func forwardChanges(j job, ttl uint32) []change {
 	rtype := addressType(j.addrs[0])
 	changes := make([]change, 0, len(j.addrs)+1)
@@ -70,7 +57,6 @@ func forwardChanges(j job, ttl uint32) []change {
 	return changes
 }
 
-// reverseChanges returns the update section for one address's reverse zone.
 func reverseChanges(j job, addr netip.Addr, ttl uint32) ([]change, error) {
 	owner := ptrName(addr)
 	changes := []change{deleteRRset(owner, dnsmessage.TypePTR)}
@@ -84,18 +70,8 @@ func reverseChanges(j job, addr netip.Addr, ttl uint32) ([]change, error) {
 	return append(changes, addRecord(owner, dnsmessage.TypePTR, ttl, target)), nil
 }
 
-// buildUpdate renders an RFC 2136 UPDATE message.
-//
-// The four sections carry different things from a query: the single question
-// is the zone being updated, asked as an SOA so a server that does not
-// implement UPDATE has something sensible to refuse; the answer section holds
-// prerequisites, of which this plugin uses none; and the authority section
-// holds the changes.
-//
-// Names are written out in full. Compression would save a few octets, and
-// nsupdate does use it, but the TSIG record's owner name may not be
-// compressed and a message whose names are all uncompressed is one where the
-// bytes that were signed can be recovered from the bytes that arrived.
+// Zone is asked as SOA, so a server without UPDATE support refuses sensibly.
+// Names are uncompressed throughout, since TSIG's owner name must not be.
 func buildUpdate(id uint16, zone string, changes []change) ([]byte, error) {
 	u := updateBuilder{b: dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: id, OpCode: opCodeUpdate})}
 	u.do(u.b.StartQuestions)
@@ -112,15 +88,13 @@ func buildUpdate(id uint16, zone string, changes []change) ([]byte, error) {
 	return u.b.Finish()
 }
 
-// updateBuilder wraps dnsmessage.Builder and keeps the first error, so a
-// message is written as a sequence of calls rather than as a ladder of
-// identical error checks. Every step after a failure is a no-op.
+// Keeps the first error, so a message is written as a sequence of calls
+// rather than a ladder of identical error checks.
 type updateBuilder struct {
 	b   dnsmessage.Builder
 	err error
 }
 
-// do runs one step unless an earlier one already failed.
 func (u *updateBuilder) do(step func() error) {
 	if u.err != nil {
 		return
@@ -128,7 +102,6 @@ func (u *updateBuilder) do(step func() error) {
 	u.err = step()
 }
 
-// zone writes the single question that names the zone being updated.
 func (u *updateBuilder) zone(zone string) error {
 	name, err := dnsmessage.NewName(zone)
 	if err != nil {
@@ -141,12 +114,8 @@ func (u *updateBuilder) zone(zone string) error {
 	})
 }
 
-// change writes one record of the update section.
-//
-// Every record goes on the wire as an opaque resource. dnsmessage has typed
-// bodies for A, AAAA and PTR, but none of them can hold the empty RDATA an
-// RRset delete needs, and building the two forms the same way keeps one path
-// through the encoder instead of two that have to agree.
+// Written as an opaque resource, not a typed A/AAAA/PTR body: none of those
+// can hold the empty RDATA an RRset delete needs.
 func (u *updateBuilder) change(c change) error {
 	name, err := dnsmessage.NewName(c.name)
 	if err != nil {
@@ -158,13 +127,11 @@ func (u *updateBuilder) change(c change) error {
 	)
 }
 
-// randomID returns a message ID. It is the only thing an off-path attacker
-// has to guess in order to have a forged answer looked at, so it comes from
-// the cryptographic source rather than from math/rand.
+// The message ID is the only thing an off-path attacker must guess to get a
+// forged answer looked at, so it comes from crypto/rand, not math/rand.
 func randomID() uint16 {
 	var b [2]byte
-	// crypto/rand.Read has not returned an error since Go 1.24: it panics
-	// internally if the operating system's source fails.
+	// crypto/rand.Read panics rather than returning an error since Go 1.24.
 	_, _ = rand.Read(b[:])
 	return binary.BigEndian.Uint16(b[:])
 }

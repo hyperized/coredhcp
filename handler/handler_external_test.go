@@ -17,10 +17,7 @@ import (
 	"github.com/coredhcp/coredhcp/handler"
 )
 
-// TestHandlerTypes is a compile-time and shape check that Handler4 and
-// Handler6 accept and return the packet types every plugin relies on. The
-// package declares only these two function types, so there is no other
-// behaviour to exercise.
+// A compile-time shape check: the package declares nothing but function types.
 func TestHandlerTypes(t *testing.T) {
 	var h4 handler.Handler4 = func(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 		return resp, false
@@ -38,13 +35,11 @@ func TestHandlerTypes(t *testing.T) {
 	assert.False(t, stop6)
 }
 
-// unrelatedKey is a context key a caller might use for something of its own.
-// RequestInfoFrom must not mistake a value stored under it for a RequestInfo.
+// Proves a value under another key is not mistaken for a RequestInfo.
 type unrelatedKey struct{}
 
-// TestRequestInfoRoundTrip covers every field with a non-zero value, since a
-// field left out of WithRequestInfo's copy or RequestInfoFrom's type
-// assertion would otherwise go unnoticed.
+// Every field carries a non-zero value: one left out of the copy would
+// otherwise go unnoticed.
 func TestRequestInfoRoundTrip(t *testing.T) {
 	info := handler.RequestInfo{
 		Interface: "eth0",
@@ -59,9 +54,7 @@ func TestRequestInfoRoundTrip(t *testing.T) {
 	assert.Equal(t, info, got)
 }
 
-// TestRequestInfoFromAbsent checks the two ways a context can carry no
-// RequestInfo: never having one attached, and carrying a value under some
-// other caller-defined key that must not be mistaken for one.
+// The two ways a context carries none: never attached, or under another key.
 func TestRequestInfoFromAbsent(t *testing.T) {
 	cases := []struct {
 		name string
@@ -80,9 +73,7 @@ func TestRequestInfoFromAbsent(t *testing.T) {
 	}
 }
 
-// TestRequestInfoFromReturnsCopy makes sure a handler that edits the struct
-// it got back cannot corrupt what a later RequestInfoFrom call on the same
-// context returns.
+// Editing what one call returns must not corrupt what the next call returns.
 func TestRequestInfoFromReturnsCopy(t *testing.T) {
 	ctx := handler.WithRequestInfo(context.Background(), handler.RequestInfo{Interface: "eth0"})
 
@@ -95,9 +86,7 @@ func TestRequestInfoFromReturnsCopy(t *testing.T) {
 	assert.Equal(t, "eth0", again.Interface)
 }
 
-// TestWithRequestInfoNesting checks that wrapping a context that already
-// carries a RequestInfo replaces it rather than merging or being shadowed by
-// the outer one.
+// Wrapping replaces the inner RequestInfo rather than merging with it.
 func TestWithRequestInfoNesting(t *testing.T) {
 	ctx := handler.WithRequestInfo(context.Background(), handler.RequestInfo{Interface: "outer"})
 	ctx = handler.WithRequestInfo(ctx, handler.RequestInfo{Interface: "inner"})
@@ -107,10 +96,7 @@ func TestWithRequestInfoNesting(t *testing.T) {
 	assert.Equal(t, "inner", got.Interface)
 }
 
-// TestHandlerCtxTypes is TestHandlerTypes's counterpart for the context-aware
-// handler types: it checks the shape compiles and that the context passed in
-// is the one the handler reads back out, which is the entire point of these
-// two types over the plain ones.
+// Reading the context back out is the whole point of the Ctx types.
 func TestHandlerCtxTypes(t *testing.T) {
 	info := handler.RequestInfo{Interface: "eth0"}
 	ctx := handler.WithRequestInfo(context.Background(), info)

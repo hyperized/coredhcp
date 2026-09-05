@@ -18,70 +18,53 @@ import (
 )
 
 const (
-	// lineLimit is the size of the read buffer, and with it the longest
-	// single line the parser accepts. Only reply headers and simple strings
-	// are read as lines; bulk payloads are read by length, so 4 KiB is
-	// generous for everything this plugin sends.
+	// Read buffer size, and with it the longest line the parser accepts. Only
+	// headers and simple strings are lines; bulk payloads are read by length.
 	lineLimit = 4096
 
-	// maxBulkLen and maxArrayLen bound a reply before any memory is
-	// allocated for it. A hash of DHCP options is a few hundred bytes and a
-	// handful of fields; these caps are orders of magnitude above that and
-	// only exist so a broken or hostile server cannot make coredhcp allocate
-	// on its behalf.
+	// Bound a reply before any memory is allocated for it, so a broken or
+	// hostile server cannot make coredhcp allocate on its behalf.
 	maxBulkLen  = 1 << 20
 	maxArrayLen = 4096
 
-	// maxReplyDepth is how deep arrays may nest. The commands this plugin
-	// sends (PING, AUTH, SELECT, HGETALL) reply with a scalar or one flat
-	// array, so nested arrays are refused rather than walked.
+	// PING, AUTH, SELECT and HGETALL reply with a scalar or one flat array, so
+	// nested arrays are refused rather than walked.
 	maxReplyDepth = 1
 
-	// maxIdleConns caps the connection pool. A DHCP server handles one
-	// packet per goroutine and each lookup is a single round trip, so the
-	// pool exists to avoid a dial per packet, not to hold a large fleet of
-	// sockets open.
+	// The pool exists to avoid a dial per packet, not to hold a fleet of
+	// sockets open: each lookup is a single round trip.
 	maxIdleConns = 8
 )
 
-// errProtocol wraps every reply this parser refuses to make sense of. It is
-// deliberately distinct from respError: a protocol error means the stream is
-// out of sync and the connection has to go, an error reply does not.
+// Distinct from respError: a protocol error means the stream is out of sync
+// and the connection has to go, an error reply does not.
 var errProtocol = errors.New("redis protocol error")
 
-// errClosed is returned by a client whose Close has already run.
 var errClosed = errors.New("redis client is closed")
 
-// respError is an error reply from the server, the "-ERR ..." line. It is a
-// well formed answer rather than a transport failure, so the connection
-// stays in sync and goes back to the pool.
+// A well formed "-ERR ..." answer rather than a transport failure, so the
+// connection stays in sync and goes back to the pool.
 type respError string
 
-// Error implements the error interface.
 func (e respError) Error() string { return "redis replied: " + string(e) }
 
-// protocolErrorf builds an error wrapping errProtocol, so callers can tell a
-// desynchronized stream from a server side complaint with errors.Is.
+// Wraps errProtocol so callers can tell a desynchronized stream from a server
+// side complaint with errors.Is.
 func protocolErrorf(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", errProtocol, fmt.Sprintf(format, args...))
 }
 
-// respReader parses RESP2 replies off a buffered stream. It is a separate
-// type from conn so the parser can be tested and fuzzed without a socket.
+// Separate from conn so the parser can be tested and fuzzed without a socket.
 type respReader struct {
 	r *bufio.Reader
 }
 
-// newRespReader wraps r with the bounded buffer the parser reads lines from.
 func newRespReader(r io.Reader) *respReader {
 	return &respReader{r: bufio.NewReaderSize(r, lineLimit)}
 }
 
-// readLine returns the next line without its CRLF. The returned slice points
-// into the read buffer and is only valid until the next read, so callers copy
-// what they keep. A line longer than the buffer is refused instead of grown:
-// nothing this plugin asks for has a long line, so an unterminated flood is a
-// broken peer.
+// The slice points into the read buffer and is valid only until the next
+// read. A line longer than the buffer is refused rather than grown.
 func (p *respReader) readLine() ([]byte, error) {
 	line, err := p.r.ReadSlice('\n')
 	if errors.Is(err, bufio.ErrBufferFull) {
@@ -96,10 +79,8 @@ func (p *respReader) readLine() ([]byte, error) {
 	return line[:len(line)-2], nil
 }
 
-// readReply parses one reply. The concrete types it returns are: string for
-// simple and bulk strings, int64 for integers, []any for arrays, and nil for
-// both the nil bulk string and the nil array. An error reply comes back as a
-// respError, not as a value.
+// Returns string for simple and bulk strings, int64 for integers, []any for
+// arrays, nil for both nil forms, and a respError for an error reply.
 func (p *respReader) readReply(depth int) (any, error) {
 	line, err := p.readLine()
 	if err != nil {
@@ -124,7 +105,6 @@ func (p *respReader) readReply(depth int) (any, error) {
 	}
 }
 
-// parseReplyInt decodes the payload of an integer reply.
 func parseReplyInt(arg []byte) (any, error) {
 	n, err := strconv.ParseInt(string(arg), 10, 64)
 	if err != nil {
@@ -133,8 +113,7 @@ func parseReplyInt(arg []byte) (any, error) {
 	return n, nil
 }
 
-// readBulk reads a bulk string whose declared length is arg. A length of -1
-// is RESP2's nil and comes back as an untyped nil.
+// A length of -1 is RESP2's nil and comes back as an untyped nil.
 func (p *respReader) readBulk(arg []byte) (any, error) {
 	n, err := strconv.Atoi(string(arg))
 	if err != nil {
@@ -146,8 +125,8 @@ func (p *respReader) readBulk(arg []byte) (any, error) {
 	if n < 0 || n > maxBulkLen {
 		return nil, protocolErrorf("bulk length %d out of range", n)
 	}
-	// Read the payload and its CRLF in one go; a short stream fails here
-	// rather than leaving a trailing terminator in the buffer.
+	// Payload and CRLF in one go: a short stream fails here rather than
+	// leaving a trailing terminator in the buffer.
 	buf := make([]byte, n+2)
 	if _, err := io.ReadFull(p.r, buf); err != nil {
 		return nil, err
@@ -158,8 +137,7 @@ func (p *respReader) readBulk(arg []byte) (any, error) {
 	return string(buf[:n]), nil
 }
 
-// readArray reads an array of arg elements. A length of -1 is RESP2's nil
-// array and comes back as an untyped nil.
+// A length of -1 is RESP2's nil array and comes back as an untyped nil.
 func (p *respReader) readArray(arg []byte, depth int) (any, error) {
 	n, err := strconv.Atoi(string(arg))
 	if err != nil {
@@ -183,21 +161,18 @@ func (p *respReader) readArray(arg []byte, depth int) (any, error) {
 	return out, nil
 }
 
-// conn is one connection to the server: the socket, its parser, and the
-// buffer commands are marshalled into. A conn is owned by a single goroutine
-// for as long as it is out of the pool, so nothing here locks.
+// A conn is owned by a single goroutine for as long as it is out of the pool,
+// so nothing here locks.
 type conn struct {
 	nc net.Conn
 	rd *respReader
 	w  bytes.Buffer
 }
 
-// close shuts the socket down.
 func (cn *conn) close() error { return cn.nc.Close() }
 
-// writeCommand marshals args as a RESP array of bulk strings and writes it in
-// a single call. The buffer is kept on the conn and reused, so a steady stream
-// of lookups does not allocate one per command.
+// One write per command, out of a buffer kept on the conn, so a steady stream
+// of lookups allocates nothing per command.
 func (cn *conn) writeCommand(args []string) error {
 	cn.w.Reset()
 	cn.w.WriteByte('*')
@@ -214,9 +189,8 @@ func (cn *conn) writeCommand(args []string) error {
 	return err
 }
 
-// do sends one command and reads its reply, both under a single deadline. A
-// server that accepts the connection and then goes quiet fails here instead
-// of holding a DHCP goroutine forever.
+// One deadline covers both write and read, so a server that accepts the
+// connection and then goes quiet cannot hold a DHCP goroutine forever.
 func (cn *conn) do(timeout time.Duration, args ...string) (any, error) {
 	if err := cn.nc.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return nil, err
@@ -227,32 +201,25 @@ func (cn *conn) do(timeout time.Duration, args ...string) (any, error) {
 	return cn.rd.readReply(0)
 }
 
-// clientConfig is everything needed to reach one Redis server. It is filled
-// by the plugin's argument parser and read only afterwards.
+// Filled by the plugin's argument parser and read only afterwards.
 type clientConfig struct {
-	// addr is the host:port to dial.
 	addr string
-	// tls is non-nil for rediss:// and carries the ServerName to verify.
+	// Non-nil for rediss://, carrying the ServerName to verify.
 	tls *tls.Config
-	// username and password feed AUTH. An empty password means no AUTH is
-	// sent at all; a username without a password is ignored, as the two
-	// argument form of AUTH requires both.
+	// An empty password means no AUTH at all; a username without one is
+	// ignored, since the two-argument AUTH requires both.
 	username string
 	password string
-	// db is the database SELECTed on every fresh connection. Zero is the
-	// default database and is left alone.
+	// SELECTed on every fresh connection; zero is left alone.
 	db int
-	// timeout bounds the dial, the TLS handshake, and each command.
+	// Bounds the dial, the TLS handshake, and each command.
 	timeout time.Duration
 }
 
-// client is a small RESP2 client with a connection pool. It is safe for
-// concurrent use: handlers run one goroutine per packet and share one client.
-//
-// The pool holds at most maxIdleConns connections. A connection that fails
-// for any reason other than an error reply from the server is closed rather
-// than reused, because a half written command or a half read reply leaves the
-// stream out of sync.
+// Safe for concurrent use: handlers run one goroutine per packet and share one
+// client. A connection that fails for anything but an error reply is closed
+// rather than reused, because a half written command leaves the stream out of
+// sync.
 type client struct {
 	cfg clientConfig
 
@@ -261,15 +228,14 @@ type client struct {
 	closed bool
 }
 
-// newClient returns a client for cfg. Nothing is dialled here: the first
-// command opens the first connection, which is what lets the plugin finish
-// setup while the server is still down.
+// Nothing is dialled here, which is what lets the plugin finish setup while
+// the server is still down.
 func newClient(cfg clientConfig) *client {
 	return &client{cfg: cfg}
 }
 
-// Close closes every idle connection and refuses further commands.
-// Connections that are checked out stay alive until their command finishes.
+// Close closes every idle connection and refuses further commands. Checked-out
+// connections stay alive until their command finishes.
 func (c *client) Close() error {
 	c.mu.Lock()
 	idle := c.idle
@@ -285,7 +251,6 @@ func (c *client) Close() error {
 	return firstErr
 }
 
-// get takes an idle connection or dials a new one.
 func (c *client) get() (*conn, error) {
 	c.mu.Lock()
 	if c.closed {
@@ -303,8 +268,6 @@ func (c *client) get() (*conn, error) {
 	return c.dial()
 }
 
-// put returns a healthy connection to the pool, or closes it when the pool is
-// full or the client has been closed.
 func (c *client) put(cn *conn) {
 	c.mu.Lock()
 	if !c.closed && len(c.idle) < maxIdleConns {
@@ -316,8 +279,6 @@ func (c *client) put(cn *conn) {
 	_ = cn.close()
 }
 
-// dial opens a connection and brings it up to the point where commands can be
-// sent: TLS when configured, then AUTH and SELECT.
 func (c *client) dial() (*conn, error) {
 	d := net.Dialer{Timeout: c.cfg.timeout}
 	nc, err := d.Dial("tcp", c.cfg.addr)
@@ -337,8 +298,8 @@ func (c *client) dial() (*conn, error) {
 	return cn, nil
 }
 
-// handshake wraps nc in TLS under the dial timeout. On failure the underlying
-// connection is closed, so a rejected certificate does not leak a socket.
+// On failure the underlying connection is closed, so a rejected certificate
+// does not leak a socket.
 func (c *client) handshake(nc net.Conn) (net.Conn, error) {
 	if err := nc.SetDeadline(time.Now().Add(c.cfg.timeout)); err != nil {
 		_ = nc.Close()
@@ -352,8 +313,7 @@ func (c *client) handshake(nc net.Conn) (net.Conn, error) {
 	return tc, nil
 }
 
-// authenticate runs the per-connection setup commands. Errors name the server
-// and the failing command but never the credentials.
+// Errors name the server and the failing command, never the credentials.
 func (c *client) authenticate(cn *conn) error {
 	if c.cfg.password != "" {
 		args := []string{"AUTH", c.cfg.password}
@@ -372,8 +332,7 @@ func (c *client) authenticate(cn *conn) error {
 	return nil
 }
 
-// do runs one command on a pooled connection. An error reply keeps the
-// connection, anything else retires it.
+// An error reply keeps the connection, anything else retires it.
 func (c *client) do(args ...string) (any, error) {
 	cn, err := c.get()
 	if err != nil {
@@ -389,16 +348,13 @@ func (c *client) do(args ...string) (any, error) {
 	return reply, err
 }
 
-// ping checks that the server is reachable and, when credentials are
-// configured, that they are accepted.
 func (c *client) ping() error {
 	_, err := c.do("PING")
 	return err
 }
 
-// hgetall reads a whole hash. RESP2 answers with a flat array of alternating
-// field names and values; a missing key is an empty array, which comes back
-// as an empty map rather than an error.
+// RESP2 answers with a flat array of alternating names and values; a missing
+// key is an empty array, and comes back as an empty map rather than an error.
 func (c *client) hgetall(key string) (map[string]string, error) {
 	reply, err := c.do("HGETALL", key)
 	if err != nil {
@@ -423,9 +379,8 @@ func (c *client) hgetall(key string) (map[string]string, error) {
 	return out, nil
 }
 
-// hset writes fields to a hash. Only the integration tests use it, to lay
-// down their own fixtures through the same code path the handlers read
-// through, rather than shelling out to redis-cli.
+// Only the integration tests use this, so their fixtures go down through the
+// same code path the handlers read through.
 func (c *client) hset(key string, fields map[string]string) error {
 	args := make([]string, 0, 2+2*len(fields))
 	args = append(args, "HSET", key)
@@ -436,8 +391,7 @@ func (c *client) hset(key string, fields map[string]string) error {
 	return err
 }
 
-// del removes keys, used by the integration tests to clean up after
-// themselves.
+// Only the integration tests use this, to clean up after themselves.
 func (c *client) del(keys ...string) error {
 	_, err := c.do(append([]string{"DEL"}, keys...)...)
 	return err

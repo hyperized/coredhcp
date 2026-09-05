@@ -26,9 +26,8 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-// The key every test signs with. It is the one in testdata, so the golden
-// capture and the tests that build messages from scratch use the same
-// material.
+// The key every test signs with; it's the one in testdata, so the golden
+// capture and the tests that build messages from scratch use the same material.
 const (
 	testKeyName   = "ddns-key"
 	testKeySecret = "Y29yZWRoY3AtZGRucy1nb2xkZW4tdGVzdC1rZXkhISE="
@@ -37,8 +36,8 @@ const (
 
 var testMAC = net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}
 
-// Wire forms written out by hand, so the expectations below do not lean on
-// the packer they are there to check.
+// Written out by hand, so the expectations below don't lean on the packer
+// they are there to check.
 const (
 	wireHomeLan     = "04686f6d65036c616e00"           // home.lan.
 	wireHostHomeLan = "04686f737404686f6d65036c616e00" // host.home.lan.
@@ -47,7 +46,6 @@ const (
 	wireRevPTR    = "0135" + "0130" + "0130" + "023130" + "07696e2d61646472" + "0461727061" + "00"
 )
 
-// testKey builds the key used throughout.
 func newTestKey(t *testing.T) tsigKey {
 	t.Helper()
 	secret, err := base64.StdEncoding.DecodeString(testKeySecret)
@@ -57,7 +55,6 @@ func newTestKey(t *testing.T) tsigKey {
 	return k
 }
 
-// fromHex turns a hex string into bytes, failing the test on a typo.
 func fromHex(t *testing.T, s string) []byte {
 	t.Helper()
 	b, err := hex.DecodeString(strings.ReplaceAll(s, " ", ""))
@@ -65,8 +62,8 @@ func fromHex(t *testing.T, s string) []byte {
 	return b
 }
 
-// fakeDNS is a name server that is only as real as these tests need: it
-// records every request and answers with what the test asked for.
+// Only as real as these tests need: records every request and answers with
+// what the test asked for.
 type fakeDNS struct {
 	conn net.PacketConn
 	key  tsigKey
@@ -75,7 +72,7 @@ type fakeDNS struct {
 	requests [][]byte
 
 	// Knobs, all read under mu. ignore drops the first n requests without
-	// answering, which is how a lost datagram is staged.
+	// answering, staging a lost datagram.
 	ignore    int
 	rcode     dnsmessage.RCode
 	truncated bool
@@ -85,7 +82,6 @@ type fakeDNS struct {
 	signedAt  time.Time
 }
 
-// startFakeDNS listens on a loopback port and serves until the test ends.
 func startFakeDNS(t *testing.T, key tsigKey) *fakeDNS {
 	t.Helper()
 	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -100,10 +96,8 @@ func startFakeDNS(t *testing.T, key tsigKey) *fakeDNS {
 	return f
 }
 
-// addr is the address to configure the plugin with.
 func (f *fakeDNS) addr() string { return f.conn.LocalAddr().String() }
 
-// serve answers until the socket is closed.
 func (f *fakeDNS) serve(done chan struct{}) {
 	defer close(done)
 	buf := make([]byte, 4096)
@@ -120,7 +114,6 @@ func (f *fakeDNS) serve(done chan struct{}) {
 	}
 }
 
-// answer records a request and builds the reply the knobs ask for.
 func (f *fakeDNS) answer(req []byte) []byte {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -151,8 +144,7 @@ func (f *fakeDNS) answer(req []byte) []byte {
 	return resp
 }
 
-// sign puts a TSIG on a response, with the request's MAC digested in front of
-// it the way RFC 8945 section 5.4 has it.
+// RFC 8945 section 5.4: the request's MAC is digested in front of the response.
 func (f *fakeDNS) sign(msg, requestMAC []byte, id uint16) []byte {
 	ts := unixSeconds(f.signedAt)
 	mac := f.key.digest(msg, ts, requestMAC)
@@ -161,7 +153,6 @@ func (f *fakeDNS) sign(msg, requestMAC []byte, id uint16) []byte {
 	return out
 }
 
-// received returns the requests seen so far.
 func (f *fakeDNS) received() [][]byte {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -170,14 +161,13 @@ func (f *fakeDNS) received() [][]byte {
 	return out
 }
 
-// set applies a knob under the lock.
 func (f *fakeDNS) set(apply func(*fakeDNS)) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	apply(f)
 }
 
-// newTestPlugin builds an instance pointed at f, without starting the worker.
+// Does not start the worker.
 func newTestPlugin(t *testing.T, f *fakeDNS, extra ...string) *pluginState {
 	t.Helper()
 	args := append([]string{
@@ -190,8 +180,8 @@ func newTestPlugin(t *testing.T, f *fakeDNS, extra ...string) *pluginState {
 	return p
 }
 
-// drain runs the worker for one job and stops it again, so a test can assert
-// on what reached the server without racing the goroutine.
+// Runs the worker for exactly one job, so a test can assert on what reached
+// the server without racing the goroutine.
 func (p *pluginState) drainOne(t *testing.T) {
 	t.Helper()
 	select {
@@ -201,10 +191,6 @@ func (p *pluginState) drainOne(t *testing.T) {
 		t.Fatal("nothing was queued")
 	}
 }
-
-// -------------------------------------------------------------------------
-// Names
-// -------------------------------------------------------------------------
 
 func TestHostFQDN(t *testing.T) {
 	cases := []struct {
@@ -367,14 +353,8 @@ func TestReadName(t *testing.T) {
 	}
 }
 
-// -------------------------------------------------------------------------
-// TSIG
-// -------------------------------------------------------------------------
-
-// TestTSIGAgainstNsupdate is the check that matters: the MAC this package
-// computes has to be the MAC ISC's nsupdate computed for the same message,
-// the same key and the same time. See testdata/nsupdate-add-a.txt for how the
-// capture was made.
+// The check that matters: the MAC this package computes has to match the MAC
+// ISC's nsupdate computed for the same message, key and time.
 func TestTSIGAgainstNsupdate(t *testing.T) {
 	msg, err := os.ReadFile("testdata/nsupdate-add-a.bin")
 	require.NoError(t, err)
@@ -402,8 +382,7 @@ func TestTSIGAgainstNsupdate(t *testing.T) {
 	assert.Equal(t, rec.mac, key.digest(unsigned, rec.timeSigned, nil))
 }
 
-// TestSignRoundTrip signs a message and reads it back, which is the same path
-// the golden file checks, driven from the other end.
+// Same path TestTSIGAgainstNsupdate checks, driven from the other end.
 func TestSignRoundTrip(t *testing.T) {
 	key := newTestKey(t)
 	msg, err := buildUpdate(0x1234, testZone, []change{deleteRRset("host.home.lan.", dnsmessage.TypeA)})
@@ -515,8 +494,8 @@ func TestFindTSIGErrors(t *testing.T) {
 		assert.Error(t, err)
 	})
 	for _, tc := range []struct{ name, msg string }{
-		// Each header promises one record in a section and then stops, so
-		// the walk fails in a different place every time.
+		// Each header promises one record in a section, then stops, so the
+		// walk fails in a different place every time.
 		{"a promised question that is not there", "000128000001000000000000"},
 		{"a promised answer that is not there", "000128000000000100000000"},
 		{"a promised update that is not there", "000128000000000000010000"},
@@ -528,8 +507,8 @@ func TestFindTSIGErrors(t *testing.T) {
 		})
 	}
 	t.Run("a record whose RDATA runs past the end", func(t *testing.T) {
-		// ARCOUNT 1, then the root name, type TSIG, class ANY, TTL 0 and an
-		// RDLENGTH of 16 with nothing behind it.
+		// ARCOUNT 1, root name, type TSIG, class ANY, TTL 0, RDLENGTH 16 with
+		// nothing behind it.
 		msg := fromHex(t, "000128000000000000000001"+"00"+"00fa"+"00ff"+"00000000"+"0010")
 		_, err := findTSIG(msg)
 		assert.Error(t, err)
@@ -654,10 +633,6 @@ func TestDot(t *testing.T) {
 	assert.Equal(t, "a.", dot("a"))
 	assert.Equal(t, "a.", dot("a."))
 }
-
-// -------------------------------------------------------------------------
-// Message construction
-// -------------------------------------------------------------------------
 
 func TestBuildUpdateGolden(t *testing.T) {
 	// A header carrying the UPDATE opcode, one zone question, no
@@ -801,10 +776,6 @@ func TestAddressType(t *testing.T) {
 	assert.Equal(t, dnsmessage.TypeAAAA, addressType(netip.MustParseAddr("2001:db8::1")))
 }
 
-// -------------------------------------------------------------------------
-// The exchange with the server
-// -------------------------------------------------------------------------
-
 func TestUpdateAgainstFakeServer(t *testing.T) {
 	f := startFakeDNS(t, newTestKey(t))
 	p := newTestPlugin(t, f)
@@ -891,9 +862,8 @@ func TestExchangeDialFailure(t *testing.T) {
 	assert.ErrorContains(t, err, "dialling")
 }
 
-// stubConn is a net.Conn whose operations fail on demand. The embedded
-// interface is nil: only the three methods roundTrip calls are implemented,
-// and anything else would rather panic than be silently wrong.
+// Embedded interface is nil: only the methods roundTrip calls are
+// implemented, so anything else panics rather than being silently wrong.
 type stubConn struct {
 	net.Conn
 	deadlineErr error
@@ -938,10 +908,6 @@ func TestRCodeName(t *testing.T) {
 	assert.Equal(t, "NOTZONE", rcodeName(10))
 	assert.Equal(t, "RCODE 42", rcodeName(42))
 }
-
-// -------------------------------------------------------------------------
-// The queue and the worker
-// -------------------------------------------------------------------------
 
 func TestEnqueueDropsWhenFull(t *testing.T) {
 	f := startFakeDNS(t, newTestKey(t))
@@ -1056,10 +1022,6 @@ func TestSendUpdateCounters(t *testing.T) {
 		})
 	}
 }
-
-// -------------------------------------------------------------------------
-// Arguments
-// -------------------------------------------------------------------------
 
 func TestParseArgsDefaults(t *testing.T) {
 	s, err := parseArgs([]string{"server:10.0.0.53", "zone:home.lan", "key:ddns-key:" + testKeySecret})
@@ -1181,11 +1143,6 @@ func TestSetup(t *testing.T) {
 	})
 }
 
-// -------------------------------------------------------------------------
-// Handlers
-// -------------------------------------------------------------------------
-
-// v4 builds a request and the response a previous plugin would have started.
 func v4(t *testing.T, mtype dhcpv4.MessageType, mods ...dhcpv4.Modifier) (*dhcpv4.DHCPv4, *dhcpv4.DHCPv4) {
 	t.Helper()
 	req, err := dhcpv4.New(append([]dhcpv4.Modifier{
@@ -1199,7 +1156,6 @@ func v4(t *testing.T, mtype dhcpv4.MessageType, mods ...dhcpv4.Modifier) (*dhcpv
 	return req, resp
 }
 
-// withFQDN4 adds an RFC 4702 option 81 with the given flags and raw name.
 func withFQDN4(flags byte, name []byte) dhcpv4.Modifier {
 	return func(d *dhcpv4.DHCPv4) {
 		d.UpdateOption(dhcpv4.OptGeneric(dhcpv4.OptionFQDN, append([]byte{flags, 0, 0}, name...)))
@@ -1384,8 +1340,6 @@ func TestAddress4(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// v6 builds a Solicit-style request carrying an IA_NA, and the Reply a
-// previous plugin would have started.
 func v6(t *testing.T, mods ...dhcpv6.Modifier) (*dhcpv6.Message, *dhcpv6.Message) {
 	t.Helper()
 	duid := &dhcpv6.DUIDLL{HWType: iana.HWTypeEthernet, LinkLayerAddr: testMAC}
@@ -1397,7 +1351,6 @@ func v6(t *testing.T, mods ...dhcpv6.Modifier) (*dhcpv6.Message, *dhcpv6.Message
 	return req, resp
 }
 
-// withIANA adds an IA_NA holding the given addresses.
 func withIANA(addrs ...string) dhcpv6.Modifier {
 	return func(m dhcpv6.DHCPv6) {
 		msg, ok := m.(*dhcpv6.Message)
@@ -1412,7 +1365,6 @@ func withIANA(addrs ...string) dhcpv6.Modifier {
 	}
 }
 
-// withFQDN6 adds an RFC 4704 option 39.
 func withFQDN6(flags uint8, labels ...string) dhcpv6.Modifier {
 	return func(m dhcpv6.DHCPv6) {
 		msg, ok := m.(*dhcpv6.Message)
