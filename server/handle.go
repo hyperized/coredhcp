@@ -146,6 +146,16 @@ func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, src *net.UD
 	rep.chainStart()
 	resp, stoppedAt := applyHandlers4(l.chain, req, resp)
 	rep.chainDone4(l.chain, stoppedAt)
+	if takesNoReply4(req.MessageType()) {
+		// The chain has had its say; whatever it built goes nowhere. This
+		// check sits before the nil test on purpose: a RELEASE a plugin
+		// stopped is not a drop, it is a message that was never going to
+		// be answered. Before this existed, a RELEASE that survived the
+		// chain left the server as a reply carrying no option 53 at all.
+		log.Debugf("MainHandler4: %s takes no reply, sending nothing", req.MessageType())
+		rep.emit(events.OutcomeNoReply, events.PathNone, nil)
+		return
+	}
 	if resp == nil {
 		log.Print("MainHandler4: dropping request because response is nil")
 		rep.emit(events.OutcomeDropped, events.PathNone, nil)

@@ -39,6 +39,7 @@ func TestOutcomeString(t *testing.T) {
 	}{
 		{name: "replied", o: events.OutcomeReplied, want: "replied"},
 		{name: "dropped", o: events.OutcomeDropped, want: "dropped"},
+		{name: "no reply", o: events.OutcomeNoReply, want: "no reply"},
 		{name: "parse error", o: events.OutcomeParseError, want: "parse error"},
 		{name: "unsupported", o: events.OutcomeUnsupported, want: "unsupported"},
 		{name: "send error", o: events.OutcomeSendError, want: "send error"},

@@ -57,6 +57,11 @@ const (
 	// nothing was sent. Plugin names the plugin that stopped the chain
 	// when one did.
 	OutcomeDropped
+	// OutcomeNoReply means the message type takes no reply at all: the
+	// chain ran, and nothing was sent whatever it returned. DHCPv4 RELEASE
+	// and DECLINE are the two, see RFC 2131 section 4.4. Plugin and
+	// Position are set when a plugin stopped the chain.
+	OutcomeNoReply
 	// OutcomeParseError means the datagram was not a DHCP packet the
 	// library could decode. Only Time, Family, Interface, Peer and Error
 	// are set.
@@ -77,6 +82,8 @@ func (o Outcome) String() string {
 		return "replied"
 	case OutcomeDropped:
 		return "dropped"
+	case OutcomeNoReply:
+		return "no reply"
 	case OutcomeParseError:
 		return "parse error"
 	case OutcomeUnsupported:

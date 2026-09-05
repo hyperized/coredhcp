@@ -284,9 +284,10 @@ func leaseTransition(r events.Request) leaseState {
 }
 
 // leaseTransitionV4 reads a DHCPv4 exchange. RELEASE counts whatever the
-// server did with it, because the client has already stopped using the
-// address either way, and a DECLINE arrives as an unsupported message type
-// since the server has no reply for it.
+// server did with it, because the client has stopped using the address either
+// way. A DECLINE counts once the plugin chain has seen it, which is what the
+// no-reply outcome says. Neither message type gets an answer, so there is no
+// reply to read the result off.
 func leaseTransitionV4(r events.Request) leaseState {
 	typ, reply := strings.ToUpper(r.Type), strings.ToUpper(r.ReplyType)
 
@@ -294,7 +295,7 @@ func leaseTransitionV4(r events.Request) leaseState {
 	case "RELEASE":
 		return leaseReleased
 	case "DECLINE":
-		if r.Outcome == events.OutcomeUnsupported {
+		if r.Outcome == events.OutcomeNoReply {
 			return leaseDeclined
 		}
 

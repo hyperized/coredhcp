@@ -152,6 +152,8 @@ func outcomeWord(r events.Request) (tag, word string) {
 		return tagPlain, r.ReplyType
 	case events.OutcomeDropped:
 		return tagWarn, "drop"
+	case events.OutcomeNoReply:
+		return tagDim, "no reply"
 	case events.OutcomeParseError:
 		return tagBad, "parse"
 	case events.OutcomeUnsupported:
