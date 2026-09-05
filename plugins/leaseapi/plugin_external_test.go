@@ -24,8 +24,6 @@ import (
 	"github.com/coredhcp/coredhcp/plugins/leaseapi"
 )
 
-// source is a Source built from fixed data, standing in for a lease-holding
-// plugin.
 type source struct {
 	name   string
 	held   []leases.Lease
@@ -92,15 +90,13 @@ func v6Source() *source {
 	}
 }
 
-// register adds a source for the duration of the test.
 func register(t *testing.T, s leases.Source) {
 	t.Helper()
 	leases.Register(s)
 	t.Cleanup(func() { leases.Unregister(s) })
 }
 
-// socketPath returns a path for a unix socket in a directory of its own, short
-// enough to bind: a socket path is capped at 104 bytes on darwin.
+// A socket path is capped at 104 bytes on darwin, hence the short temp dir.
 func socketPath(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "cdhcp")
@@ -109,10 +105,8 @@ func socketPath(t *testing.T) string {
 	return filepath.Join(dir, "a.sock")
 }
 
-// freeAddr returns a loopback address with an OS-assigned free port, by
-// binding to port 0 and immediately closing the listener. The window between
-// the close and the plugin rebinding the same address is negligible on
-// loopback inside a test process.
+// The window between closing this listener and the plugin rebinding the
+// same address is negligible on loopback inside a test process.
 func freeAddr(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -122,7 +116,7 @@ func freeAddr(t *testing.T) string {
 	return addr
 }
 
-// unixClient dials the socket at path whatever the URL's host says.
+// Ignores the URL's host entirely; every request dials path.
 func unixClient(path string) *http.Client {
 	return &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -131,8 +125,6 @@ func unixClient(path string) *http.Client {
 	}}
 }
 
-// get performs one request and returns the response with its body read and
-// closed.
 func get(t *testing.T, client *http.Client, method, url string) (*http.Response, string) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(t.Context(), method, url, nil)
@@ -145,8 +137,6 @@ func get(t *testing.T, client *http.Client, method, url string) (*http.Response,
 	return resp, string(body)
 }
 
-// serveOnSocket starts the plugin on a fresh unix socket and returns a client
-// for it and the base URL.
 func serveOnSocket(t *testing.T) (*http.Client, string) {
 	t.Helper()
 	leaseapi.ResetRegistry(t)
@@ -167,9 +157,7 @@ func TestLeasesEndpoint(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "application/json; charset=utf-8", resp.Header.Get("Content-Type"))
 	assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
-	// Sorted by source, then by address: the prefix source comes before the
-	// range one, and 10.0.0.1 before 10.0.0.2 whatever order the source
-	// returned them in.
+	// Sorted by source then address: prefix before range, .1 before .2.
 	assert.JSONEq(t, `{"leases":[
 		{"family":6,"client":"00030001aabbccddeeff","address":"2001:db8:0:1::/64",
 		 "expires":"2026-09-05T13:00:00Z","static":false,"source":"prefix 2001:db8::/48"},
@@ -188,8 +176,7 @@ func TestLeasesEndpointIsOrderedTheSameEveryTime(t *testing.T) {
 	_, first := get(t, client, http.MethodGet, base+"/v1/leases")
 	for range 5 {
 		_, again := get(t, client, http.MethodGet, base+"/v1/leases")
-		// Byte-identical, not merely equivalent: the sources iterate maps,
-		// and a reader diffing two answers must see only what changed.
+		// Byte-identical, not merely equivalent, despite the sources iterating maps.
 		assert.Equal(t, first, again)
 	}
 }
@@ -207,8 +194,7 @@ func TestPoolsEndpoint(t *testing.T) {
 	client, base := serveOnSocket(t)
 	register(t, v4Source())
 	register(t, v6Source())
-	// A source with no pool of its own, the way the file plugin reports its
-	// static reservations.
+	// No pool of its own, the way the file plugin reports static reservations.
 	register(t, &source{name: "file leases.txt", held: []leases.Lease{{
 		Family: 4, Client: "00:11:22:33:44:57", Address: netip.MustParsePrefix("10.0.0.9/32"),
 		Static: true, Source: "file leases.txt",
@@ -310,11 +296,9 @@ func TestOnlyGETIsServed(t *testing.T) {
 		t.Run(method, func(t *testing.T) {
 			resp, _ := get(t, client, method, base+"/v1/leases")
 			assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
-			// A GET pattern answers HEAD as well, which is the mux's doing
-			// and is what the Allow header has to say.
+			// A GET pattern answers HEAD too; that's the mux's doing.
 			assert.Equal(t, "GET, HEAD", resp.Header.Get("Allow"))
-			// The API is read-only, so a write is refused before anything
-			// looks at what it asked for.
+			// noStore wraps the whole mux, so even its own 405 carries it.
 			assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
 		})
 	}
@@ -333,9 +317,8 @@ func TestUnknownPath(t *testing.T) {
 
 func TestStreamsALargeAnswer(t *testing.T) {
 	client, base := serveOnSocket(t)
-	// The threshold that ships is a hundred thousand leases. Lowering it
-	// exercises the same code path without building a body of tens of
-	// megabytes for every test run.
+	// Lowered from the shipped 100,000 so the streaming path runs without a
+	// body of tens of megabytes for every test run.
 	leaseapi.SetStreamThreshold(t, 100)
 
 	const count = 5000
@@ -417,8 +400,7 @@ func TestStaleSocketIsReplaced(t *testing.T) {
 	leaseapi.ResetRegistry(t)
 	path := socketPath(t)
 
-	// A process that was killed rather than shut down leaves its socket
-	// behind. Starting again must not need an operator to remove it.
+	// A killed process leaves its socket behind; starting again must not need an operator to remove it.
 	stale, err := net.Listen("unix", path)
 	require.NoError(t, err)
 	stale.(*net.UnixListener).SetUnlinkOnClose(false)
@@ -441,8 +423,7 @@ func TestASecondServerOnTheSamePathIsRefused(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
 
-	// Something is answering there: it is another coredhcp, or something
-	// else entirely. Either way this one has no business unlinking it.
+	// Something is already answering there; either way this one has no business unlinking it.
 	_, err = leaseapi.Plugin.Setup4("unix:" + path)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already listening")
@@ -456,8 +437,7 @@ func TestSetup4AndSetup6ShareOneListener(t *testing.T) {
 	h4, err := leaseapi.Plugin.Setup4("unix:" + path)
 	require.NoError(t, err)
 	require.NotNil(t, h4)
-	// A second bind on the same path would fail, so this succeeding is what
-	// sharing looks like from outside.
+	// A second bind on this path would fail, so succeeding is what sharing looks like from outside.
 	h6, err := leaseapi.Plugin.Setup6("unix:" + path)
 	require.NoError(t, err)
 	require.NotNil(t, h6)
@@ -475,8 +455,7 @@ func TestASecondAddressIsRefused(t *testing.T) {
 	_, err := leaseapi.Plugin.Setup4("unix:" + first)
 	require.NoError(t, err)
 
-	// One process, one registry, one endpoint: a second address would serve
-	// the same answers on another socket.
+	// One process, one registry, one endpoint: a second address is refused.
 	_, err = leaseapi.Plugin.Setup6("unix:" + second)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "refusing to also listen on")

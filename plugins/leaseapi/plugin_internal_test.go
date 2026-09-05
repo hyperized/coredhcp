@@ -21,13 +21,7 @@ import (
 	"github.com/coredhcp/coredhcp/leases"
 )
 
-// ResetRegistry stops every listener started so far and empties the
-// package-level registry, immediately and again when the test finishes.
-//
-// It is exported from a _test.go file rather than from plugin.go on purpose:
-// the black-box test package needs it to keep tests independent of each other,
-// while shipped code has no way to stop the API listener at all. See the
-// comment on the serve goroutine in newServer for why.
+// ResetRegistry stops every listener and clears the registry, exported here since shipped code has no way to.
 func ResetRegistry(t *testing.T) {
 	t.Helper()
 	resetRegistry()
@@ -39,19 +33,14 @@ func resetRegistry() {
 	defer registry.mu.Unlock()
 	for key, s := range registry.servers {
 		_ = s.srv.Close()
-		// Serve has to have returned before the address is free for the next
-		// test; waiting on done is how we avoid a sleep here.
+		// Waiting on done, rather than sleeping, until Serve has returned
+		// and the address is free for the next test.
 		<-s.done
 		delete(registry.servers, key)
 	}
 }
 
-// SetStreamThreshold lowers the entry count above which a response is streamed
-// instead of buffered, and restores it when the test finishes.
-//
-// It is exported for the black-box tests, which would otherwise have to build
-// a hundred thousand leases to reach the streaming path. The threshold that
-// ships is asserted in TestStreamThresholdDefault.
+// SetStreamThreshold lowers the streaming cutoff so a test need not build a hundred-thousand-entry response.
 func SetStreamThreshold(t *testing.T, n int) {
 	t.Helper()
 	previous := streamThreshold
@@ -59,11 +48,8 @@ func SetStreamThreshold(t *testing.T, n int) {
 	t.Cleanup(func() { streamThreshold = previous })
 }
 
-// socketPath returns a path for a unix socket in a directory of its own.
-//
-// It does not use t.TempDir: that names the directory after the test, and a
-// unix socket path is limited to 104 bytes on darwin and 108 on Linux, which a
-// long subtest name under /var/folders reaches on its own.
+// Not t.TempDir: that names the directory after the test, and a long subtest
+// name under /var/folders alone can reach the 104/108-byte socket path limit.
 func socketPath(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "cdhcp")
@@ -171,8 +157,7 @@ func TestClearStaleSocket(t *testing.T) {
 
 	t.Run("a stale socket is removed", func(t *testing.T) {
 		path := socketPath(t)
-		// Closing a listener normally unlinks its socket. Turning that off
-		// leaves the file behind the way a killed process does.
+		// Disabling the normal unlink-on-close leaves the file behind, the way a killed process does.
 		stale, err := net.Listen("unix", path)
 		require.NoError(t, err)
 		stale.(*net.UnixListener).SetUnlinkOnClose(false)
@@ -245,8 +230,7 @@ func TestListenUnixFailures(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot set mode 0660")
 
-		// The listener is closed rather than left serving on a socket with
-		// permissions nobody asked for, so the path is free again.
+		// The failed listener closed itself, so the path is free again.
 		ln, err := net.Listen("unix", path)
 		require.NoError(t, err)
 		require.NoError(t, ln.Close())
@@ -270,13 +254,12 @@ func TestServeLoopLogsAListenerFailure(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.srv.Close() })
 
-	// Closing the listener out from under Serve makes it return something
-	// other than ErrServerClosed, which is the branch that logs.
+	// Closing ln directly, not via s.srv.Close, is what makes Serve return
+	// something other than ErrServerClosed — the branch that logs.
 	require.NoError(t, s.ln.Close())
 	<-s.done
 }
 
-// stub is a Source built from fixed data.
 type stub struct {
 	name   string
 	leases []leases.Lease
@@ -287,7 +270,6 @@ func (s *stub) Name() string           { return s.name }
 func (s *stub) Leases() []leases.Lease { return s.leases }
 func (s *stub) Pools() []leases.Pool   { return s.pools }
 
-// register adds a source for the duration of the test.
 func register(t *testing.T, s leases.Source) {
 	t.Helper()
 	leases.Register(s)
@@ -358,9 +340,8 @@ func TestEncodeListWriteFailures(t *testing.T) {
 		{Family: 4, Client: "b", Address: netip.MustParsePrefix("10.0.0.2/32")},
 	}
 
-	// Four writes make up a two-entry body: the opening brace, the first
-	// entry, the separator, the second entry, and the closing bracket. Each
-	// failure point has to come back as an error rather than a short body.
+	// Five writes make up this two-entry body (brace, entry, separator,
+	// entry, bracket); every failure point must error rather than short-write.
 	for failAfter := range 5 {
 		t.Run("fails after "+string(rune('0'+failAfter))+" writes", func(t *testing.T) {
 			err := encodeList(&failingWriter{failAfter: failAfter}, "leases", items)
@@ -374,8 +355,7 @@ func TestEncodeListWriteFailures(t *testing.T) {
 	})
 }
 
-// failingResponseWriter is an http.ResponseWriter whose body writes always
-// fail, which is what a client hanging up mid-response looks like.
+// Body writes always fail, the way a client hanging up mid-response looks.
 type failingResponseWriter struct {
 	header http.Header
 	status int
@@ -452,8 +432,7 @@ func TestSetupReturnsTheSameServerForOneAddress(t *testing.T) {
 	second, err := setup([]string{"unix:" + path, "mode:0660"})
 	require.NoError(t, err)
 
-	// The mode of the second setup is ignored along with everything else
-	// about it: the address is the key, and the listener is already up.
+	// The second setup's mode is ignored: the address is the key, and the listener is already up.
 	assert.Same(t, first, second)
 	assert.Len(t, registry.servers, 1)
 }
