@@ -13,9 +13,8 @@ import (
 	"github.com/coredhcp/coredhcp/events"
 )
 
-// Bounds on what one event may contribute to the model. Hostnames, client
-// identifiers and error texts come off the wire, so they are cut down before
-// they are stored rather than only before they are drawn.
+// Hostnames, client identifiers and error texts come off the wire, so they are
+// cut down before they are stored, not only before they are drawn.
 const (
 	maxIDLen    = 64
 	maxNameLen  = 48
@@ -26,22 +25,17 @@ const (
 	maxTypeKeys = 16
 )
 
-// rateBuckets is the length of the per-second histories behind the rate pane:
-// one minute, which is also the window the status line grades on.
+// One minute, which is also the window the status line grades on.
 const rateBuckets = 60
 
-// pathCount is the number of events.ReplyPath values, used to size the path
-// breakdown array.
 const pathCount = 4
 
-// renderFamilies is the order the per-family panes are drawn in. Events for
-// any other family are still counted, they just have no section of their own.
+// Any other family is still counted, it just has no section of its own.
 var renderFamilies = []events.Family{events.FamilyV4, events.FamilyV6}
 
-// paneID identifies a scrollable pane. The order is the order Tab walks.
+// The declaration order is the order Tab walks.
 type paneID int
 
-// The scrollable panes.
 const (
 	paneTraffic paneID = iota
 	paneLeases
@@ -50,11 +44,8 @@ const (
 	paneCount
 )
 
-// follows reports whether a pane sticks to its newest row until the operator
-// scrolls away from it.
 func (p paneID) follows() bool { return p == paneTraffic || p == paneLog }
 
-// title is the pane's name in its border.
 func (p paneID) title() string {
 	switch p {
 	case paneTraffic:
@@ -71,9 +62,8 @@ func (p paneID) title() string {
 	return ""
 }
 
-// paneView is a pane's scroll position. offset is where the operator put the
-// window; start, total and height are written back by the draw loop so the
-// scroll keys can move relative to what is actually on screen.
+// offset is where the operator put the window; start, total and height are
+// written back by the draw loop, so the keys move relative to what is onscreen.
 type paneView struct {
 	offset int
 	follow bool
@@ -82,20 +72,17 @@ type paneView struct {
 	height int
 }
 
-// ring is a fixed size FIFO. The traffic and log panes both keep the newest N
-// entries and nothing else, so memory does not grow with uptime.
+// Fixed size, so the traffic and log panes do not grow with uptime.
 type ring[T any] struct {
 	buf   []T
 	start int
 	n     int
 }
 
-// newRing allocates a ring holding at most capacity entries.
 func newRing[T any](capacity int) *ring[T] {
 	return &ring[T]{buf: make([]T, max(capacity, 1))}
 }
 
-// push appends v, dropping the oldest entry once the ring is full.
 func (r *ring[T]) push(v T) {
 	if r.n < len(r.buf) {
 		r.buf[(r.start+r.n)%len(r.buf)] = v
@@ -108,7 +95,6 @@ func (r *ring[T]) push(v T) {
 	r.start = (r.start + 1) % len(r.buf)
 }
 
-// items copies the ring out, oldest first.
 func (r *ring[T]) items() []T {
 	out := make([]T, r.n)
 	for i := range out {
@@ -118,16 +104,13 @@ func (r *ring[T]) items() []T {
 	return out
 }
 
-// reset empties the ring and lets the entries be collected.
 func (r *ring[T]) reset() {
 	clear(r.buf)
 	r.start, r.n = 0, 0
 }
 
-// rateRing counts events per second over the last minute. It is a ring of
-// one-second buckets with head being the second the newest bucket counts;
-// advancing zeroes the buckets that were skipped so an idle minute reads as
-// zeroes and not as stale peaks.
+// One-second buckets. Advancing zeroes the buckets it skipped, so an idle
+// minute reads as zeroes rather than as stale peaks.
 type rateRing struct {
 	buckets [rateBuckets]uint32
 	sec     int64
@@ -135,7 +118,6 @@ type rateRing struct {
 	primed  bool
 }
 
-// advance moves the head to the second at, clearing what it passes over.
 func (r *rateRing) advance(at time.Time) {
 	sec := at.Unix()
 
@@ -156,16 +138,13 @@ func (r *rateRing) advance(at time.Time) {
 	}
 }
 
-// add counts one event at time at. An event stamped before the head second
-// lands in the head bucket: the server's clock is the same clock, so this only
-// happens on a step backwards, and losing a second of resolution beats
-// rewriting history.
+// An event stamped before the head second lands in the head bucket: only a
+// clock step back does that, and losing a second beats rewriting history.
 func (r *rateRing) add(at time.Time) {
 	r.advance(at)
 	r.buckets[r.head]++
 }
 
-// series ages the ring to now and returns the buckets oldest first.
 func (r *rateRing) series(now time.Time) []uint32 {
 	r.advance(now)
 
@@ -177,12 +156,10 @@ func (r *rateRing) series(now time.Time) []uint32 {
 	return out
 }
 
-// reset drops the history without disturbing the head second.
 func (r *rateRing) reset() {
 	r.buckets = [rateBuckets]uint32{}
 }
 
-// sum adds up a series, for the "N in 60 s" labels.
 func sum(values []uint32) uint64 {
 	var total uint64
 	for _, v := range values {
@@ -192,8 +169,6 @@ func sum(values []uint32) uint64 {
 	return total
 }
 
-// peak is the largest value in a series, which is what the sparklines scale
-// against.
 func peak(values []uint32) uint32 {
 	var top uint32
 	for _, v := range values {
@@ -203,7 +178,6 @@ func peak(values []uint32) uint32 {
 	return top
 }
 
-// familyCounters is everything the counters pane shows for one family.
 type familyCounters struct {
 	total       uint64
 	in          map[string]uint64
@@ -215,12 +189,11 @@ type familyCounters struct {
 	paths       [pathCount]uint64
 }
 
-// newFamilyCounters returns zeroed counters with usable maps.
 func newFamilyCounters() *familyCounters {
 	return &familyCounters{in: map[string]uint64{}, out: map[string]uint64{}}
 }
 
-// clone copies the counters so the draw loop can read them outside the lock.
+// A deep copy, so the draw loop can read the counters outside the lock.
 func (c *familyCounters) clone() familyCounters {
 	out := *c
 	out.in = maps.Clone(c.in)
@@ -229,7 +202,6 @@ func (c *familyCounters) clone() familyCounters {
 	return out
 }
 
-// add folds one request into the counters.
 func (c *familyCounters) add(r events.Request) {
 	c.total++
 	bumpKey(c.in, r.Type)
@@ -252,14 +224,11 @@ func (c *familyCounters) add(r events.Request) {
 	case events.OutcomeSendError:
 		c.sendErrs++
 	case events.OutcomeReplied, events.OutcomeNoReply:
-		// Neither is a problem: the message type is already visible in
-		// the in map and total, and nothing went wrong.
+		// Neither is a problem, and the type is already in the in map.
 	}
 }
 
-// bumpKey counts one message type. The key space is the DHCP message types,
-// but the map is capped anyway: a packet the library could not name must not
-// be able to grow the map without bound.
+// Capped: a packet the library could not name must not grow the map without bound.
 func bumpKey(m map[string]uint64, key string) {
 	if key == "" {
 		key = "?"
@@ -272,9 +241,6 @@ func bumpKey(m map[string]uint64, key string) {
 	m[key]++
 }
 
-// chainLink is one plugin in a family's chain, with what the traffic did to
-// it: how often it was reached, and how often it was the link that ended the
-// chain with a reply or with a drop.
 type chainLink struct {
 	name    string
 	args    []string
@@ -283,8 +249,6 @@ type chainLink struct {
 	dropped uint64
 }
 
-// totals are the server-wide counters in the header, plus the timestamps the
-// status line grades on.
 type totals struct {
 	requests  uint64
 	issued    uint64
@@ -297,9 +261,8 @@ type totals struct {
 	lastSendErr time.Time
 }
 
-// model is everything the UI knows, guarded by one mutex. The observer
-// methods write it from the server's packet goroutines; the draw loop reads it
-// once per frame through snapshot.
+// Guarded by one mutex: the observer methods write it from the server's packet
+// goroutines, the draw loop reads it once per frame through snapshot.
 type model struct {
 	mu sync.Mutex
 
@@ -326,7 +289,6 @@ type model struct {
 	panes  [paneCount]paneView
 }
 
-// newModel builds the model with the ring sizes the options settled on.
 func newModel(started time.Time, version string, history, leases, logLines int) *model {
 	m := &model{
 		started: started,
@@ -345,9 +307,8 @@ func newModel(started time.Time, version string, history, leases, logLines int) 
 	return m
 }
 
-// snapshot is the value copy the draw loop renders from. Taking it is the
-// only place the model is read, and it happens under a single lock so a frame
-// cannot show one pane's state next to another pane's.
+// Taken under a single lock, so a frame cannot show one pane's state next to
+// another pane's.
 type snapshot struct {
 	now     time.Time
 	uptime  time.Duration
@@ -361,9 +322,7 @@ type snapshot struct {
 	leases  []leaseRow
 	logs    []logEntry
 
-	// leaseCounts is how many entries the whole table holds in each state,
-	// which is more than the rows above when the table is larger than one
-	// frame's worth. history is the traffic ring's size, for its title.
+	// leaseCounts covers the whole table, which is more than the rows above.
 	leaseCounts [leaseStateCount]int
 	history     int
 
@@ -377,7 +336,6 @@ type snapshot struct {
 	panes  [paneCount]paneView
 }
 
-// addListener records a socket the server bound.
 func (m *model) addListener(l events.Listener) {
 	l.Address, _ = clip(l.Address, maxNameLen)
 	l.Interface, _ = clip(l.Interface, maxWordLen)
@@ -389,8 +347,7 @@ func (m *model) addListener(l events.Listener) {
 	m.dirty = true
 }
 
-// addPlugin appends a plugin to its family's chain. The server calls this in
-// chain order, which is what gives each link its position.
+// The server calls this in chain order, which is what gives a link its position.
 func (m *model) addPlugin(p events.Plugin) {
 	link := &chainLink{name: p.Name, args: slices.Clone(p.Args)}
 	link.name, _ = clip(link.name, maxWordLen)
@@ -402,10 +359,8 @@ func (m *model) addPlugin(p events.Plugin) {
 	m.dirty = true
 }
 
-// addRequest folds one handled request into every part of the model: the
-// traffic ring, the counters, the rate histories, the lease table and the
-// chain's per-link tallies. This runs on the server's packet path, so it
-// allocates as little as it can and never formats anything.
+// Runs on the server's packet path, so it allocates as little as it can and
+// never formats anything.
 func (m *model) addRequest(now time.Time, r events.Request) {
 	r = boundRequest(r)
 	if r.Time.IsZero() {
@@ -427,9 +382,8 @@ func (m *model) addRequest(now time.Time, r events.Request) {
 	m.recordLease(r)
 }
 
-// boundRequest cuts the event's strings and address list down to what the
-// panes can show, so the traffic ring's memory is bounded by its length and
-// not by what a client put in a hostname option.
+// Bounds the ring's memory by its length rather than by what a client put in a
+// hostname option.
 func boundRequest(r events.Request) events.Request {
 	r.Interface, _ = clip(r.Interface, maxWordLen)
 	r.Type, _ = clip(r.Type, maxWordLen)
@@ -448,9 +402,7 @@ func boundRequest(r events.Request) events.Request {
 	return r
 }
 
-// family returns the counters for a family, creating them on first sight. The
-// map is capped: Family is a byte and the events package does not promise it
-// is one of two values.
+// The map is capped: Family is a byte, and events does not promise it is one of two.
 func (m *model) family(f events.Family) *familyCounters {
 	if c, ok := m.counts[f]; ok {
 		return c
@@ -466,8 +418,7 @@ func (m *model) family(f events.Family) *familyCounters {
 	return c
 }
 
-// recordOutcome updates the server-wide tallies and the error history the
-// status line grades on. Caller holds the lock.
+// Caller holds the lock.
 func (m *model) recordOutcome(r events.Request) {
 	switch r.Outcome {
 	case events.OutcomeDropped:
@@ -481,16 +432,12 @@ func (m *model) recordOutcome(r events.Request) {
 		m.tot.lastSendErr = r.Time
 		m.errRate.add(r.Time)
 	case events.OutcomeReplied, events.OutcomeNoReply:
-		// Neither dropped anything nor errored, so neither counter nor
-		// error timestamp moves.
+		// Neither dropped nor errored, so no counter and no timestamp moves.
 	}
 }
 
-// recordChain attributes the request to the plugins that saw it. The event
-// only names the link that ended the chain, but chain order is enough to know
-// the rest: with a stopping link at position p, links 1..p ran; with no
-// stopping link every plugin ran. A packet that never reached the chain
-// reaches nobody. Caller holds the lock.
+// The event names only the link that stopped the chain; with one at position p,
+// links 1..p ran, and with none every plugin did. Caller holds the lock.
 func (m *model) recordChain(r events.Request) {
 	links := m.chains[r.Family]
 	if len(links) == 0 {
@@ -520,15 +467,11 @@ func (m *model) recordChain(r events.Request) {
 	case events.OutcomeDropped:
 		links[stop-1].dropped++
 	case events.OutcomeNoReply:
-		// The chain ran and stopped here, but nothing was sent and
-		// nothing was dropped, so the stopping link gets neither tally.
+		// The chain stopped here, but nothing was sent and nothing dropped.
 	case events.OutcomeParseError, events.OutcomeUnsupported:
 	}
 }
 
-// addLog stores one log line as it arrived. Parsing happens at draw time: the
-// writer is called from wherever the server logs, and the ring holds far more
-// lines than the pane ever shows.
 func (m *model) addLog(now time.Time, raw string) {
 	raw, _ = clip(raw, maxLogLineLen)
 
@@ -539,8 +482,6 @@ func (m *model) addLog(now time.Time, raw string) {
 	m.dirty = true
 }
 
-// snapshot copies out what a frame needs. When force is false and nothing has
-// changed since the last call it reports false and copies nothing.
 func (m *model) snapshot(now time.Time, force bool) (snapshot, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -580,8 +521,7 @@ func (m *model) snapshot(now time.Time, force bool) (snapshot, bool) {
 	return snap, true
 }
 
-// cloneChains copies the chains by value so the draw loop reads counters that
-// cannot change under it.
+// By value, so the draw loop reads counters that cannot change under it.
 func cloneChains(src map[events.Family][]*chainLink) map[events.Family][]chainLink {
 	out := make(map[events.Family][]chainLink, len(src))
 
@@ -598,7 +538,6 @@ func cloneChains(src map[events.Family][]*chainLink) map[events.Family][]chainLi
 	return out
 }
 
-// cloneCounts copies the per-family counters, maps included.
 func cloneCounts(src map[events.Family]*familyCounters) map[events.Family]familyCounters {
 	out := make(map[events.Family]familyCounters, len(src))
 	for f, c := range src {
@@ -608,8 +547,8 @@ func cloneCounts(src map[events.Family]*familyCounters) map[events.Family]family
 	return out
 }
 
-// setGeometry records where a pane's window ended up. The draw loop is the
-// only place that knows a pane's height, and the scroll keys need it.
+// The draw loop is the only place that knows a pane's height, and the scroll
+// keys need it.
 func (m *model) setGeometry(id paneID, start, total, height int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

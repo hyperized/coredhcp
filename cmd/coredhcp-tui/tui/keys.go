@@ -12,13 +12,10 @@ import (
 	"github.com/coredhcp/coredhcp/events"
 )
 
-// handleKey is the application's input capture. It runs on tview's event
-// goroutine and only touches the model, so a key press costs one lock and the
-// next frame shows the result. Keys it consumed return nil; everything else is
-// handed back to tview.
+// handleKey runs on tview's event goroutine and only touches the model, so a
+// key press costs one lock instead of a round trip through the draw loop.
 func (u *UI) handleKey(ev *tcell.EventKey) *tcell.EventKey {
-	// Any key press is worth a frame: it either changed the model or it is
-	// about to be drawn over by one that did.
+	// Unconditional: a press either changed the model or is about to be drawn over.
 	defer u.m.touch()
 
 	if quitKey(ev) {
@@ -27,8 +24,7 @@ func (u *UI) handleKey(ev *tcell.EventKey) *tcell.EventKey {
 		return nil
 	}
 
-	// The help overlay swallows everything that is not a quit, which is what
-	// makes "any key closes it" true.
+	// Swallowing every non-quit key is what makes "any key closes it" true.
 	if u.m.helpOpen() {
 		u.m.toggleHelp()
 
@@ -42,9 +38,8 @@ func (u *UI) handleKey(ev *tcell.EventKey) *tcell.EventKey {
 	return ev
 }
 
-// quitKey reports whether ev asks the server's UI to go away. Ctrl-C is
-// handled here rather than left to tview so that shutdown always runs in the
-// same order.
+// Ctrl-C is caught here rather than left to tview, so shutdown always runs in
+// the same order.
 func quitKey(ev *tcell.EventKey) bool {
 	switch ev.Key() {
 	case tcell.KeyCtrlC, tcell.KeyEsc:
@@ -56,7 +51,6 @@ func quitKey(ev *tcell.EventKey) bool {
 	return false
 }
 
-// handleRune deals with the letter and digit keys.
 func (u *UI) handleRune(ev *tcell.EventKey) bool {
 	if ev.Key() != tcell.KeyRune {
 		return false
@@ -78,7 +72,6 @@ func (u *UI) handleRune(ev *tcell.EventKey) bool {
 	return true
 }
 
-// handleScroll deals with focus movement and the scroll keys.
 func (u *UI) handleScroll(ev *tcell.EventKey) bool {
 	switch ev.Key() {
 	case tcell.KeyTab:
@@ -104,7 +97,6 @@ func (u *UI) handleScroll(ev *tcell.EventKey) bool {
 	return true
 }
 
-// touch marks the model as needing a frame.
 func (m *model) touch() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -112,7 +104,6 @@ func (m *model) touch() {
 	m.dirty = true
 }
 
-// helpOpen reports whether the help overlay is up.
 func (m *model) helpOpen() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -120,7 +111,6 @@ func (m *model) helpOpen() bool {
 	return m.help
 }
 
-// toggleHelp shows or hides the help overlay.
 func (m *model) toggleHelp() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -129,9 +119,8 @@ func (m *model) toggleHelp() {
 	m.dirty = true
 }
 
-// togglePause freezes the traffic pane on what it is showing. Collection
-// keeps running: the pane is a copy taken at the moment of the pause, so the
-// rows cannot shift under the operator while they read them.
+// Collection keeps running: the pane freezes on a copy so the rows cannot
+// shift under the operator while they read them.
 func (m *model) togglePause() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -146,10 +135,8 @@ func (m *model) togglePause() {
 	m.dirty = true
 }
 
-// clearStats empties the traffic ring, the per-family counters and the rate
-// history. The lease table and the log survive: they are the record of what
-// the server did, and clearing the screen is about the noise, not the record.
-// The lease-derived issued and confirmed totals stay with the table.
+// The lease table and the log survive: clearing the screen is about the noise,
+// not the record of what the server did.
 func (m *model) clearStats() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -171,7 +158,6 @@ func (m *model) clearStats() {
 	m.dirty = true
 }
 
-// setFocus points the scroll keys at a pane.
 func (m *model) setFocus(id paneID) {
 	if id < 0 || id >= paneCount {
 		return
@@ -184,7 +170,6 @@ func (m *model) setFocus(id paneID) {
 	m.dirty = true
 }
 
-// cycleFocus walks the focus one pane forwards or backwards.
 func (m *model) cycleFocus(delta int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -193,10 +178,8 @@ func (m *model) cycleFocus(delta int) {
 	m.dirty = true
 }
 
-// scrollBy moves the focused pane's window by delta rows, relative to where
-// the last frame actually put it. A pane that follows its newest row stops
-// following as soon as the operator moves away from the bottom, and starts
-// again when they come back to it.
+// delta is relative to where the last frame put the window. Following stops as
+// soon as the operator leaves the bottom, and resumes when they come back.
 func (m *model) scrollBy(delta int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -207,7 +190,6 @@ func (m *model) scrollBy(delta int) {
 	m.dirty = true
 }
 
-// scrollPage moves the focused pane a screenful in either direction.
 func (m *model) scrollPage(dir int) {
 	m.mu.Lock()
 	height := max(m.panes[m.focus].height, 1)
@@ -216,7 +198,6 @@ func (m *model) scrollPage(dir int) {
 	m.scrollBy(dir * height)
 }
 
-// scrollTop jumps the focused pane to its oldest row.
 func (m *model) scrollTop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -226,8 +207,6 @@ func (m *model) scrollTop() {
 	m.dirty = true
 }
 
-// scrollBottom jumps the focused pane to its newest row and, for the panes
-// that follow, hands it back to the live feed.
 func (m *model) scrollBottom() {
 	m.mu.Lock()
 	defer m.mu.Unlock()

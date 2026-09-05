@@ -13,22 +13,14 @@ import (
 	"github.com/coredhcp/coredhcp/events"
 )
 
-// leaseSnapshotRows bounds how much of the lease table one frame copies. The
-// table itself holds up to WithMaxLeases entries; the pane is a view of what
-// is happening now, sorted by last seen, so copying the newest few hundred per
-// frame is enough to scroll through and keeps the frame cost flat.
+// The table holds up to WithMaxLeases entries, but rows are sorted by last
+// seen, so copying the newest few hundred per frame keeps the frame cost flat.
 const leaseSnapshotRows = 500
 
-// leaseState is what the last request told us about a client's address.
 type leaseState uint8
 
-// The lease states, derived from traffic rather than from any plugin's lease
-// database. leaseNone means the request said nothing about a lease.
-//
-// leaseOffered is an address the server put on the table and the client has
-// not taken yet. The header's issued counter is the lifetime number of those
-// offers, so the two numbers differ once a client accepts one: the offer is
-// counted for good, the table entry moves on to confirmed.
+// Read out of the traffic, not out of a plugin's lease database. An entry
+// moves on to confirmed while the header's issued total keeps the offer.
 const (
 	leaseNone leaseState = iota
 	leaseOffered
@@ -39,7 +31,6 @@ const (
 	leaseStateCount
 )
 
-// label is the word shown in the state column.
 func (s leaseState) label() string {
 	switch s {
 	case leaseOffered:
@@ -58,8 +49,6 @@ func (s leaseState) label() string {
 	return "-"
 }
 
-// tag grades the state: an offer nobody has taken yet is attention, confirmed
-// is good, refused and declined are errors, released is history.
 func (s leaseState) tag() string {
 	switch s {
 	case leaseOffered:
@@ -74,15 +63,13 @@ func (s leaseState) tag() string {
 	return tagDim
 }
 
-// leaseKey identifies a client within its protocol family.
 type leaseKey struct {
 	family events.Family
 	client string
 }
 
-// leaseEntry is one client's current lease state plus its place in the
-// recently-seen list. The list is intrusive so that touching an entry, and
-// evicting the least recently seen one, are both constant time.
+// The list is intrusive so touching an entry and evicting the oldest are both
+// constant time.
 type leaseEntry struct {
 	prev, next *leaseEntry
 
@@ -95,7 +82,6 @@ type leaseEntry struct {
 	expiry   time.Time
 }
 
-// leaseRow is a lease copied out for rendering.
 type leaseRow struct {
 	family   events.Family
 	client   string
@@ -107,9 +93,7 @@ type leaseRow struct {
 	expiry   time.Time
 }
 
-// leaseTable holds one entry per (family, client), ordered by when it was
-// last seen, newest first. It is bounded: past max entries the least recently
-// seen one is dropped, so a client that floods the server with new identifiers
+// Bounded at max entries, so a client flooding the server with new identifiers
 // cannot grow it without limit.
 type leaseTable struct {
 	max        int
@@ -118,12 +102,10 @@ type leaseTable struct {
 	states     [leaseStateCount]int
 }
 
-// newLeaseTable returns an empty table holding at most max entries.
 func newLeaseTable(maxEntries int) *leaseTable {
 	return &leaseTable{max: max(maxEntries, 1), idx: map[leaseKey]*leaseEntry{}}
 }
 
-// update applies one request's lease meaning to the client's entry.
 func (t *leaseTable) update(r events.Request, state leaseState) {
 	key := leaseKey{family: r.Family, client: r.ClientID}
 
@@ -156,8 +138,8 @@ func (t *leaseTable) update(r events.Request, state leaseState) {
 		e.plugin = r.Plugin
 	}
 
-	// An ACK usually repeats the lease time, but when it does not the
-	// deadline the OFFER carried is still the best we know.
+	// When an ACK omits the lease time, the deadline the OFFER carried is still
+	// the best we know.
 	if exp := expiryFor(r, state); !exp.IsZero() {
 		e.expiry = exp
 	} else if state != leaseOffered && state != leaseConfirmed {
@@ -165,9 +147,7 @@ func (t *leaseTable) update(r events.Request, state leaseState) {
 	}
 }
 
-// expiryFor is when the lease runs out, or the zero time when the request did
-// not say. A lease that was released, refused or declined has no address to
-// count down, so those states clear it.
+// Released, refused and declined have no address to count down, so they clear it.
 func expiryFor(r events.Request, state leaseState) time.Time {
 	if state != leaseOffered && state != leaseConfirmed {
 		return time.Time{}
@@ -180,7 +160,6 @@ func expiryFor(r events.Request, state leaseState) time.Time {
 	return r.Time.Add(r.LeaseTime)
 }
 
-// rows copies the newest entries out for rendering.
 func (t *leaseTable) rows() []leaseRow {
 	out := make([]leaseRow, 0, min(len(t.idx), leaseSnapshotRows))
 
@@ -200,10 +179,8 @@ func (t *leaseTable) rows() []leaseRow {
 	return out
 }
 
-// counts reports how many entries are in each state.
 func (t *leaseTable) counts() [leaseStateCount]int { return t.states }
 
-// evict drops the least recently seen entry when the table is full.
 func (t *leaseTable) evict() {
 	if len(t.idx) < t.max || t.tail == nil {
 		return
@@ -215,7 +192,6 @@ func (t *leaseTable) evict() {
 	delete(t.idx, e.key)
 }
 
-// pushFront puts e at the recently-seen end of the list.
 func (t *leaseTable) pushFront(e *leaseEntry) {
 	e.prev, e.next = nil, t.head
 
@@ -229,7 +205,6 @@ func (t *leaseTable) pushFront(e *leaseEntry) {
 	}
 }
 
-// unlink takes e out of the list, leaving it usable for pushFront.
 func (t *leaseTable) unlink(e *leaseEntry) {
 	if e.prev != nil {
 		e.prev.next = e.next
@@ -246,17 +221,15 @@ func (t *leaseTable) unlink(e *leaseEntry) {
 	e.prev, e.next = nil, nil
 }
 
-// recordLease folds the request's lease meaning into the table and the
-// issued / confirmed totals. Caller holds the model lock.
+// Caller holds the model lock.
 func (m *model) recordLease(r events.Request) {
 	state := leaseTransition(r)
 	if state == leaseNone || r.ClientID == "" {
 		return
 	}
 
-	// The totals count offers and confirmations for the lifetime of the
-	// process; the table holds one state per client, which is why an offer
-	// stays in the total after the client's entry has moved to confirmed.
+	// The totals count for the lifetime of the process; the table holds one
+	// state per client.
 	switch state {
 	case leaseOffered:
 		m.tot.issued++
@@ -268,10 +241,6 @@ func (m *model) recordLease(r events.Request) {
 	m.leases.update(r, state)
 }
 
-// leaseTransition reads one request as a statement about the client's lease.
-// The server does not tell us what a plugin wrote to its lease database, so
-// this is the DHCP exchange itself: what was offered, what was acknowledged,
-// what was refused and what the client gave back.
 func leaseTransition(r events.Request) leaseState {
 	switch r.Family {
 	case events.FamilyV4:
@@ -283,11 +252,8 @@ func leaseTransition(r events.Request) leaseState {
 	return leaseNone
 }
 
-// leaseTransitionV4 reads a DHCPv4 exchange. RELEASE counts whatever the
-// server did with it, because the client has stopped using the address either
-// way. A DECLINE counts once the plugin chain has seen it, which is what the
-// no-reply outcome says. Neither message type gets an answer, so there is no
-// reply to read the result off.
+// RELEASE and DECLINE get no answer, so there is no reply to read the outcome
+// off: RELEASE counts either way, DECLINE once the chain has seen it.
 func leaseTransitionV4(r events.Request) leaseState {
 	typ, reply := strings.ToUpper(r.Type), strings.ToUpper(r.ReplyType)
 
@@ -318,9 +284,8 @@ func leaseTransitionV4(r events.Request) leaseState {
 	return leaseNone
 }
 
-// leaseTransitionV6 reads a DHCPv6 exchange. A REPLY with no addresses to a
-// REQUEST, RENEW or REBIND is the server saying no, which is the closest v6
-// has to a NAK. INFORMATION-REQUEST never carries a lease.
+// A REPLY carrying no addresses is the server saying no, which is the closest
+// v6 has to a NAK.
 func leaseTransitionV6(r events.Request) leaseState {
 	typ, reply := strings.ToUpper(r.Type), strings.ToUpper(r.ReplyType)
 
@@ -352,9 +317,7 @@ func leaseTransitionV6(r events.Request) leaseState {
 	return leaseNone
 }
 
-// solicitState splits the two answers to a SOLICIT: the usual ADVERTISE, and
-// the REPLY a server sends when the client asked for rapid commit and got the
-// address in one round trip.
+// A REPLY to a SOLICIT is rapid commit: the address arrived in one round trip.
 func solicitState(reply string) leaseState {
 	switch reply {
 	case "ADVERTISE":
@@ -366,8 +329,6 @@ func solicitState(reply string) leaseState {
 	return leaseNone
 }
 
-// Preferred widths of the lease columns, with floors for the two that hold
-// wire data.
 const (
 	leaseClientW    = 20
 	leaseAddrW      = 24
@@ -379,13 +340,11 @@ const (
 	leaseMinAddrW   = 8
 )
 
-// leaseCols is how wide each column of the lease pane is on this terminal. A
-// zero width means the column is not shown.
+// A zero width means the column is dropped rather than narrowed.
 type leaseCols struct {
 	client, addr, state, lease, seen, plugin int
 }
 
-// width is what a lease row costs, single spaces included.
 func (c leaseCols) width() int {
 	total, gaps := 0, -1
 
@@ -399,10 +358,8 @@ func (c leaseCols) width() int {
 	return total + max(gaps, 0)
 }
 
-// leaseColumns fits the lease columns into width. It starts from the floors,
-// drops the columns an operator can do without in a narrow pane, and hands
-// whatever is left over back to the address and client columns, which are the
-// two that hold something worth reading in full.
+// Starts from the floors and hands the leftovers to client and address, the two
+// that hold something worth reading in full.
 func leaseColumns(width int) leaseCols {
 	c := leaseCols{
 		client: leaseMinClientW, addr: leaseMinAddrW, state: leaseStateW,
@@ -424,7 +381,6 @@ func leaseColumns(width int) leaseCols {
 	return c
 }
 
-// grow gives a column up to spare more columns, never past ceiling.
 func grow(field *int, ceiling, spare int) {
 	if spare <= 0 {
 		return
@@ -433,8 +389,7 @@ func grow(field *int, ceiling, spare int) {
 	*field += min(spare, max(ceiling-*field, 0))
 }
 
-// leaseTitle names the pane and carries the live state counts. Titles are
-// ASCII: see newPane for why.
+// Titles are ASCII: see newPane for why.
 func leaseTitle(s snapshot) string {
 	counts := s.leaseCounts
 
@@ -442,16 +397,14 @@ func leaseTitle(s snapshot) string {
 		strconv.Itoa(counts[leaseConfirmed]) + " confirmed) "
 }
 
-// leaseCells is one lease row's text, already graded. The header row is the
-// same shape with the column names in it, so both go through one writer and
-// cannot drift apart when a column is dropped.
+// The header row is this same shape, so both go through one writer and cannot
+// drift apart when a column is dropped.
 type leaseCells struct {
 	client, host, addr, state, lease, seen, plugin string
 	clientTag, stateTag, leaseTag                  string
 }
 
-// leaseLines renders the lease pane. The first line is the column header and
-// the draw loop keeps it in place while the rest scrolls.
+// The first line is the column header, which the draw loop keeps in place.
 func leaseLines(s snapshot, width int) []string {
 	cols := leaseColumns(width)
 
@@ -473,7 +426,6 @@ func leaseLines(s snapshot, width int) []string {
 	return lines
 }
 
-// leaseRowCells turns one lease into the text of its row.
 func leaseRowCells(now time.Time, row leaseRow) leaseCells {
 	return leaseCells{
 		client:    row.client,
@@ -489,7 +441,6 @@ func leaseRowCells(now time.Time, row leaseRow) leaseCells {
 	}
 }
 
-// writeLease lays one row out across the columns that survived.
 func writeLease(width int, cols leaseCols, cells leaseCells) string {
 	l := newLine(width)
 
@@ -526,8 +477,6 @@ func writeLease(width int, cols leaseCols, cells leaseCells) string {
 	return l.String()
 }
 
-// leaseTimeTag dims a lease whose time has run out, so an expired row reads as
-// history next to the ones still counting down.
 func leaseTimeTag(now time.Time, row leaseRow) string {
 	if row.expiry.IsZero() || !row.expiry.After(now) {
 		return tagDim
@@ -536,7 +485,6 @@ func leaseTimeTag(now time.Time, row leaseRow) string {
 	return tagPlain
 }
 
-// newDim is the one-line placeholder a pane shows when it has nothing yet.
 func newDim(width int, text string) string {
 	l := newLine(width)
 	l.text(tagDim, text)

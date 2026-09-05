@@ -11,16 +11,11 @@ import (
 	"github.com/coredhcp/coredhcp/events"
 )
 
-// maxCounterTypes is how many message types one row of the counters pane
-// lists before the rest are left to the traffic pane. The busy families use
-// three or four types; the tail is noise in a narrow pane.
+// Four: a busy family uses three or four message types and the tail is noise.
 const maxCounterTypes = 4
 
-// pathLabels are the short names of the reply paths in the counters pane.
 var pathLabels = [pathCount]string{"none", "unicast", "bcast", "l2"}
 
-// counterLines renders the per-family tallies: what came in, what went out,
-// what failed and how the replies left.
 func counterLines(s snapshot, width int) []string {
 	lines := make([]string, 0, 8)
 
@@ -44,7 +39,6 @@ func counterLines(s snapshot, width int) []string {
 	return lines
 }
 
-// counterHeader is the family's name and how many requests it handled.
 func counterHeader(f events.Family, total uint64, width int) string {
 	l := newLine(width)
 	l.text(tagBold, f.String())
@@ -54,7 +48,6 @@ func counterHeader(f events.Family, total uint64, width int) string {
 	return l.String()
 }
 
-// typeLine lists the busiest message types on one row, biggest first.
 func typeLine(label string, counts map[string]uint64, width int) string {
 	l := newLine(width)
 	l.space(1)
@@ -69,14 +62,12 @@ func typeLine(label string, counts map[string]uint64, width int) string {
 	return l.String()
 }
 
-// namedCount is one message type and how often it was seen.
 type namedCount struct {
 	name  string
 	count uint64
 }
 
-// topTypes returns the n busiest types, ordered by count and then by name so
-// two runs with the same traffic render the same way.
+// Ties break on name so two runs with the same traffic render identically.
 func topTypes(counts map[string]uint64, n int) []namedCount {
 	out := make([]namedCount, 0, len(counts))
 	for name, count := range counts {
@@ -94,8 +85,8 @@ func topTypes(counts map[string]uint64, n int) []namedCount {
 	return out[:min(len(out), n)]
 }
 
-// problemLine is the row of things that went wrong, coloured only when they
-// actually happened so a healthy server is not a wall of red zeroes.
+// Coloured only when the count is non-zero, so a healthy server is not a wall
+// of red zeroes.
 func problemLine(c familyCounters, width int) string {
 	l := newLine(width)
 	l.space(1)
@@ -126,8 +117,6 @@ func problemLine(c familyCounters, width int) string {
 	return l.String()
 }
 
-// pathLine shows how the replies left the server, skipping the paths this
-// family never used.
 func pathLine(c familyCounters, width int) string {
 	l := newLine(width)
 	l.space(1)

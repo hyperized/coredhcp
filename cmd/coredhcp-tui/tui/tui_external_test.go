@@ -20,12 +20,10 @@ import (
 	"github.com/coredhcp/coredhcp/events"
 )
 
-// waitFor is how long a test waits for a frame to show what it asked for. The
-// draw loop runs every few milliseconds in tests, so reaching this means
-// something is wrong rather than slow.
+// waitFor is deliberately generous: the draw loop ticks every few milliseconds
+// here, so reaching it means something is wrong rather than slow.
 const waitFor = 5 * time.Second
 
-// clock is a hand-wound clock so the tests can put the UI at a known time.
 type clock struct {
 	mu sync.Mutex
 	at time.Time
@@ -47,11 +45,8 @@ func (c *clock) advance(d time.Duration) {
 	c.at = c.at.Add(d)
 }
 
-// syncScreen serialises reads of the simulation screen's cell buffer against
-// tview's writes to it. GetContents hands back the live buffer, and Show and
-// Sync overwrite it in place from the application goroutine, so reading it
-// while a frame is drawn races under the race detector unless both sides
-// share a lock.
+// syncScreen serialises reads of the simulation screen against tview's writes:
+// GetContents hands back the live buffer that Show and Sync overwrite in place.
 type syncScreen struct {
 	tcell.SimulationScreen
 
@@ -79,9 +74,6 @@ func (s *syncScreen) Fini() {
 	s.SimulationScreen.Fini()
 }
 
-// rows renders the whole screen to text with the read held under the same
-// lock Show and Sync use, since a SimCell's runes are rewritten in place by
-// the next frame.
 func (s *syncScreen) rows() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -110,8 +102,6 @@ func (s *syncScreen) rows() []string {
 	return out
 }
 
-// newSyncScreen builds an initialised simulation screen wrapped for safe
-// concurrent reading.
 func newSyncScreen(t *testing.T) *syncScreen {
 	t.Helper()
 
@@ -121,7 +111,6 @@ func newSyncScreen(t *testing.T) *syncScreen {
 	return &syncScreen{SimulationScreen: sim}
 }
 
-// harness runs a UI on a simulation screen and reads cells back off it.
 type harness struct {
 	t      *testing.T
 	ui     *tui.UI
@@ -129,7 +118,6 @@ type harness struct {
 	done   chan error
 }
 
-// newHarness starts a UI of the given size and waits for its first frame.
 func newHarness(t *testing.T, width, height int, opts ...tui.Option) *harness {
 	t.Helper()
 
@@ -139,8 +127,7 @@ func newHarness(t *testing.T, width, height int, opts ...tui.Option) *harness {
 	return h
 }
 
-// newPendingHarness builds a UI and its screen without starting Run, so a
-// caller can feed it events or log lines before the UI is up.
+// Separate from newHarness so a caller can feed events or log lines before Run.
 func newPendingHarness(t *testing.T, width, height int, opts ...tui.Option) *harness {
 	t.Helper()
 
@@ -155,8 +142,6 @@ func newPendingHarness(t *testing.T, width, height int, opts ...tui.Option) *har
 	return &harness{t: t, ui: ui, screen: screen, done: make(chan error, 1)}
 }
 
-// start runs the UI in the background, registers its shutdown and waits for
-// the first frame.
 func (h *harness) start() {
 	h.t.Helper()
 
@@ -167,7 +152,6 @@ func (h *harness) start() {
 	h.waitText("coredhcp")
 }
 
-// stop ends the run and fails the test if Run does not come back.
 func (h *harness) stop() {
 	h.t.Helper()
 
@@ -181,19 +165,16 @@ func (h *harness) stop() {
 	}
 }
 
-// key injects a key press on the simulation screen.
 func (h *harness) key(key tcell.Key, r rune) {
 	h.screen.InjectKey(key, r, tcell.ModNone)
 }
 
-// width is the simulated screen's width.
 func (h *harness) width() int {
 	_, w, _ := h.screen.GetContents()
 
 	return w
 }
 
-// row returns one row of the screen as text, without its trailing blanks.
 func (h *harness) row(y int) string {
 	rows := h.screen.rows()
 	if y < 0 || y >= len(rows) {
@@ -203,12 +184,10 @@ func (h *harness) row(y int) string {
 	return rows[y]
 }
 
-// text is the whole screen.
 func (h *harness) text() string {
 	return strings.Join(h.screen.rows(), "\n")
 }
 
-// waitFor polls the screen until want is satisfied.
 func (h *harness) waitFor(what string, want func(string) bool) {
 	h.t.Helper()
 
@@ -224,15 +203,13 @@ func (h *harness) waitFor(what string, want func(string) bool) {
 	h.t.Fatalf("timed out waiting for %s, screen was:\n%s", what, h.text())
 }
 
-// waitText polls until the screen contains want.
 func (h *harness) waitText(want string) {
 	h.t.Helper()
 
 	h.waitFor(want, func(screen string) bool { return strings.Contains(screen, want) })
 }
 
-// settles polls for d and fails immediately if unwanted ever shows up,
-// proving it stays off screen rather than that a check ran once too early.
+// Polls for the whole window: a single check can pass just by running too early.
 func (h *harness) settles(unwanted string, d time.Duration) {
 	h.t.Helper()
 
@@ -243,8 +220,7 @@ func (h *harness) settles(unwanted string, d time.Duration) {
 	}
 }
 
-// staysText polls for d and fails if want ever goes missing, proving a key
-// press left it alone rather than that a check ran once too early.
+// Polls for the whole window: a single check can pass just by running too early.
 func (h *harness) staysText(want string, d time.Duration) {
 	h.t.Helper()
 
@@ -255,8 +231,6 @@ func (h *harness) staysText(want string, d time.Duration) {
 	}
 }
 
-// runAsync starts ui.Run in its own goroutine and returns a channel carrying
-// its result.
 func runAsync(ctx context.Context, ui *tui.UI) <-chan error {
 	done := make(chan error, 1)
 	go func() { done <- ui.Run(ctx) }()
@@ -264,8 +238,6 @@ func runAsync(ctx context.Context, ui *tui.UI) <-chan error {
 	return done
 }
 
-// waitRun waits for a Run started with runAsync to return, failing the test
-// if it takes longer than waitFor.
 func waitRun(t *testing.T, done <-chan error) error {
 	t.Helper()
 
@@ -279,8 +251,6 @@ func waitRun(t *testing.T, done <-chan error) error {
 	}
 }
 
-// hammerStop calls Stop n times concurrently and reports when every call has
-// returned, which is how the idempotency tests prove Stop never blocks.
 func hammerStop(ui *tui.UI, n int) <-chan struct{} {
 	done := make(chan struct{})
 
@@ -304,8 +274,6 @@ func hammerStop(ui *tui.UI, n int) <-chan struct{} {
 	return done
 }
 
-// prefix is the /32 or /128 for a host address, which is what the server
-// reports for a handed out address.
 func prefix(t *testing.T, s string) netip.Prefix {
 	t.Helper()
 
@@ -315,8 +283,7 @@ func prefix(t *testing.T, s string) netip.Prefix {
 	return netip.PrefixFrom(addr, addr.BitLen())
 }
 
-// seed feeds the UI a listener set, two plugin chains and a burst of traffic
-// that covers every outcome the panes grade differently.
+// The burst covers every outcome the panes grade differently.
 func seed(t *testing.T, ui *tui.UI, at time.Time) {
 	t.Helper()
 
@@ -395,7 +362,6 @@ func seed(t *testing.T, ui *tui.UI, at time.Time) {
 	}
 }
 
-// TestScreenDump renders a full screen so the layout can be read as text.
 func TestScreenDump(t *testing.T) {
 	t.Parallel()
 
@@ -414,8 +380,6 @@ func TestScreenDump(t *testing.T) {
 	t.Logf("\n%s", h.text())
 }
 
-// TestStopBeforeRunReturnsNilImmediately pins down that calling Stop before
-// Run makes Run report nil right away instead of opening a screen.
 func TestStopBeforeRunReturnsNilImmediately(t *testing.T) {
 	t.Parallel()
 
@@ -425,8 +389,6 @@ func TestStopBeforeRunReturnsNilImmediately(t *testing.T) {
 	require.NoError(t, waitRun(t, runAsync(context.Background(), ui)))
 }
 
-// TestSecondRunReturnsNilAfterFirstReturns pins down that calling Run again
-// after the first call has returned comes back with nil right away.
 func TestSecondRunReturnsNilAfterFirstReturns(t *testing.T) {
 	t.Parallel()
 
@@ -439,8 +401,6 @@ func TestSecondRunReturnsNilAfterFirstReturns(t *testing.T) {
 	require.NoError(t, waitRun(t, runAsync(context.Background(), ui)))
 }
 
-// TestContextCancellationEndsRun pins down that cancelling the context passed
-// to Run ends it with a nil error.
 func TestContextCancellationEndsRun(t *testing.T) {
 	t.Parallel()
 
@@ -453,8 +413,6 @@ func TestContextCancellationEndsRun(t *testing.T) {
 	require.NoError(t, waitRun(t, done))
 }
 
-// TestStopIdempotentBeforeRun pins down that hammering Stop before Run ever
-// starts neither panics nor blocks.
 func TestStopIdempotentBeforeRun(t *testing.T) {
 	t.Parallel()
 
@@ -469,8 +427,6 @@ func TestStopIdempotentBeforeRun(t *testing.T) {
 	require.NoError(t, waitRun(t, runAsync(context.Background(), ui)))
 }
 
-// TestStopIdempotentDuringRun pins down that hammering Stop while Run is in
-// flight neither panics nor blocks, and Run still returns nil.
 func TestStopIdempotentDuringRun(t *testing.T) {
 	t.Parallel()
 
@@ -486,8 +442,6 @@ func TestStopIdempotentDuringRun(t *testing.T) {
 	require.NoError(t, waitRun(t, done))
 }
 
-// TestStopIdempotentAfterRun pins down that hammering Stop once Run has
-// already returned neither panics nor blocks.
 func TestStopIdempotentAfterRun(t *testing.T) {
 	t.Parallel()
 
@@ -503,8 +457,6 @@ func TestStopIdempotentAfterRun(t *testing.T) {
 	}
 }
 
-// TestEventsAcceptedBeforeRunShowOnScreen pins down that events and log lines
-// sent before Run starts are not lost and appear once the screen comes up.
 func TestEventsAcceptedBeforeRunShowOnScreen(t *testing.T) {
 	t.Parallel()
 
@@ -526,8 +478,6 @@ func TestEventsAcceptedBeforeRunShowOnScreen(t *testing.T) {
 	require.Contains(t, h.text(), "macfilter")
 }
 
-// TestEventsAndLogAcceptedAfterStopDoNotPanic pins down that events and log
-// writes sent after Stop are accepted without panicking.
 func TestEventsAndLogAcceptedAfterStopDoNotPanic(t *testing.T) {
 	t.Parallel()
 
@@ -544,8 +494,6 @@ func TestEventsAndLogAcceptedAfterStopDoNotPanic(t *testing.T) {
 	})
 }
 
-// TestQuitKeysEndRun pins down that q, Esc and Ctrl-C each end Run with a nil
-// error.
 func TestQuitKeysEndRun(t *testing.T) {
 	t.Parallel()
 
@@ -569,8 +517,6 @@ func TestQuitKeysEndRun(t *testing.T) {
 	}
 }
 
-// TestDefaultVersionIsDevel pins down that a UI built with no version option
-// shows the placeholder version in its header.
 func TestDefaultVersionIsDevel(t *testing.T) {
 	t.Parallel()
 
@@ -579,8 +525,6 @@ func TestDefaultVersionIsDevel(t *testing.T) {
 	h.waitText("(devel)")
 }
 
-// TestWithVersionShowsInHeader pins down that WithVersion's value reaches the
-// header.
 func TestWithVersionShowsInHeader(t *testing.T) {
 	t.Parallel()
 
@@ -589,8 +533,6 @@ func TestWithVersionShowsInHeader(t *testing.T) {
 	h.waitText("v9.9.9")
 }
 
-// TestInvalidOptionsFallBackToDefaults pins down that an option given a value
-// the UI cannot use falls back to its default instead of breaking the UI.
 func TestInvalidOptionsFallBackToDefaults(t *testing.T) {
 	t.Parallel()
 
@@ -624,8 +566,6 @@ func TestInvalidOptionsFallBackToDefaults(t *testing.T) {
 	}
 }
 
-// TestWithHistoryBoundsTrafficPane pins down that WithHistory caps the
-// traffic ring, dropping the oldest request once it fills.
 func TestWithHistoryBoundsTrafficPane(t *testing.T) {
 	t.Parallel()
 
@@ -644,8 +584,6 @@ func TestWithHistoryBoundsTrafficPane(t *testing.T) {
 	require.NotContains(t, h.text(), "client-00")
 }
 
-// TestWithMaxLeasesBoundsLeaseTable pins down that WithMaxLeases caps the
-// lease table itself, not just how much of it a pane can show.
 func TestWithMaxLeasesBoundsLeaseTable(t *testing.T) {
 	t.Parallel()
 
@@ -664,8 +602,6 @@ func TestWithMaxLeasesBoundsLeaseTable(t *testing.T) {
 	h.waitText(fmt.Sprintf("%d offered, 0 confirmed", n))
 }
 
-// TestWithLogLinesBoundsLogPane pins down that WithLogLines caps the log
-// ring, dropping the oldest line once it fills.
 func TestWithLogLinesBoundsLogPane(t *testing.T) {
 	t.Parallel()
 
@@ -682,8 +618,6 @@ func TestWithLogLinesBoundsLogPane(t *testing.T) {
 	require.NotContains(t, h.text(), "line-00")
 }
 
-// TestWithClockDrivesUptime pins down that the header's uptime tracks the
-// clock WithClock supplies rather than the wall clock.
 func TestWithClockDrivesUptime(t *testing.T) {
 	t.Parallel()
 
@@ -696,8 +630,6 @@ func TestWithClockDrivesUptime(t *testing.T) {
 	h.waitText("up 00:01:00")
 }
 
-// TestListenerShowsInPluginsPaneAndHeaderCount pins down that a Listener
-// event is shown in the plugins pane and raises the header's listener count.
 func TestListenerShowsInPluginsPaneAndHeaderCount(t *testing.T) {
 	t.Parallel()
 
@@ -711,8 +643,6 @@ func TestListenerShowsInPluginsPaneAndHeaderCount(t *testing.T) {
 	h.waitText("0.0.0.0:67 (eth0)")
 }
 
-// TestPluginChainNumberedAndRedacted pins down that plugin events render as a
-// numbered chain with a URL password redacted from the arguments.
 func TestPluginChainNumberedAndRedacted(t *testing.T) {
 	t.Parallel()
 
@@ -734,9 +664,6 @@ func TestPluginChainNumberedAndRedacted(t *testing.T) {
 	require.NotContains(t, h.text(), "hunter2")
 }
 
-// TestConfirmedLeaseFromDiscoverOfferRequestAck pins down that a DISCOVER
-// answered with an OFFER, followed by a REQUEST answered with an ACK,
-// produces a confirmed lease row for that client.
 func TestConfirmedLeaseFromDiscoverOfferRequestAck(t *testing.T) {
 	t.Parallel()
 
@@ -757,9 +684,6 @@ func TestConfirmedLeaseFromDiscoverOfferRequestAck(t *testing.T) {
 	require.Contains(t, h.text(), "ee:ff")
 }
 
-// TestStatusLineGrading pins down how the status line grades the server:
-// FAILING with no listeners or a recent send error, DEGRADED on a recent
-// parse error, HEALTHY otherwise.
 func TestStatusLineGrading(t *testing.T) {
 	t.Parallel()
 
@@ -824,9 +748,6 @@ func TestStatusLineGrading(t *testing.T) {
 	}
 }
 
-// TestHostnameMarkupAndControlCharsSanitised pins down that a hostname
-// carrying tview markup and a control character is displayed literally and
-// safely rather than interpreted as colour or a control sequence.
 func TestHostnameMarkupAndControlCharsSanitised(t *testing.T) {
 	t.Parallel()
 
@@ -843,8 +764,6 @@ func TestHostnameMarkupAndControlCharsSanitised(t *testing.T) {
 	require.NotContains(t, h.text(), "\x07")
 }
 
-// TestLogWriterRendersParsedFields pins down that a slog text-handler line
-// renders as separate time, level, prefix and message columns.
 func TestLogWriterRendersParsedFields(t *testing.T) {
 	t.Parallel()
 
@@ -860,8 +779,6 @@ func TestLogWriterRendersParsedFields(t *testing.T) {
 	require.Contains(t, h.text(), "server6")
 }
 
-// TestLogWriterRendersUnparsedLineRaw pins down that a log line which is not
-// key=value shaped is shown as it arrived instead of being dropped.
 func TestLogWriterRendersUnparsedLineRaw(t *testing.T) {
 	t.Parallel()
 
@@ -875,8 +792,6 @@ func TestLogWriterRendersUnparsedLineRaw(t *testing.T) {
 	h.waitText(raw)
 }
 
-// TestLogWriterHoldsPartialLineUntilNewline pins down that a write with no
-// trailing newline is held back until the newline arrives.
 func TestLogWriterHoldsPartialLineUntilNewline(t *testing.T) {
 	t.Parallel()
 
@@ -893,8 +808,6 @@ func TestLogWriterHoldsPartialLineUntilNewline(t *testing.T) {
 	h.waitText("half a line no newline yet now complete")
 }
 
-// TestPauseKeyFreezesTrafficPane pins down that 'p' freezes the traffic pane
-// on what it already shows and 'p' again resumes it.
 func TestPauseKeyFreezesTrafficPane(t *testing.T) {
 	t.Parallel()
 
@@ -918,8 +831,6 @@ func TestPauseKeyFreezesTrafficPane(t *testing.T) {
 	h.waitText("after-pause")
 }
 
-// TestHelpOverlayTogglesOnAnyKey pins down that '?' opens the help overlay
-// and any other key closes it.
 func TestHelpOverlayTogglesOnAnyKey(t *testing.T) {
 	t.Parallel()
 
@@ -932,9 +843,6 @@ func TestHelpOverlayTogglesOnAnyKey(t *testing.T) {
 	h.waitFor("help overlay closed", func(s string) bool { return !strings.Contains(s, "Home, End") })
 }
 
-// TestFocusMovesWithTabAndDigitKeys pins down that Tab, Shift-Tab and the
-// digit keys move which pane the scroll keys reach, using the traffic pane's
-// own follow behaviour as the observable signal.
 func TestFocusMovesWithTabAndDigitKeys(t *testing.T) {
 	t.Parallel()
 
@@ -949,12 +857,10 @@ func TestFocusMovesWithTabAndDigitKeys(t *testing.T) {
 
 	h.waitText("t19")
 
-	// Traffic is focused by default: Up stops it from following the newest row.
+	// Focus is observed indirectly: only the focused traffic pane stops following on Up.
 	h.key(tcell.KeyUp, 0)
 	h.waitFor("traffic pane to stop following", func(s string) bool { return !strings.Contains(s, "t19") })
 
-	// Back to the newest row, then Tab away: Up must no longer reach traffic,
-	// so the newest row stays put.
 	h.key(tcell.KeyEnd, 0)
 	h.waitText("t19")
 
@@ -962,12 +868,10 @@ func TestFocusMovesWithTabAndDigitKeys(t *testing.T) {
 	h.key(tcell.KeyUp, 0)
 	h.staysText("t19", 20*time.Millisecond)
 
-	// '1' brings the focus straight back: Up reaches the traffic pane again.
 	h.key(tcell.KeyRune, '1')
 	h.key(tcell.KeyUp, 0)
 	h.waitFor("traffic pane to stop following again", func(s string) bool { return !strings.Contains(s, "t19") })
 
-	// '2', '3' and '4' each move focus away from traffic too.
 	for _, r := range []rune{'2', '3', '4'} {
 		h.key(tcell.KeyRune, '1')
 		h.key(tcell.KeyEnd, 0)
@@ -978,7 +882,6 @@ func TestFocusMovesWithTabAndDigitKeys(t *testing.T) {
 		h.staysText("t19", 20*time.Millisecond)
 	}
 
-	// Shift-Tab cycles focus backward, away from traffic as well.
 	h.key(tcell.KeyRune, '1')
 	h.key(tcell.KeyEnd, 0)
 	h.waitText("t19")
@@ -988,8 +891,6 @@ func TestFocusMovesWithTabAndDigitKeys(t *testing.T) {
 	h.staysText("t19", 20*time.Millisecond)
 }
 
-// TestScrollingMovesByRowsHomeEndPgUpPgDn pins down Up, End, Home, PgDn and
-// PgUp on the traffic pane once it holds more rows than fit on screen.
 func TestScrollingMovesByRowsHomeEndPgUpPgDn(t *testing.T) {
 	t.Parallel()
 
@@ -1021,9 +922,6 @@ func TestScrollingMovesByRowsHomeEndPgUpPgDn(t *testing.T) {
 	h.waitText("r00")
 }
 
-// TestClearKeyResetsTrafficAndCountersKeepsLeasesAndLog pins down that 'c'
-// empties the traffic pane and the counters but leaves the lease rows and the
-// log untouched.
 func TestClearKeyResetsTrafficAndCountersKeepsLeasesAndLog(t *testing.T) {
 	t.Parallel()
 

@@ -10,18 +10,13 @@ import (
 	"time"
 )
 
-// errorWindow is how far back the status line looks for trouble. A minute is
-// long enough that a failure stays on screen while the operator reads it, and
-// short enough that a fixed problem clears itself.
+// A minute is long enough that a failure stays on screen while the operator
+// reads it, and short enough that a fixed problem clears itself.
 const errorWindow = time.Minute
 
-// rateWindow is how many of the per-second buckets the header averages for
-// its requests-per-second figure. Ten seconds tracks a burst without jumping
-// around between frames.
+// Ten seconds tracks a burst without the figure jumping between frames.
 const rateWindow = 10
 
-// headerLine is the top row: who we are, how long we have been up, and the
-// running totals.
 func headerLine(s snapshot, width int) string {
 	l := newLine(width)
 	l.text(tagBold, "coredhcp")
@@ -46,7 +41,6 @@ func headerLine(s snapshot, width int) string {
 	return l.String()
 }
 
-// countTag colours a counter only once it has something to say.
 func countTag(n uint64, tag string) string {
 	if n == 0 {
 		return tagPlain
@@ -55,8 +49,6 @@ func countTag(n uint64, tag string) string {
 	return tag
 }
 
-// recentRate is the mean requests per second over the last rateWindow
-// seconds, formatted with one decimal.
 func recentRate(series []uint32) string {
 	if len(series) == 0 {
 		return "0.0"
@@ -70,18 +62,13 @@ func recentRate(series []uint32) string {
 	return strconv.FormatFloat(float64(sum(window))/float64(len(window)), 'f', 1, 64)
 }
 
-// health is the graded state of the server plus the sentence that explains
-// how it was graded.
 type health struct {
 	tag   string
 	label string
 	note  string
 }
 
-// grade reads the server's state the way an operator would: nothing to listen
-// on is the worst case, then replies that could not be sent, then packets the
-// server could not use, then a server that simply has not been asked anything
-// yet.
+// Ordered worst case first, so the first arm that matches is the grade.
 func grade(s snapshot) health {
 	switch {
 	case len(s.listeners) == 0:
@@ -109,12 +96,10 @@ func grade(s snapshot) health {
 	}
 }
 
-// within reports whether t happened inside the grading window.
 func within(now, t time.Time) bool {
 	return !t.IsZero() && now.Sub(t) < errorWindow
 }
 
-// listenerNote counts the bound sockets.
 func listenerNote(s snapshot) string {
 	if len(s.listeners) == 1 {
 		return "1 listener"
@@ -123,7 +108,6 @@ func listenerNote(s snapshot) string {
 	return strconv.Itoa(len(s.listeners)) + " listeners"
 }
 
-// requestNote says when the last request came in.
 func requestNote(s snapshot) string {
 	if s.tot.lastRequest.IsZero() {
 		return ", no requests yet"
@@ -132,7 +116,6 @@ func requestNote(s snapshot) string {
 	return ", last request " + humanSince(s.now, s.tot.lastRequest)
 }
 
-// statusLine is the graded one-liner under the header.
 func statusLine(s snapshot, width int) string {
 	h := grade(s)
 
@@ -145,7 +128,7 @@ func statusLine(s snapshot, width int) string {
 	return l.String()
 }
 
-// footerKeys is the key hint row, in the order the keys are worth learning.
+// Ordered by how much the key is worth learning.
 var footerKeys = []struct{ key, what string }{
 	{"q", "quit"},
 	{"p", "pause"},
@@ -155,8 +138,6 @@ var footerKeys = []struct{ key, what string }{
 	{"?", "help"},
 }
 
-// footerLine renders the key hints, with the pause marker pushed to the right
-// where it is hard to miss.
 func footerLine(s snapshot, width int) string {
 	l := newLine(width)
 
@@ -179,7 +160,6 @@ func footerLine(s snapshot, width int) string {
 	return l.String()
 }
 
-// helpLines is the text of the help overlay.
 func helpLines() []string {
 	return []string{
 		"[" + tagBold + "]keys" + resetTag,
@@ -201,5 +181,4 @@ func helpLines() []string {
 	}
 }
 
-// helpText is the overlay as one block, ready for a text view.
 func helpText() string { return strings.Join(helpLines(), "\n") }
