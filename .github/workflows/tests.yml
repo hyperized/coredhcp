@@ -17,7 +17,11 @@ jobs:
       matrix:
         go: ['1.25', '1.26']
     env:
-      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      # Whether an upload is possible, never the token itself. A step's `if`
+      # can read neither the secrets context nor that step's own env, so the
+      # decision has to sit in the job environment while the token stays on
+      # the steps that actually upload.
+      HAS_CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -33,7 +37,9 @@ jobs:
       - name: report coverage to codecov
         # The fork runs without a codecov token; skip the upload rather than
         # failing the build over it.
-        if: env.CODECOV_TOKEN != ''
+        if: env.HAS_CODECOV_TOKEN == 'true'
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: coverage.txt
@@ -46,7 +52,9 @@ jobs:
         working-directory: cmd/coredhcp-tui
         run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
       - name: report TUI coverage to codecov
-        if: env.CODECOV_TOKEN != ''
+        if: env.HAS_CODECOV_TOKEN == 'true'
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: cmd/coredhcp-tui/coverage.txt
@@ -60,7 +68,11 @@ jobs:
       matrix:
         go: ['1.25', '1.26']
     env:
-      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      # Whether an upload is possible, never the token itself. A step's `if`
+      # can read neither the secrets context nor that step's own env, so the
+      # decision has to sit in the job environment while the token stays on
+      # the steps that actually upload.
+      HAS_CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -87,7 +99,9 @@ jobs:
           done
           go tool covdata textfmt -i="$GOCOVERDIR" -o=coverage.txt
       - name: report coverage to codecov
-        if: env.CODECOV_TOKEN != ''
+        if: env.HAS_CODECOV_TOKEN == 'true'
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: coverage.txt
