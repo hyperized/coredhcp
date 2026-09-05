@@ -269,6 +269,11 @@ documentation on how to use it. Both `cmd/coredhcp/main.go` and
 directory; edit the template, run `make generate`, and commit the result. CI
 regenerates them and fails when a committed file has drifted.
 
+The [sleep](plugins/sleep/) plugin is in the tree but not in either default
+binary. It delays every response, which is a debugging aid rather than
+something a running server wants; add it to `core-plugins.txt` when you need
+it.
+
 # How to write a plugin
 
 The best way to learn is to read the comments and source code of the
