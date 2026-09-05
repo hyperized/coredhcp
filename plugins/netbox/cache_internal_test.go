@@ -62,8 +62,7 @@ func TestCacheGetExpiryIsInclusive(t *testing.T) {
 	c := newCache(4)
 	c.put("k", lookupResult{found: true}, base.Add(time.Minute))
 
-	// A get exactly at the expiry instant must already be a miss, and the
-	// entry gone afterwards rather than merely stale.
+	// A get exactly at the expiry instant is already a miss, with the entry gone, not merely stale.
 	_, ok := c.get("k", base.Add(time.Minute))
 	assert.False(t, ok)
 	assert.Equal(t, 0, c.len())
@@ -76,9 +75,8 @@ func TestCachePutReplacesExistingEntry(t *testing.T) {
 	c.put("a", lookupResult{found: true}, base.Add(time.Minute))
 	c.put("b", lookupResult{found: true}, base.Add(time.Minute))
 
-	// a is the least recently used entry at this point. Putting it again
-	// should both replace its value and expiry, and move it back to the
-	// front, so the next eviction takes b instead of a.
+	// a is the LRU entry here; re-putting it must both replace its value and move it back
+	// to the front, so the next eviction takes b instead.
 	second := lookupResult{v4: netip.MustParsePrefix("10.0.0.9/32"), found: true}
 	c.put("a", second, base.Add(2*time.Minute))
 	c.put("c", lookupResult{found: true}, base.Add(time.Minute))
@@ -99,8 +97,7 @@ func TestCacheLRUEvictionAfterGet(t *testing.T) {
 	c.put("a", lookupResult{found: true}, base.Add(time.Minute))
 	c.put("b", lookupResult{found: true}, base.Add(time.Minute))
 
-	// Reading a makes it the most recently used entry, so the next insert
-	// must evict b, not a.
+	// Reading a makes it the MRU entry, so the next insert must evict b instead.
 	_, ok := c.get("a", base)
 	require.True(t, ok)
 
@@ -157,11 +154,8 @@ func TestLookupResultRecord(t *testing.T) {
 	}
 }
 
-// TestCacheConcurrentAccess drives get and put from several goroutines at
-// once against the same keys, so `go test -race` has something to catch if
-// the locking in cache.go ever regresses. It does not assert anything about
-// the final contents: which of the racing puts wins is not deterministic,
-// only that none of it corrupts the cache or panics.
+// TestCacheConcurrentAccess only checks nothing panics or corrupts under `go test -race`; which
+// racing put wins is not deterministic, so final contents are not asserted.
 func TestCacheConcurrentAccess(t *testing.T) {
 	c := newCache(64)
 	base := time.Now()

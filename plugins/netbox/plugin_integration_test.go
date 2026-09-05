@@ -19,8 +19,6 @@ import (
 	"github.com/coredhcp/coredhcp/plugins/netbox"
 )
 
-// integrationEnv reads name from the environment, or skips the test naming
-// what it needed.
 func integrationEnv(t *testing.T, name, purpose string) string {
 	t.Helper()
 	v := os.Getenv(name)
@@ -30,13 +28,8 @@ func integrationEnv(t *testing.T, name, purpose string) string {
 	return v
 }
 
-// TestIntegration drives the plugin against a real NetBox instance, over both
-// address families, for one MAC the operator has documented there.
-//
-// It needs NETBOX_URL, NETBOX_TOKEN and NETBOX_TEST_MAC to run at all.
-// NETBOX_TEST_IPV4 and NETBOX_TEST_IPV6 are optional: set, they pin down the
-// exact address expected back; unset, the test only checks that an address
-// of that family came back at all.
+// TestIntegration needs NETBOX_URL, NETBOX_TOKEN and NETBOX_TEST_MAC to run at all. The optional
+// NETBOX_TEST_IPV4/NETBOX_TEST_IPV6 pin down the exact address expected back.
 func TestIntegration(t *testing.T) {
 	const purpose = "exercises Setup4/Setup6 against a real NetBox instance for NETBOX_TEST_MAC"
 	url := integrationEnv(t, "NETBOX_URL", purpose)
@@ -58,9 +51,8 @@ func TestIntegration(t *testing.T) {
 		resp, err := dhcpv4.NewReplyFromRequest(req)
 		require.NoError(t, err)
 
-		// Handler4 only stops the chain when it actually served an address.
-		// YourIPAddr is not a usable signal on its own: NewReplyFromRequest
-		// pre-fills it with the unspecified address, so it is never empty.
+		// stop, not YourIPAddr, is the served-or-not signal: NewReplyFromRequest pre-fills
+		// YourIPAddr with the unspecified address, so it's never empty either way.
 		gotResp, stop := h4(req, resp)
 		require.True(t, stop, "NetBox has no IPv4 address on record for %s", macStr)
 		require.NotNil(t, gotResp)
