@@ -6,8 +6,6 @@
 // duration, useful for testing timeout behaviour.
 package sleep
 
-// This plugin introduces a delay in the DHCP response.
-
 import (
 	"fmt"
 	"time"
@@ -25,20 +23,13 @@ var (
 	log        = logger.GetLogger("plugins/" + pluginName)
 )
 
-// Example configuration of the `sleep` plugin:
+// Example configuration of the `sleep` plugin, the argument being anything
+// time.ParseDuration accepts:
 //
 // server4:
 //   plugins:
 //     - sleep 300ms
 //     - file: "leases4.txt"
-//
-// server6:
-//   plugins:
-//     - sleep 1s
-//     - file: "leases6.txt"
-//
-// For the duration format, see the documentation of `time.ParseDuration`,
-// https://golang.org/pkg/time/#ParseDuration .
 
 // Plugin contains the `sleep` plugin data.
 var Plugin = plugins.Plugin{
@@ -74,8 +65,6 @@ func setup4(args ...string) (handler.Handler4, error) {
 func makeSleepHandler6(delay time.Duration) handler.Handler6 {
 	return func(_, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 		log.Printf("introducing delay of %s in response", delay)
-		// return the unmodified response, and instruct coredhcp to continue to
-		// the next plugin.
 		time.Sleep(delay)
 		return resp, false
 	}
@@ -84,8 +73,6 @@ func makeSleepHandler6(delay time.Duration) handler.Handler6 {
 func makeSleepHandler4(delay time.Duration) handler.Handler4 {
 	return func(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 		log.Printf("introducing delay of %s in response", delay)
-		// return the unmodified response, and instruct coredhcp to continue to
-		// the next plugin.
 		time.Sleep(delay)
 		return resp, false
 	}

@@ -76,8 +76,7 @@ func TestHandler4NotOfferMessage(t *testing.T) {
 	req, err := dhcpv4.NewDiscovery(net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff})
 	require.NoError(t, err)
 	req.UpdateOption(dhcpv4.OptGeneric(dhcpv4.OptionAutoConfigure, []byte{1}))
-	// A reply without WithMessageType keeps the message type it was given
-	// (none, in this case), which is never MessageTypeOffer.
+	// A reply without WithMessageType keeps no message type, which is never MessageTypeOffer.
 	stub, err := dhcpv4.NewReplyFromRequest(req)
 	require.NoError(t, err)
 

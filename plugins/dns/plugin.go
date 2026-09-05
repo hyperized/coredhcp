@@ -27,8 +27,6 @@ var Plugin = plugins.Plugin{
 	Setup4: setup4,
 }
 
-// pluginState holds the DNS servers handed out by one setup instance of
-// the plugin.
 type pluginState struct {
 	dnsServers []net.IP
 }
@@ -66,7 +64,7 @@ func setup4(args ...string) (handler.Handler4, error) {
 	return p.Handler4, nil
 }
 
-// Handler6 handles DHCPv6 packets for the dns plugin
+// Handler6 handles DHCPv6 packets for the dns plugin.
 func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	decap, err := req.GetInnerMessage()
 	if err != nil {
@@ -80,7 +78,7 @@ func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	return resp, false
 }
 
-// Handler4 handles DHCPv4 packets for the dns plugin
+// Handler4 handles DHCPv4 packets for the dns plugin.
 func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	if req.IsOptionRequested(dhcpv4.OptionDomainNameServer) {
 		resp.Options.Update(dhcpv4.OptDNS(p.dnsServers...))

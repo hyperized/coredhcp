@@ -25,8 +25,6 @@ var Plugin = plugins.Plugin{
 	Setup4: setup4,
 }
 
-// pluginState holds the router IP addresses handed out by one setup
-// instance of the plugin.
 type pluginState struct {
 	routers []net.IP
 }
@@ -48,7 +46,7 @@ func setup4(args ...string) (handler.Handler4, error) {
 	return p.Handler4, nil
 }
 
-// Handler4 handles DHCPv4 packets for the router plugin
+// Handler4 handles DHCPv4 packets for the router plugin.
 func (p *pluginState) Handler4(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	resp.Options.Update(dhcpv4.OptRouter(p.routers...))
 	return resp, false

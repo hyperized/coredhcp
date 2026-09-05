@@ -6,8 +6,6 @@
 // list to DHCPv4 and DHCPv6 clients.
 package searchdomains
 
-// This is an searchdomains plugin that adds default DNS search domains.
-
 import (
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
@@ -21,9 +19,6 @@ import (
 var log = logger.GetLogger("plugins/searchdomains")
 
 // Plugin wraps the default DNS search domain options.
-// Note that importing the plugin is not enough to use it: you have to
-// explicitly specify the intention to use it in the `config.yml` file, in the
-// plugins section. For searchdomains:
 //
 // server6:
 //
@@ -37,18 +32,14 @@ var Plugin = plugins.Plugin{
 	Setup4: setup4,
 }
 
-// pluginState holds the DNS search domains handed out by an instance of the
-// searchdomains plugin. Note that DHCPv4 and DHCPv6 options are totally
-// independent: setup6 and setup4 each build their own pluginState, so if you
-// need the same settings for both, you'll need to configure this plugin once
-// for the v4 and once for the v6 server.
+// setup6 and setup4 each build their own, so the same search list has to be
+// configured once per server section.
 type pluginState struct {
 	searchList []string
 }
 
-// copySlice creates a new copy of a string slice in memory.
-// This helps to ensure that downstream plugins can't corrupt
-// this plugin's configuration
+// The response keeps the slice it is handed, so a downstream plugin must not
+// be able to reach this plugin's own configuration through it.
 func copySlice(original []string) []string {
 	copied := make([]string, len(original))
 	copy(copied, original)

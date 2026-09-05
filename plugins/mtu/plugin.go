@@ -27,15 +27,12 @@ var Plugin = plugins.Plugin{
 	// No Setup6 since DHCPv6 does not have MTU-related options
 }
 
-// Bounds for a sane interface MTU: RFC 2132 requires at least 68, and the
-// option carries an unsigned 16-bit value.
+// RFC 2132 requires at least 68, and the option carries a uint16.
 const (
 	minMTU = 68
 	maxMTU = 65535
 )
 
-// pluginState holds the MTU handed out by one setup instance of the
-// plugin.
 type pluginState struct {
 	mtu uint16
 }
@@ -56,7 +53,7 @@ func setup4(args ...string) (handler.Handler4, error) {
 	return p.Handler4, nil
 }
 
-// Handler4 handles DHCPv4 packets for the mtu plugin
+// Handler4 handles DHCPv4 packets for the mtu plugin.
 func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	if req.IsOptionRequested(dhcpv4.OptionInterfaceMTU) {
 		resp.Options.Update(dhcpv4.Option{Code: dhcpv4.OptionInterfaceMTU, Value: dhcpv4.Uint16(p.mtu)})

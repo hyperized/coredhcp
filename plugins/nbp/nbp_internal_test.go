@@ -93,10 +93,8 @@ func TestSetup4(t *testing.T) {
 	})
 }
 
-// TestHandler6Unconfigured exercises the opt59==nil branch of Handler6,
-// which setup6 never produces (it always sets opt59 when it succeeds), so
-// it is only reachable through direct construction of the unexported
-// pluginState.
+// Exercises the opt59==nil branch of Handler6; setup6 never leaves it nil, so
+// this state is reachable only via direct construction of pluginState.
 func TestHandler6Unconfigured(t *testing.T) {
 	var p pluginState
 
@@ -110,10 +108,8 @@ func TestHandler6Unconfigured(t *testing.T) {
 	assert.True(t, stop)
 }
 
-// TestHandler4Unconfigured exercises the opt67==nil branch of Handler4,
-// which setup4 never produces (it always sets opt67 when it succeeds), so
-// it is only reachable through direct construction of the unexported
-// pluginState.
+// Exercises the opt67==nil branch of Handler4; setup4 never leaves it nil, so
+// this state is reachable only via direct construction of pluginState.
 func TestHandler4Unconfigured(t *testing.T) {
 	var p pluginState
 
