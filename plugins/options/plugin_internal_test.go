@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ip6 is a shorthand for the sixteen-byte form of an IPv6 address.
 func ip6(t *testing.T, s string) []byte {
 	t.Helper()
 	ip := net.ParseIP(s)
@@ -22,8 +21,7 @@ func ip6(t *testing.T, s string) []byte {
 	return ip.To16()
 }
 
-// mustRequest6 builds a DHCPv6 request that NewReplyFromMessage accepts. A
-// plain Solicit is refused unless it carries the rapid-commit option.
+// mustRequest6 builds a request NewReplyFromMessage accepts; a plain Solicit needs WithRapidCommit.
 func mustRequest6(t *testing.T) *dhcpv6.Message {
 	t.Helper()
 	req, err := dhcpv6.NewSolicit(net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}, dhcpv6.WithRapidCommit)
@@ -318,10 +316,8 @@ func TestPluginStateHandler6(t *testing.T) {
 	assert.Equal(t, ip6(t, "2001:db8::123"), got.ToBytes())
 }
 
-// TestPluginStateHandler6DoesNotShareOptions guards the reason Handler6 builds
-// an OptionGeneric per response instead of reusing a prebuilt one: a DHCPv6
-// message keeps the pointer it is handed, so two responses in flight would
-// otherwise alias the same struct.
+// Handler6 must build a fresh OptionGeneric per response: a DHCPv6 message keeps
+// the pointer it's handed, so reusing one would alias across concurrent responses.
 func TestPluginStateHandler6DoesNotShareOptions(t *testing.T) {
 	p := &pluginState{specs6: []spec{{code: 31, data: ip6(t, "2001:db8::123")}}}
 

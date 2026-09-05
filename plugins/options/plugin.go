@@ -22,19 +22,14 @@
 // 1-65535 for DHCPv6. Code 0 is the DHCPv4 pad option and is rejected in both
 // families.
 //
-// Options are set unconditionally, exactly like the dns and router plugins do,
-// and deliberately not conditioned on the client's parameter request list:
-// a client cannot ask for an option it has never heard of, so honouring the
-// request list would make this plugin useless for the vendor and site-local
-// options it exists to serve.
+// Options are set unconditionally, not conditioned on the client's parameter
+// request list: a client cannot ask for an option it has never heard of, which
+// is exactly what the vendor and site-local codes here are for.
 //
-// No option code is blocked. Setting a code the server manages elsewhere
-// (51 lease time, 54 server identifier, 1 subnet mask, 3 router) is the
-// operator's own foot to shoot, and plugin order decides the winner: handlers
-// run in configuration order and each one overwrites what came before, so an
-// `options` entry placed after the `lease_time` plugin overrides it, and one
-// placed before it does not. DHCPv4 code 255 is the end marker and setting it
-// will corrupt the packet.
+// No code is blocked. Handlers run in configuration order and each overwrites
+// what came before, so an `options` entry after the `lease_time` plugin
+// overrides it and one before it does not. DHCPv4 code 255 is the end marker
+// and setting it will corrupt the packet.
 package options
 
 import (
@@ -65,8 +60,7 @@ var Plugin = plugins.Plugin{
 	Setup4: setup4,
 }
 
-// Setup errors that callers and tests can match with errors.Is. Errors that
-// need to quote the offending input are built with fmt.Errorf instead.
+// Errors that need to quote the offending input are built with fmt.Errorf.
 var (
 	errNoSpecs       = errors.New("need at least one option specification")
 	errMalformedSpec = errors.New("expected code:type:value")
@@ -74,17 +68,13 @@ var (
 	errEmptyValue    = errors.New("empty option value")
 )
 
-// specFields is the number of colon-separated fields in one specification.
-// SplitN is called with this limit so that everything after the second colon
-// stays in the value.
+// The SplitN limit, so everything after the second colon stays in the value.
 const specFields = 3
 
-// family holds the validation rules that differ between DHCPv4 and DHCPv6.
+// The validation rules that differ between DHCPv4 and DHCPv6.
 type family struct {
-	// maxCode is the largest option code the protocol can encode.
 	maxCode uint64
-	// parseAddr parses one textual address into its wire representation:
-	// four bytes for DHCPv4, sixteen for DHCPv6.
+	// Four bytes for DHCPv4, sixteen for DHCPv6.
 	parseAddr func(string) ([]byte, error)
 }
 
@@ -92,8 +82,7 @@ var family4 = &family{maxCode: math.MaxUint8, parseAddr: parseAddr4}
 
 var family6 = &family{maxCode: math.MaxUint16, parseAddr: parseAddr6}
 
-// parseAddr4 accepts any address with an IPv4 representation and returns it in
-// four-byte form, which is what DHCPv4 options carry.
+// Four-byte form, which is what DHCPv4 options carry.
 func parseAddr4(value string) ([]byte, error) {
 	ip := net.ParseIP(value).To4()
 	if ip == nil {
@@ -102,9 +91,8 @@ func parseAddr4(value string) ([]byte, error) {
 	return ip, nil
 }
 
-// parseAddr6 accepts native IPv6 addresses only. An IPv4 literal would happily
-// survive To16() as a v4-mapped address, but a v4 address in a DHCPv6 option is
-// a configuration mistake in every case worth serving, so it is rejected.
+// Native IPv6 only: an IPv4 literal would survive To16() as a v4-mapped
+// address, and that is a configuration mistake in every case worth serving.
 func parseAddr6(value string) ([]byte, error) {
 	ip := net.ParseIP(value)
 	if ip == nil || ip.To4() != nil {
@@ -113,12 +101,10 @@ func parseAddr6(value string) ([]byte, error) {
 	return ip.To16(), nil
 }
 
-// valueParser converts the textual value of one specification into the bytes
-// that go on the wire. fam supplies the protocol-dependent address parsing.
 type valueParser func(fam *family, value string) ([]byte, error)
 
-// valueParsers is the allow-list of value types. A type that is not a key here
-// is rejected at setup; there is no fallback encoding.
+// The allow-list of value types: a type that is not a key here is rejected at
+// setup, and there is no fallback encoding.
 var valueParsers = map[string]valueParser{
 	"string": parseStringValue,
 	"ip":     parseIPValue,
@@ -130,8 +116,7 @@ var valueParsers = map[string]valueParser{
 	"bool":   parseBoolValue,
 }
 
-// knownTypes lists the supported type names, sorted so error messages are
-// stable rather than following Go's randomised map iteration.
+// Sorted, so error messages do not follow Go's randomised map iteration.
 func knownTypes() string {
 	names := make([]string, 0, len(valueParsers))
 	for name := range valueParsers {
@@ -141,7 +126,7 @@ func knownTypes() string {
 	return strings.Join(names, ", ")
 }
 
-// parseStringValue emits the value as-is. DHCP strings are not NUL-terminated.
+// As-is: DHCP strings are not NUL-terminated.
 func parseStringValue(_ *family, value string) ([]byte, error) {
 	return []byte(value), nil
 }
@@ -150,12 +135,11 @@ func parseIPValue(fam *family, value string) ([]byte, error) {
 	return fam.parseAddr(value)
 }
 
-// parseIPListValue encodes a comma-separated list as the concatenation of the
-// addresses, the layout every list-of-addresses option uses.
+// Bare concatenation, the layout every list-of-addresses option uses.
 func parseIPListValue(fam *family, value string) ([]byte, error) {
 	parts := strings.Split(value, ",")
-	// Parsing happens once at setup, so sizing for the IPv6 worst case is
-	// cheaper than carrying the address width around.
+	// Parsing happens once at setup, so the IPv6 worst case is cheaper than
+	// carrying the address width around.
 	out := make([]byte, 0, len(parts)*net.IPv6len)
 	for _, part := range parts {
 		addr, err := fam.parseAddr(part)
@@ -167,9 +151,8 @@ func parseIPListValue(fam *family, value string) ([]byte, error) {
 	return out, nil
 }
 
-// uintParser builds a parser for an unsigned integer of the given width in
-// bits. DHCP numeric options are fixed-width and big-endian (RFC 2132 section
-// 2), so the value is right-aligned into a width/8 byte buffer.
+// DHCP numeric options are fixed-width and big-endian (RFC 2132 section 2), so
+// the value is right-aligned into a width/8 byte buffer.
 func uintParser(bits int) valueParser {
 	width := bits / 8
 	return func(_ *family, value string) ([]byte, error) {
@@ -183,8 +166,6 @@ func uintParser(bits int) valueParser {
 	}
 }
 
-// parseHexValue decodes raw option bytes. hex.DecodeString is what enforces an
-// even-length string of hex digits.
 func parseHexValue(_ *family, value string) ([]byte, error) {
 	raw, err := hex.DecodeString(value)
 	if err != nil {
@@ -193,9 +174,8 @@ func parseHexValue(_ *family, value string) ([]byte, error) {
 	return raw, nil
 }
 
-// parseBoolValue encodes a boolean as the single byte 0 or 1, the convention of
-// the flag options (RFC 2132 sections 4.1 through 4.5). It accepts everything
-// strconv.ParseBool does, so "1", "t", "TRUE" and friends all work.
+// A single byte 0 or 1, the convention of the flag options (RFC 2132 sections
+// 4.1 through 4.5).
 func parseBoolValue(_ *family, value string) ([]byte, error) {
 	set, err := strconv.ParseBool(value)
 	if err != nil {
@@ -207,14 +187,11 @@ func parseBoolValue(_ *family, value string) ([]byte, error) {
 	return []byte{0}, nil
 }
 
-// spec is one parsed specification: an option code and the exact bytes to put
-// on the wire for it.
 type spec struct {
 	code uint16
 	data []byte
 }
 
-// parseCode validates an option code against the protocol's range.
 func parseCode(fam *family, raw string) (uint16, error) {
 	code, err := strconv.ParseUint(raw, 10, 16)
 	if err != nil {
@@ -229,7 +206,6 @@ func parseCode(fam *family, raw string) (uint16, error) {
 	return uint16(code), nil
 }
 
-// parseSpec parses one `code:type:value` argument.
 func parseSpec(fam *family, arg string) (spec, error) {
 	fields := strings.SplitN(arg, ":", specFields)
 	if len(fields) != specFields {
@@ -253,8 +229,8 @@ func parseSpec(fam *family, arg string) (spec, error) {
 	return spec{code: code, data: data}, nil
 }
 
-// parseSpecs parses every configured argument, keeping configuration order so
-// that a code repeated within one plugin instance resolves last-one-wins.
+// Configuration order is kept, so a code repeated within one instance resolves
+// last-one-wins.
 func parseSpecs(fam *family, args []string) ([]spec, error) {
 	if len(args) == 0 {
 		return nil, errNoSpecs
@@ -270,18 +246,14 @@ func parseSpecs(fam *family, args []string) ([]spec, error) {
 	return specs, nil
 }
 
-// pluginState holds the options handed out by one setup instance of the
-// plugin. Everything in it is built during setup and only read afterwards, so
-// a single instance is safe for concurrent use by the server's handler chain.
+// Built during setup and only read afterwards, so one instance is safe for
+// concurrent use by the handler chain.
 type pluginState struct {
-	// opts4 holds ready-made DHCPv4 options. dhcpv4.Options.Update copies the
-	// option's bytes into the response's map immediately, so one prebuilt
-	// value can serve every response without aliasing anything into it.
+	// Ready-made: dhcpv4.Options.Update copies the bytes into the response's
+	// map, so one prebuilt value can serve every response.
 	opts4 []dhcpv4.Option
-	// specs6 holds parsed DHCPv6 specifications rather than ready-made
-	// options: a DHCPv6 response stores the Option pointer it is handed, so
-	// Handler6 wraps the payload in a fresh OptionGeneric per response instead
-	// of sharing one struct between packets in flight.
+	// Not ready-made, because a DHCPv6 response stores the Option pointer it
+	// is handed: Handler6 wraps each payload in a fresh OptionGeneric.
 	specs6 []spec
 }
 
@@ -292,8 +264,6 @@ func setup4(args ...string) (handler.Handler4, error) {
 	}
 	p := pluginState{opts4: make([]dhcpv4.Option, 0, len(specs))}
 	for _, s := range specs {
-		// parseCode already bounded the code to family4.maxCode (255), so the
-		// narrowing conversion cannot overflow.
 		code := dhcpv4.GenericOptionCode(s.code) //nolint:gosec // bounded by parseCode against family4.maxCode
 		p.opts4 = append(p.opts4, dhcpv4.OptGeneric(code, s.data))
 	}

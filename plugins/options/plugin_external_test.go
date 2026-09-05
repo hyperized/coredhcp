@@ -19,8 +19,7 @@ import (
 
 var testMAC = net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}
 
-// reply4 builds a DHCPv4 request that asks for nothing and the stub reply the
-// handler chain would be given for it.
+// reply4 builds a DHCPv4 request/stub pair; the request asks for nothing.
 func reply4(t *testing.T) (*dhcpv4.DHCPv4, *dhcpv4.DHCPv4) {
 	t.Helper()
 	req, err := dhcpv4.NewDiscovery(testMAC)
@@ -30,8 +29,7 @@ func reply4(t *testing.T) (*dhcpv4.DHCPv4, *dhcpv4.DHCPv4) {
 	return req, stub
 }
 
-// reply6 does the same for DHCPv6. The Solicit carries rapid-commit because
-// NewReplyFromMessage refuses a plain one.
+// reply6 is reply4's DHCPv6 counterpart; NewReplyFromMessage refuses a plain Solicit, hence WithRapidCommit.
 func reply6(t *testing.T) (*dhcpv6.Message, dhcpv6.DHCPv6) {
 	t.Helper()
 	req, err := dhcpv6.NewSolicit(testMAC, dhcpv6.WithRapidCommit)
@@ -41,7 +39,6 @@ func reply6(t *testing.T) (*dhcpv6.Message, dhcpv6.DHCPv6) {
 	return req, stub
 }
 
-// ip6 is a shorthand for the sixteen-byte form of an IPv6 address.
 func ip6(t *testing.T, s string) []byte {
 	t.Helper()
 	ip := net.ParseIP(s)
@@ -103,9 +100,7 @@ func TestSetup6Errors(t *testing.T) {
 	}
 }
 
-// TestSetup4Config runs the documented DHCPv4 example lines end to end: setup
-// parses the arguments exactly as the config loader would hand them over, and
-// the returned handler is asked to fill a reply that requested nothing.
+// Runs the documented example config lines end to end, as the config loader would parse them.
 func TestSetup4Config(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -162,7 +157,6 @@ func TestSetup4Config(t *testing.T) {
 	}
 }
 
-// TestSetup6Config is the DHCPv6 counterpart of TestSetup4Config.
 func TestSetup6Config(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -203,8 +197,7 @@ func TestSetup6Config(t *testing.T) {
 	}
 }
 
-// TestSetup4IgnoresParameterRequestList pins the documented behaviour: like the
-// dns and router plugins, options are served whether or not the client asked.
+// Consistent with the dns and router plugins: options are served regardless of the client's request list.
 func TestSetup4IgnoresParameterRequestList(t *testing.T) {
 	h4, err := options.Plugin.Setup4("114:string:https://example.com/portal")
 	require.NoError(t, err)
@@ -220,7 +213,6 @@ func TestSetup4IgnoresParameterRequestList(t *testing.T) {
 	assert.Equal(t, []byte("https://example.com/portal"), resp.Options.Get(dhcpv4.GenericOptionCode(114)))
 }
 
-// TestSetup6IgnoresOptionRequest is the DHCPv6 counterpart.
 func TestSetup6IgnoresOptionRequest(t *testing.T) {
 	h6, err := options.Plugin.Setup6("31:ip:2001:db8::123")
 	require.NoError(t, err)
@@ -239,8 +231,6 @@ func TestSetup6IgnoresOptionRequest(t *testing.T) {
 	assert.Equal(t, ip6(t, "2001:db8::123"), opt.ToBytes())
 }
 
-// TestSetup4RepeatedCodeLastWins documents that a code given twice in one
-// plugin instance resolves to the last specification.
 func TestSetup4RepeatedCodeLastWins(t *testing.T) {
 	h4, err := options.Plugin.Setup4("15:string:first.lan", "15:string:second.lan")
 	require.NoError(t, err)
