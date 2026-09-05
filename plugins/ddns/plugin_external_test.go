@@ -2,11 +2,8 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// These tests use nothing but the plugin's public surface: the Plugin value,
-// the setup functions hanging off it, and the bytes that come out of a
-// socket. The TSIG check below is written out again from RFC 8945 rather than
-// borrowed from the package, so a mistake made in both places has to be made
-// twice.
+// The TSIG check below is written out again from RFC 8945 rather than
+// borrowed from the package, so a mistake made in both places has to be made twice.
 
 package ddns_test
 
@@ -38,16 +35,14 @@ const (
 
 var clientMAC = net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}
 
-// recorder is a socket that keeps what it is sent and never answers. The
-// plugin gives up after its retries, which is enough: what these tests are
-// after is the datagram, not the reply.
+// Never answers: the plugin gives up after its retries, which is enough
+// since these tests only care about the datagram it sent, not any reply.
 type recorder struct {
 	conn net.PacketConn
 	got  chan []byte
 	seen map[uint16]bool
 }
 
-// startRecorder listens on a loopback port until the test ends.
 func startRecorder(t *testing.T) *recorder {
 	t.Helper()
 	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -77,12 +72,10 @@ func startRecorder(t *testing.T) *recorder {
 	return r
 }
 
-// addr is the address to configure the plugin with.
 func (r *recorder) addr() string { return r.conn.LocalAddr().String() }
 
-// next waits for one message. Nothing here ever answers, so the plugin sends
-// each message twice before giving up; a retry carries the ID of the try
-// before it, which is how the second copy is recognised and skipped.
+// A retry resends the same message, and so the same ID; that's how the
+// second copy is recognised and skipped.
 func (r *recorder) next(t *testing.T) []byte {
 	t.Helper()
 	for {
@@ -101,7 +94,6 @@ func (r *recorder) next(t *testing.T) []byte {
 	}
 }
 
-// args is a working configuration pointed at r.
 func args(r *recorder, extra ...string) []string {
 	return append([]string{
 		"server:" + r.addr(),
@@ -111,7 +103,6 @@ func args(r *recorder, extra ...string) []string {
 	}, extra...)
 }
 
-// update is an RFC 2136 message taken apart far enough to assert on.
 type update struct {
 	id         uint16
 	opCode     int
@@ -124,7 +115,6 @@ type update struct {
 	unsigned   []byte // the message as it was digested
 }
 
-// record is one entry of the update section.
 type record struct {
 	name  string
 	rtype dnsmessage.Type
@@ -133,8 +123,7 @@ type record struct {
 	data  []byte
 }
 
-// parseUpdate reads a signed update off the wire, following RFC 2136 for the
-// sections and RFC 8945 section 4.2 for the TSIG.
+// Follows RFC 2136 for the sections and RFC 8945 section 4.2 for the TSIG.
 func parseUpdate(t *testing.T, msg []byte) update {
 	t.Helper()
 	var parser dnsmessage.Parser
@@ -164,9 +153,8 @@ func parseUpdate(t *testing.T, msg []byte) update {
 		})
 	}
 
-	// The TSIG is the last record of the additional section, and its owner
-	// name is not compressed, so everything in front of it is what was
-	// digested once ARCOUNT is put back.
+	// RFC 8945 section 5.2/4.2: TSIG is last and uncompressed, so everything
+	// in front of it is what was digested once ARCOUNT is restored.
 	require.NoError(t, parser.SkipAllAuthorities())
 	ah, err := parser.AdditionalHeader()
 	require.NoError(t, err)
@@ -190,8 +178,7 @@ func parseUpdate(t *testing.T, msg []byte) update {
 	return u
 }
 
-// checkTSIG recomputes the MAC the way RFC 8945 section 4.3.3 describes it:
-// the message without the TSIG record, then the TSIG variables.
+// Recomputes the MAC per RFC 8945 section 4.3.3: message, then TSIG variables.
 func checkTSIG(t *testing.T, u update) {
 	t.Helper()
 	secret, err := base64.StdEncoding.DecodeString(keySecret)
