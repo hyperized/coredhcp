@@ -81,8 +81,11 @@ time=2026-08-19T12:09:32.988+02:00 level=INFO msg="Starting DHCPv6 server" prefi
 time=2026-08-19T12:09:32.988+02:00 level=INFO msg="Listen [::]:547" prefix=server
 ```
 
-The server shuts down cleanly on SIGINT/SIGTERM. `-h` lists the flags: config
-path, log level, log file and a `-P` that prints the built-in plugin list.
+The server shuts down cleanly on SIGINT/SIGTERM and exits 0. It exits non-zero
+when a listener dies under it or when the configuration names no address to
+bind, so a service manager sees a failure instead of a silent stop. `-h` lists
+the flags: config path, log level, log file and a `-P` that prints the built-in
+plugin list.
 
 ## Terminal UI
 

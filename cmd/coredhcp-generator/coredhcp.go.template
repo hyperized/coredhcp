@@ -103,8 +103,10 @@ func run(w io.Writer) error {
 		srv.Close()
 	}()
 
-	if err := srv.Wait(); err != nil {
-		log.Error(err)
-	}
-	return nil
+	// Wait reports nil once every listener has been closed on purpose, so
+	// anything non-nil here means a listener died under us. That has to
+	// reach the exit status: logging it and returning nil made the process
+	// exit 0 while no longer serving anything, which no service manager
+	// will restart.
+	return srv.Wait()
 }

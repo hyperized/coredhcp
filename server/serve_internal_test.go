@@ -7,6 +7,7 @@ package server
 import (
 	"errors"
 	"net"
+	"runtime"
 	"testing"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -318,7 +319,60 @@ func TestListen6MulticastJoinGroup(t *testing.T) {
 	assert.Equal(t, iface, l6.Name)
 }
 
-// TestStartCleanupOnV6ListenFailure drives Start's "goto cleanup" path via
+// A configuration naming no address at all, which `listen: []` produces, is
+// refused rather than quietly starting a server with no sockets. Wait on such
+// a Servers used to panic in make([]error, 1, 0).
+func TestStartWithoutAddresses(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  *config.Config
+	}{
+		{name: "empty v4 list", cfg: testConfig(t, nil, []net.UDPAddr{})},
+		{name: "empty v6 list", cfg: testConfig(t, []net.UDPAddr{}, nil)},
+		{name: "both empty", cfg: testConfig(t, []net.UDPAddr{}, []net.UDPAddr{})},
+		// A config with neither family never gets this far: LoadChains
+		// rejects it first, with its own error.
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, err := Start(tc.cfg)
+			require.ErrorIs(t, err, errNoListeners)
+			assert.Nil(t, srv)
+		})
+	}
+}
+
+// Wait has nothing to wait for when no listener was bound, and must neither
+// block nor panic. Start does not produce such a Servers any more, but Wait is
+// exported and callers can build one.
+func TestWaitWithoutListeners(t *testing.T) {
+	s := &Servers{}
+	assert.NoError(t, s.Wait())
+}
+
+// TestStartCleanupJoinsServeGoroutines opens a real DHCPv6 socket and then
+// fails the DHCPv4 bind. The v6 read loop has to be finished by the time Start
+// returns: with an unbuffered errors channel and no join, cleanup closed the
+// socket, Serve returned nil, and the send had nobody to hand it to, leaking
+// one goroutine per socket that had already come up.
+func TestStartCleanupJoinsServeGoroutines(t *testing.T) {
+	withNewUDP4(t, func(string, *net.UDPAddr) (*net.UDPConn, error) {
+		return nil, errors.New("v4 listen boom")
+	})
+	cfg := testConfig(t,
+		[]net.UDPAddr{{IP: net.ParseIP("::1"), Port: 0}},
+		[]net.UDPAddr{{IP: net.ParseIP("127.0.0.1"), Port: 0}},
+	)
+
+	before := runtime.NumGoroutine()
+	srv, err := Start(cfg)
+	require.Error(t, err)
+	require.Nil(t, srv)
+	// shutdown joins the read loops before returning, so this needs no
+	// polling: anything still running here is a leak.
+	assert.LessOrEqual(t, runtime.NumGoroutine(), before)
+}
+
+// TestStartCleanupOnV6ListenFailure drives Start's cleanup path via
 // the DHCPv6 listen loop, with no listeners ever successfully opened.
 func TestStartCleanupOnV6ListenFailure(t *testing.T) {
 	withNewUDP6(t, func(string, *net.UDPAddr) (*net.UDPConn, error) {
