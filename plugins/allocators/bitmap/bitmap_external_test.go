@@ -116,10 +116,7 @@ func prefixSizeForAllocs(allocs int) int {
 	return int(math.Ceil(math.Log2(float64(allocs))))
 }
 
-// Benchmark parallel Allocate, when the bitmap is mostly empty and we're allocating few values
-// compared to the available allocations
 func BenchmarkParallelAllocInitiallyEmpty(b *testing.B) {
-	// Run with -race to debug concurrency issues
 	_, prefix, err := net.ParseCIDR("2001:db8::/56")
 	if err != nil {
 		b.Fatal(err)

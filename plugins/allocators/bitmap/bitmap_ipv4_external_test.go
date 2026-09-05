@@ -59,9 +59,8 @@ func TestIPv4AllocateWithHintOutsidePool(t *testing.T) {
 }
 
 func TestIPv4AllocateExhaustion(t *testing.T) {
-	// a single-address pool: the first Allocate takes the only slot (via the
-	// hint-defaulted-to-offset-0 fast path), the second must fall through to
-	// NextClear and find nothing available
+	// A single-address pool: the first Allocate hits the hint-defaulted fast
+	// path; the second falls through to NextClear and finds nothing.
 	alloc, err := bitmap.NewIPv4Allocator(net.IPv4(192, 0, 2, 1), net.IPv4(192, 0, 2, 1))
 	require.NoError(t, err)
 

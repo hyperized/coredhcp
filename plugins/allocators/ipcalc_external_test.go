@@ -47,7 +47,6 @@ func ExampleAddPrefixes() {
 	fmt.Println(allocators.AddPrefixes(net.ParseIP("2001:db8::"), 0xff, 32))
 	fmt.Println(allocators.AddPrefixes(net.ParseIP("2001:db8::"), 0x1, 16))
 	fmt.Println(allocators.AddPrefixes(net.ParseIP("2001:db8::"), 0xff, 65))
-	// Error cases
 	fmt.Println(allocators.AddPrefixes(net.ParseIP("2001:db8::"), 0xff, 8))
 	fmt.Println(allocators.AddPrefixes(net.IP{10, 0, 0, 1}, 64, 32))
 	// Output:
@@ -71,8 +70,7 @@ func BenchmarkOffset(b *testing.B) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		// The arrays will be in cache, so this should amortize to measure mostly just the offset
-		// computation itself
+		// Pre-generated so the loop measures Offset itself, not cache misses.
 		_, _ = allocators.Offset(
 			addresses[i*2*net.IPv6len:(i*2+1)*net.IPv6len],
 			addresses[(i*2+1)*net.IPv6len:(i+1)*2*net.IPv6len],

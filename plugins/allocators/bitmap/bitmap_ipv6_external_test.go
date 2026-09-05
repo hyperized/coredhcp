@@ -81,9 +81,8 @@ func TestIPv6AllocateWithHintAlreadyTaken(t *testing.T) {
 }
 
 func TestIPv6AllocateExhaustion(t *testing.T) {
-	// a single-address pool: the first Allocate takes the only slot (via the
-	// hint-defaulted-to-offset-0 fast path), the second must fall through to
-	// NextClear and find nothing available
+	// A single-address pool: the first Allocate hits the hint-defaulted fast
+	// path; the second falls through to NextClear and finds nothing.
 	alloc, err := bitmap.NewIPv6Allocator(net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::1"))
 	require.NoError(t, err)
 

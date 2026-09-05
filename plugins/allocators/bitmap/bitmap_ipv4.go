@@ -4,8 +4,7 @@
 
 package bitmap
 
-// This allocator handles IPv4 assignments with a similar logic to the base bitmap, but a simpler
-// implementation due to the ability to just use uint32 for IPv4 addresses
+// Same logic as the base bitmap, simpler because an IPv4 address is a uint32.
 
 import (
 	"encoding/binary"
@@ -24,13 +23,12 @@ var (
 	errInvalidIP  = errors.New("invalid IPv4 address passed as input")
 )
 
-// IPv4Allocator allocates IPv4 addresses, tracking utilization with a bitmap
+// IPv4Allocator allocates IPv4 addresses, tracking use with a bitmap.
 type IPv4Allocator struct {
 	start uint32
 	end   uint32
 
-	// This bitset implementation isn't goroutine-safe, we protect it with a mutex for now
-	// until we can swap for another concurrent implementation
+	// bitset is not goroutine-safe, hence the mutex.
 	bitmap *bitset.BitSet
 	l      sync.Mutex
 }
@@ -41,7 +39,7 @@ func (a *IPv4Allocator) toIP(offset uint) net.IP {
 	}
 
 	r := make(net.IP, net.IPv4len)
-	// offset was bounds-checked against end-start just above.
+	// Bounds-checked against end-start just above.
 	binary.BigEndian.PutUint32(r, a.start+uint32(offset)) //nolint:gosec // see above
 	return r
 }
@@ -59,22 +57,20 @@ func (a *IPv4Allocator) toOffset(ip net.IP) (uint, error) {
 	return uint(intIP - a.start), nil
 }
 
-// Allocate reserves an IP for a client
+// Allocate reserves an IP for a client.
 func (a *IPv4Allocator) Allocate(hint net.IPNet) (n net.IPNet, err error) {
 	n.Mask = net.CIDRMask(32, 32)
 
-	// This is just a hint, ignore any error with it
+	// Only a hint: a bad one falls back to offset 0.
 	hintOffset, _ := a.toOffset(hint.IP)
 
 	a.l.Lock()
 	defer a.l.Unlock()
 
 	var next uint
-	// First try the exact match
 	if !a.bitmap.Test(hintOffset) {
 		next = hintOffset
 	} else {
-		// Then any available address
 		avail, ok := a.bitmap.NextClear(0)
 		if !ok {
 			return n, allocators.ErrNoAddrAvail
@@ -87,7 +83,7 @@ func (a *IPv4Allocator) Allocate(hint net.IPNet) (n net.IPNet, err error) {
 	return
 }
 
-// Free releases the given IP
+// Free releases the given IP.
 func (a *IPv4Allocator) Free(n net.IPNet) error {
 	offset, err := a.toOffset(n.IP)
 	if err != nil {
@@ -104,7 +100,7 @@ func (a *IPv4Allocator) Free(n net.IPNet) error {
 	return nil
 }
 
-// NewIPv4Allocator creates a new allocator suitable for giving out IPv4 addresses
+// NewIPv4Allocator creates an allocator over the inclusive range [start, end].
 func NewIPv4Allocator(start, end net.IP) (*IPv4Allocator, error) {
 	if start.To4() == nil || end.To4() == nil {
 		return nil, fmt.Errorf("invalid IPv4 addresses given to create the allocator: [%s,%s]", start, end)
