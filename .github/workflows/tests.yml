@@ -17,26 +17,23 @@ jobs:
       matrix:
         go: ['1.25', '1.26']
     env:
-      # Whether an upload is possible, never the token itself. A step's `if`
-      # can read neither the secrets context nor that step's own env, so the
-      # decision has to sit in the job environment while the token stays on
-      # the steps that actually upload.
+      # A step's `if` can read neither the secrets context nor its own env, so
+      # the decision sits here while the token stays on the upload steps.
       HAS_CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go }}
-          # setup-go keys its cache on the root go.mod by default; both modules
-          # have to be in the key or the TUI's dependencies are fetched twice.
+          # setup-go keys its cache on the root go.mod; without both modules in
+          # the key the TUI's dependencies are fetched twice.
           cache-dependency-path: |
             go.sum
             cmd/coredhcp-tui/go.sum
       - name: run unit tests
         run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
       - name: report coverage to codecov
-        # The fork runs without a codecov token; skip the upload rather than
-        # failing the build over it.
+        # Forks run without a codecov token; skip the upload rather than fail.
         if: env.HAS_CODECOV_TOKEN == 'true'
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
@@ -46,8 +43,7 @@ jobs:
           disable_search: true
           flags: unittests
           fail_ci_if_error: true
-      # The terminal UI is a module of its own, so `go test ./...` above never
-      # reaches it. Same flags, its own profile and codecov flag.
+      # A module of its own, so the `go test ./...` above never reaches it.
       - name: run unit tests for the TUI module
         working-directory: cmd/coredhcp-tui
         run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
@@ -68,10 +64,8 @@ jobs:
       matrix:
         go: ['1.25', '1.26']
     env:
-      # Whether an upload is possible, never the token itself. A step's `if`
-      # can read neither the secrets context nor that step's own env, so the
-      # decision has to sit in the job environment while the token stays on
-      # the steps that actually upload.
+      # A step's `if` can read neither the secrets context nor its own env, so
+      # the decision sits here while the token stays on the upload steps.
       HAS_CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v7
@@ -84,16 +78,11 @@ jobs:
         env:
           GOCOVERDIR: ${{ github.workspace }}/.cover
         run: |
-          # A failed build or a failed run has to fail the job. The previous
-          # version of this loop only emitted an ::error annotation, which
-          # GitHub shows but does not act on, so a broken integration test
-          # went green.
           set -eu
           mkdir -p "$GOCOVERDIR"
           for d in test/integration/*/; do
               pushd "$d"
-              # A directory with no integration-tagged package is not an
-              # error; one that has a package must build and pass.
+              # A directory with no integration-tagged package is not an error.
               if ! go list -tags=integration . >/dev/null 2>&1; then
                   echo "::notice file=${d}::no integration tests in ${d}"
                   popd

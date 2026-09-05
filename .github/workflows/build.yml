@@ -29,8 +29,7 @@ jobs:
           path: coredhcp
           if-no-files-found: error
   coredhcp-tui:
-    # The terminal UI lives in its own module under cmd/coredhcp-tui, so the
-    # root `go build ./...` never sees it.
+    # A module of its own, so the root `go build ./...` never reaches it.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -41,8 +40,8 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go }}
-          # setup-go keys its cache on the root go.mod by default; both modules
-          # have to be in the key or the TUI's dependencies are fetched twice.
+          # setup-go keys its cache on the root go.mod; without both modules in
+          # the key the TUI's dependencies are fetched twice.
           cache-dependency-path: |
             go.sum
             cmd/coredhcp-tui/go.sum
@@ -90,8 +89,8 @@ jobs:
           cd "${builddir}"
           ls -l
           go mod init coredhcp-tui
-          # The rendered main imports both modules, and neither is published at
-          # a version that resolves - replace both with the checkout.
+          # Neither module is published at a version that resolves, so both
+          # replacements point at the checkout.
           go mod edit -replace "github.com/coredhcp/coredhcp=${GITHUB_WORKSPACE}"
           go mod edit -replace "github.com/coredhcp/coredhcp/cmd/coredhcp-tui=${GITHUB_WORKSPACE}/cmd/coredhcp-tui"
           go mod tidy
@@ -100,8 +99,8 @@ jobs:
         run: |
           set -exu
           cd "${GITHUB_WORKSPACE}"
-          # An untracked file is invisible to git diff, so fail loudly instead
-          # of passing a check that never looked at anything.
+          # An untracked file is invisible to git diff, so the check below would
+          # otherwise pass without looking at anything.
           git ls-files --error-unmatch cmd/coredhcp/main.go cmd/coredhcp-tui/main.go
           cd cmd/coredhcp-generator
           ./coredhcp-generator -f core-plugins.txt \
