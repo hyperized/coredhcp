@@ -96,11 +96,31 @@ func (c *ifaceCache) name(idx int) string {
 }
 
 // The socket constructors are swappable so socket-setup error paths can be
-// reached in tests without privileges.
+// reached in tests without privileges. They hand back a net.PacketConn rather
+// than the *net.UDPConn the dhcp library returns, which is what lets a test
+// substitute a socket whose Close it can observe.
 var (
-	newUDP4 = server4.NewIPv4UDPConn
-	newUDP6 = server6.NewIPv6UDPConn
+	newUDP4 = newIPv4UDPConn
+	newUDP6 = newIPv6UDPConn
 )
+
+func newIPv4UDPConn(zone string, a *net.UDPAddr) (net.PacketConn, error) {
+	// Returning server4.NewIPv4UDPConn's result directly would put a typed
+	// nil pointer in the interface on the error path, and that is not nil.
+	c, err := server4.NewIPv4UDPConn(zone, a)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func newIPv6UDPConn(zone string, a *net.UDPAddr) (net.PacketConn, error) {
+	c, err := server6.NewIPv6UDPConn(zone, a)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
 
 // listener is one bound socket: a read loop that runs until the socket is
 // closed, and the Close that ends it.
@@ -170,12 +190,21 @@ func (s *Servers) reportListener(family events.Family, addr net.Addr, zone strin
 }
 
 func listen4(a *net.UDPAddr) (*listener4, error) {
-	var err error
 	l4 := listener4{}
 	udpConn, err := newUDP4(a.Zone, a)
 	if err != nil {
 		return nil, err
 	}
+	// The bind succeeded, so from here on this socket is ours and nothing
+	// else holds a reference to it: every error path below has to close it or
+	// the descriptor stays open for the life of the process. Disarmed once
+	// the listener reaches the caller, who owns it from then on.
+	handedOver := false
+	defer func() {
+		if !handedOver {
+			_ = udpConn.Close()
+		}
+	}()
 	pc := ipv4.NewPacketConn(udpConn)
 	l4.conn4 = pc
 	var ifi *net.Interface
@@ -200,6 +229,7 @@ func listen4(a *net.UDPAddr) (*listener4, error) {
 			return nil, err
 		}
 	}
+	handedOver = true
 	return &l4, nil
 }
 
@@ -209,6 +239,14 @@ func listen6(a *net.UDPAddr) (*listener6, error) {
 	if err != nil {
 		return nil, err
 	}
+	// See listen4: the socket is ours the moment the bind returns, and only
+	// the caller that receives the listener takes it off our hands.
+	handedOver := false
+	defer func() {
+		if !handedOver {
+			_ = udpconn.Close()
+		}
+	}()
 	pc := ipv6.NewPacketConn(udpconn)
 	l6.conn6 = pc
 	var ifi *net.Interface
@@ -233,6 +271,7 @@ func listen6(a *net.UDPAddr) (*listener6, error) {
 			return nil, err
 		}
 	}
+	handedOver = true
 	return &l6, nil
 }
 
