@@ -1,7 +1,11 @@
 github.com/coredhcp/coredhcp/plugins/autoconfigure
+github.com/coredhcp/coredhcp/plugins/bootfile
+github.com/coredhcp/coredhcp/plugins/ddns
 github.com/coredhcp/coredhcp/plugins/dns
 github.com/coredhcp/coredhcp/plugins/file
 github.com/coredhcp/coredhcp/plugins/ipv6only
+github.com/coredhcp/coredhcp/plugins/leaseapi
+github.com/coredhcp/coredhcp/plugins/leasehook
 github.com/coredhcp/coredhcp/plugins/leasetime
 github.com/coredhcp/coredhcp/plugins/macfilter
 github.com/coredhcp/coredhcp/plugins/metrics
@@ -13,8 +17,13 @@ github.com/coredhcp/coredhcp/plugins/ntp
 github.com/coredhcp/coredhcp/plugins/options
 github.com/coredhcp/coredhcp/plugins/prefix
 github.com/coredhcp/coredhcp/plugins/range
+github.com/coredhcp/coredhcp/plugins/range6
+github.com/coredhcp/coredhcp/plugins/ratelimit
 github.com/coredhcp/coredhcp/plugins/redis
+github.com/coredhcp/coredhcp/plugins/relay
+github.com/coredhcp/coredhcp/plugins/relayinfo
 github.com/coredhcp/coredhcp/plugins/router
 github.com/coredhcp/coredhcp/plugins/searchdomains
 github.com/coredhcp/coredhcp/plugins/serverid
 github.com/coredhcp/coredhcp/plugins/staticroute
+github.com/coredhcp/coredhcp/plugins/subnet

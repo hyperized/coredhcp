@@ -54,6 +54,7 @@ $ make test-linux       # the same suite on Linux, in a container
 $ make test-integration # DHCPv6 against a client in network namespaces
 $ make test-compose     # DHCPv4 against clients on a docker bridge
 $ make test-redis       # the redis plugin against a real Redis, in compose
+$ make test-ddns        # the ddns plugin against a real Knot DNS, in compose
 $ make lint             # golangci-lint, pinned version, in a container
 $ make cover            # coverage profile plus the total
 $ make bench            # benchmark suite with allocation counts
@@ -181,6 +182,13 @@ against it. The netbox plugin's integration tests have no stack here; they run
 on demand against an existing NetBox instance with `NETBOX_URL`,
 `NETBOX_TOKEN` and `NETBOX_TEST_MAC` set, see the package documentation.
 
+`make test-ddns` runs the ddns plugin's integration tests against a real Knot
+DNS server ([test/ddns/](test/ddns/)): one container for Knot holding a
+forward zone and two reverse zones that accept a TSIG key, one `golang`
+container running the tests tagged `integration` against it. The tests drive
+the plugin's handlers in-process and then query Knot to see that the records
+really landed and that a release took them away again.
+
 ## Docker
 
 The [Dockerfile](./Dockerfile) builds a cgo-free binary and ships it on
@@ -234,7 +242,7 @@ new features to CoreDHCP.
 
 Core plugins can be found under the [plugins](/plugins/) directory.
 
-This fork adds six plugins upstream does not have built in:
+This fork adds fifteen plugins upstream does not have built in:
 
 * [options](plugins/options/) sets any DHCP option from config
   (`15:string:home.lan`), typed and validated, instead of one plugin per
@@ -253,6 +261,54 @@ This fork adds six plugins upstream does not have built in:
   from Redis hashes keyed by MAC, DUID or client identifier, over a small RESP
   client of its own rather than a client library; `redis://` and `rediss://`
   URLs, AUTH and database selection are supported
+* [relay](plugins/relay/) drops relayed requests that did not come from a
+  configured relay, closing the DHCPv4 giaddr reflector (the sender picks
+  where the reply goes), and drops a DHCPRELEASE whose ciaddr is not the
+  address it was sent from, so a neighbour's lease cannot be freed by
+  forging one; DHCPv6 matches the relay's source address instead and caps
+  relay nesting and hop count
+* [ratelimit](plugins/ratelimit/) drops requests that arrive faster than a
+  configured rate, one token bucket per client in a bounded LRU, keyed by MAC,
+  source address or both, with an optional bucket shared by all traffic; the
+  equivalent of Kea's limits hook, and the answer to the starvation attacks
+  the rest of the chain cannot see coming
+* [subnet](plugins/subnet/) serves more than one scope from one server,
+  choosing the scope per request from the relay address, the receiving
+  interface, or the address the client already holds; each scope's options,
+  reservations and pool live in one YAML file, and allocation is handed to a
+  `range` or `prefix` instance built per subnet instead of reimplemented
+* [range6](plugins/range6/) hands out DHCPv6 addresses from a pool, one per
+  IA_NA, keyed by client DUID and IAID and kept in sqlite across restarts;
+  upstream only delegates prefixes, so an IA_NA client had to be listed in a
+  static file
+* [relayinfo](plugins/relayinfo/) hands out addresses by the port a request
+  came in on rather than by the client that sent it, keyed on the circuit-id,
+  remote-id or subscriber-id in option 82 or on the DHCPv6 relay's
+  interface-id or remote-id, from a file the operator can have reloaded on
+  change; the package doc is blunt that it needs a relay allow list in front
+  of it
+* [bootfile](plugins/bootfile/) serves a different network boot program per
+  client architecture, so BIOS, UEFI and HTTP boot machines on one network
+  each get a file they can run, with an `ipxe=` entry for clients that have
+  already chained into iPXE
+* [ddns](plugins/ddns/) keeps DNS in step with the leases handed out, as
+  RFC 2136 updates signed with a TSIG key (upstream issue #92, open since
+  2020: Kea does this, dnsmasq does not). Forward and reverse zones, both
+  families, names allow-listed before they reach a zone, and delivery off
+  the packet path through a bounded queue
+* [leasehook](plugins/leasehook/) reports every lease event to a webhook or a
+  local program, the way Kea's `run_script` hook and dnsmasq's `dhcp-script`
+  do: one JSON object per offer, ack, nak, release, decline or DHCPv6 reply,
+  optionally signed with an HMAC. Delivery runs on a worker behind a bounded
+  queue, so an endpoint that stops answering slows down deliveries and not
+  DHCP
+* [leaseapi](plugins/leaseapi/) answers what the server is holding right now
+  over a read-only HTTP API on a unix socket or on loopback, which is the
+  most-asked-for thing in the upstream tracker (coredhcp/coredhcp#111) and what
+  a remote terminal UI needs to read; the pool and reservation plugins register
+  with the new [leases](leases/) package during setup and the API serves
+  whatever registered, so there is no lease state anywhere but in the plugin
+  that owns it
 
 The last two started as the `netbox` and `redis` plugins in the
 [coredhcp/plugins](https://github.com/coredhcp/plugins) repository, which has
