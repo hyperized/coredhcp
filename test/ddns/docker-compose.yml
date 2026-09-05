@@ -1,12 +1,5 @@
-# Integration test stack for the ddns plugin: a real Knot DNS server that
-# accepts TSIG-signed RFC 2136 updates, and a Go container that runs the
-# plugin's integration tests against it. Nothing DHCP happens on the wire
-# here; the tests drive the plugin's update logic directly and only the DNS
-# server is real.
-#
-# Drive it with `make test-ddns` from the repo root, which tears the stack down
-# afterwards. Knobs, all with defaults: COMPOSE_PROJECT_NAME, KNOT_TAG,
-# GO_TAG, DDNS_TSIG_SECRET.
+# Integration stack for the ddns plugin against a real Knot DNS server. Nothing
+# DHCP happens on the wire; the tests drive the plugin's update logic directly.
 
 name: ${COMPOSE_PROJECT_NAME:-coredhcp-ddns-itest}
 
@@ -18,16 +11,15 @@ services:
       - ./knot.conf:/config/knot.conf:ro
       - ./zones:/zones:ro
       - knot-storage:/storage
-    # kdig against the forward zone's own SOA doubles as a liveness and a
-    # readiness check: Knot only answers once the zone is loaded.
+    # Knot only answers once the zone is loaded, so this is a readiness check
+    # as much as a liveness one.
     healthcheck:
       test: ["CMD-SHELL", "kdig @127.0.0.1 home.lan SOA +short | grep -q ns.home.lan"]
       interval: 1s
       timeout: 2s
       retries: 30
 
-  # Exits with the test result: `up --exit-code-from tester` returns this
-  # container's exit code.
+  # Exits with the test result: `up --exit-code-from tester` returns its code.
   tester:
     image: golang:${GO_TAG:-1.26}
     depends_on:
@@ -47,14 +39,11 @@ services:
     command: ["go", "test", "-count=1", "-race", "-tags=integration", "-run", "Integration", "-v", "./plugins/ddns/"]
     volumes:
       - ../..:/src:ro
-      # Module and build caches persist between runs so a rerun does not
-      # download the world again.
       - gomodcache:/go/pkg/mod
       - gobuildcache:/root/.cache/go-build
 
 volumes:
-  # Holds Knot's confdb and journal. The zone files stay read-only; accepted
-  # updates live here instead, per zonefile-sync: -1 in knot.conf.
+  # Accepted updates land here, not in the read-only zone mount.
   knot-storage:
   gomodcache:
   gobuildcache:
