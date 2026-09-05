@@ -1,0 +1,4 @@
+$TTL 3600
+@   IN SOA ns.home.lan. hostmaster.home.lan. ( 1 3600 600 86400 3600 )
+    IN NS  ns.home.lan.
+ns  IN A   10.0.0.53

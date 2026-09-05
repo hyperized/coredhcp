@@ -16,6 +16,12 @@ COMPOSE_TEST = docker compose -p $(COMPOSE_PROJECT) -f test/compose/docker-compo
 REDIS_PROJECT ?= coredhcp-redis-itest
 COMPOSE_REDIS = docker compose -p $(REDIS_PROJECT) -f test/redis/docker-compose.yml
 
+# The ddns plugin's integration tests under test/ddns/: a real Knot DNS server
+# taking TSIG-signed updates and a Go container running the tagged tests
+# against it.
+DDNS_PROJECT ?= coredhcp-ddns-itest
+COMPOSE_DDNS = docker compose -p $(DDNS_PROJECT) -f test/ddns/docker-compose.yml
+
 # The demo stack under test/demo/: the server with its terminal UI plus busybox
 # clients that keep it busy. Its own project name and network prefix, so it can
 # run next to the stacks above.
@@ -29,7 +35,7 @@ COMPOSE_DEMO = docker compose -p $(DEMO_PROJECT) -f test/demo/docker-compose.yml
 # see it; the targets below run each step in both modules.
 TUI_DIR = cmd/coredhcp-tui
 
-.PHONY: all build generate test test-linux test-integration test-compose test-redis demo lint cover bench fuzz fmt clean docker-image
+.PHONY: all build generate test test-linux test-integration test-compose test-redis test-ddns demo lint cover bench fuzz fmt clean docker-image
 
 all: build
 
@@ -82,6 +88,15 @@ test-redis:
 	trap teardown EXIT INT TERM; \
 	teardown; \
 	$(COMPOSE_REDIS) up --exit-code-from tester
+
+# Integration tests for the ddns plugin against a real Knot DNS server, in
+# compose.
+test-ddns:
+	@set -eu; \
+	teardown() { $(COMPOSE_DDNS) down --volumes --remove-orphans >/dev/null 2>&1 || true; }; \
+	trap teardown EXIT INT TERM; \
+	teardown; \
+	$(COMPOSE_DDNS) up --exit-code-from tester
 
 # Watch the terminal UI against live traffic. The clients start detached and
 # keep asking for leases; the server runs in the foreground with the UI on this
