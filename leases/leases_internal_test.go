@@ -11,13 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ResetRegistry empties the registry, immediately and again when the test
-// finishes.
-//
-// It is exported from a _test.go file rather than from leases.go because
-// shipped code has no business emptying the registry: plugins register once at
-// startup and stay registered for the life of the process. The black-box test
-// package needs it to keep cases independent of each other.
+// ResetRegistry empties the registry for test isolation; it lives in a _test.go
+// file because production code has no reason to ever clear it.
 func ResetRegistry(t *testing.T) {
 	t.Helper()
 	resetRegistry()
@@ -30,7 +25,6 @@ func resetRegistry() {
 	registry.sources = nil
 }
 
-// stub is a Source that reports whatever it was built with.
 type stub struct {
 	name   string
 	leases []Lease
@@ -120,9 +114,8 @@ func TestUnregister(t *testing.T) {
 func TestUnregisterRemovesOneRegistration(t *testing.T) {
 	ResetRegistry(t)
 
-	// A source registered twice is two entries, and one Unregister drops one
-	// of them. Nothing does this on purpose; the point is that Unregister
-	// does not quietly clear a name.
+	// A source registered twice is two entries; one Unregister must remove
+	// one of them, not quietly clear every entry with that name.
 	s := &stub{name: "range a"}
 	Register(s)
 	Register(s)
