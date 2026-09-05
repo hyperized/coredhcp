@@ -30,9 +30,7 @@ var (
 	unknownMAC = net.HardwareAddr{0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb}
 )
 
-// fakeRedis is a minimal RESP2 server, just enough of the protocol for this
-// plugin's PING, AUTH, SELECT and HGETALL to get real replies over a real
-// socket instead of a mock of the client.
+// fakeRedis speaks just enough RESP2 to exercise the client over a real socket instead of a mock.
 type fakeRedis struct {
 	addr string
 
@@ -43,8 +41,6 @@ type fakeRedis struct {
 	calls  int // every command received, PING included
 }
 
-// newFakeRedis starts the server and ties its shutdown, connections and
-// goroutines included, to the test's cleanup.
 func newFakeRedis(t *testing.T) *fakeRedis {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -71,11 +67,8 @@ func newFakeRedis(t *testing.T) *fakeRedis {
 		}
 	}()
 	t.Cleanup(func() {
-		// Wait for the accept loop to stop before walking the connection
-		// list, otherwise a connection accepted at just the wrong moment is
-		// never closed and the wait below never returns. Closing every
-		// connection is what unblocks the reads serve is parked on: the
-		// client behind a handler has no Close a test can reach.
+		// The accept loop must stop before we walk conns, or one accepted at the last
+		// moment is never closed; closing every conn is what unblocks serve's read.
 		require.NoError(t, ln.Close())
 		accepting.Wait()
 		f.mu.Lock()
@@ -113,8 +106,7 @@ func (f *fakeRedis) serve(conn net.Conn) {
 	}
 }
 
-// readRESPCommand parses one RESP array of bulk strings, the only shape a
-// real redis client sends a command as.
+// readRESPCommand parses one RESP array of bulk strings, the only shape a real client sends a command as.
 func readRESPCommand(r *bufio.Reader) ([]string, error) {
 	n, err := readRESPCount(r, '*')
 	if err != nil {
@@ -135,8 +127,7 @@ func readRESPCommand(r *bufio.Reader) ([]string, error) {
 	return args, nil
 }
 
-// readRESPCount reads a line of the form "<want><digits>\r\n" and returns
-// the digits, used for both the array length and each bulk string length.
+// readRESPCount reads a "<want><digits>\r\n" line; want distinguishes the array (*) and bulk-string ($) prefixes.
 func readRESPCount(r *bufio.Reader, want byte) (int, error) {
 	line, err := r.ReadString('\n')
 	if err != nil {
@@ -149,17 +140,13 @@ func readRESPCount(r *bufio.Reader, want byte) (int, error) {
 	return strconv.Atoi(line[1:])
 }
 
-// callCount returns the number of commands the server has received, so a
-// test can assert that a message the plugin is meant to pass on never reached
-// the backend at all.
 func (f *fakeRedis) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
 }
 
-// reply builds the RESP2 reply for one command. Redis command names are
-// case insensitive, so args[0] is upper-cased before matching.
+// reply builds the RESP2 reply for one command; Redis command names are case-insensitive, so args[0] is upper-cased first.
 func (f *fakeRedis) reply(args []string) []byte {
 	f.mu.Lock()
 	f.calls++
@@ -194,8 +181,7 @@ func (f *fakeRedis) hgetallReply(args []string) []byte {
 	return b.Bytes()
 }
 
-// unreachableAddr returns a host:port nothing listens on, to exercise the
-// "redis is unreachable" path without depending on a specific reserved port
+// unreachableAddr returns a host:port nothing listens on, avoiding reliance on a reserved port
 // being refused the same way on every platform.
 func unreachableAddr(t *testing.T) string {
 	t.Helper()
@@ -212,11 +198,8 @@ func macKey(mac net.HardwareAddr) string {
 	return "mac:" + mac.String()
 }
 
-// onlyRequest replaces the parameter request list built by
-// dhcpv4.NewDiscovery, which always asks for the DNS option among others. A
-// request with no list at all is not the same thing: RFC 2131 section 3.5
-// reads that as asking for everything, and the plugin follows the library in
-// honouring it.
+// onlyRequest overrides NewDiscovery's default parameter list, which always includes DNS. RFC 2131 section
+// 3.5 treats an empty list as requesting everything, so this is not the same as omitting it.
 func onlyRequest(codes ...dhcpv4.OptionCode) dhcpv4.Modifier {
 	return func(d *dhcpv4.DHCPv4) {
 		d.UpdateOption(dhcpv4.OptParameterRequestList(codes...))
@@ -242,8 +225,6 @@ func v6Request(t *testing.T, modifiers ...dhcpv6.Modifier) (dhcpv6.DHCPv6, dhcpv
 	return req, resp
 }
 
-// requireIAAddr pulls the single IA_NA address the plugin is expected to
-// have added to result.
 func requireIAAddr(t *testing.T, result dhcpv6.DHCPv6) *dhcpv6.OptIAAddress {
 	t.Helper()
 	opt := result.GetOneOption(dhcpv6.OptionIANA)
@@ -293,11 +274,8 @@ func TestSetupErrors(t *testing.T) {
 	})
 }
 
-// TestSetupKeyModeFamilies pins the family rule down through the public
-// surface, because it is a config-file contract and not an implementation
-// detail: a DHCPv4 client has no DUID and DHCPv6 has no option 61, so asking
-// for either under the wrong server section has to fail at startup instead of
-// silently matching no client at all.
+// TestSetupKeyModeFamilies checks this is enforced at startup, not left to silently match nothing:
+// a DHCPv4 client has no DUID and DHCPv6 has no option 61, so the wrong key mode must fail Setup.
 func TestSetupKeyModeFamilies(t *testing.T) {
 	addr := unreachableAddr(t)
 
@@ -334,9 +312,8 @@ func TestSetupKeyModeFamilies(t *testing.T) {
 }
 
 func TestSetup4PingFailureIsOnlyAWarning(t *testing.T) {
-	// A database that is briefly down must not stop coredhcp from starting
-	// and serving its other plugins, so a failed PING is logged and setup
-	// still succeeds with a handler that works, not a stub.
+	// A briefly-down backend must not stop coredhcp starting; a failed PING is logged
+	// but Setup still returns a working handler, not a stub.
 	h4, err := redis.Plugin.Setup4(unreachableAddr(t))
 	require.NoError(t, err)
 	require.NotNil(t, h4)
@@ -360,8 +337,7 @@ func TestSetup6PingFailureIsOnlyAWarning(t *testing.T) {
 }
 
 func TestHandler4Inform(t *testing.T) {
-	// An unreachable backend proves the point: if INFORM touched redis at
-	// all, the lookup would fail and the request would be dropped.
+	// Backend is unreachable on purpose: if INFORM touched redis, the request would be dropped.
 	h4, err := redis.Plugin.Setup4(unreachableAddr(t))
 	require.NoError(t, err)
 
@@ -375,9 +351,8 @@ func TestHandler4Inform(t *testing.T) {
 	assert.False(t, stop)
 }
 
-// TestHandler4SkipsLookupForReleaseAndDecline covers the messages coredhcp
-// never answers: the plugin has to pass them on without spending a Redis
-// round trip that an unauthenticated sender could otherwise trigger at will.
+// TestHandler4SkipsLookupForReleaseAndDecline checks these pass through without a Redis round trip,
+// which an unauthenticated sender could otherwise trigger at will.
 func TestHandler4SkipsLookupForReleaseAndDecline(t *testing.T) {
 	for _, mtype := range []dhcpv4.MessageType{dhcpv4.MessageTypeRelease, dhcpv4.MessageTypeDecline} {
 		t.Run(mtype.String(), func(t *testing.T) {
@@ -576,9 +551,7 @@ func TestHandler6RelayCannotDecapsulate(t *testing.T) {
 	h6, err := redis.Plugin.Setup6(unreachableAddr(t))
 	require.NoError(t, err)
 
-	// A relay message with no embedded RelayMsg option is malformed: there
-	// is nothing to decapsulate, and that is a bug in whatever sent it, not
-	// something redis can be asked about.
+	// No embedded RelayMsg option means nothing to decapsulate; that's a malformed sender, not a redis question.
 	req := &dhcpv6.RelayMessage{MessageType: dhcpv6.MessageTypeRelayForward}
 	resp, err := dhcpv6.NewMessage()
 	require.NoError(t, err)
@@ -589,10 +562,8 @@ func TestHandler6RelayCannotDecapsulate(t *testing.T) {
 	assert.True(t, stop)
 }
 
-// TestHandler6SkipsLookupForReleaseAndDecline covers the messages coredhcp
-// never answers, both sent directly and behind a relay: the plugin has to
-// read the inner message's type, since a relayed message carries the
-// client's real type inside the RELAY-FORW envelope, not the outer one.
+// TestHandler6SkipsLookupForReleaseAndDecline covers direct and relayed sends: a relayed message's
+// real type sits inside the RELAY-FORW envelope, not the outer message, so the plugin must read the inner type.
 func TestHandler6SkipsLookupForReleaseAndDecline(t *testing.T) {
 	for _, mtype := range []dhcpv6.MessageType{dhcpv6.MessageTypeRelease, dhcpv6.MessageTypeDecline} {
 		t.Run(mtype.String(), func(t *testing.T) {

@@ -19,12 +19,10 @@ import (
 
 var testMAC = net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}
 
-// testKey is the key the handlers look up for testMAC under the default
-// prefix.
+// testKey is the key the handlers look up for testMAC under the default prefix.
 const testKey = "mac:aa:bb:cc:dd:ee:ff"
 
-// newTestPlugin builds an instance pointed at s without dialling, so a test
-// can arrange the server's answers first.
+// newTestPlugin builds an instance pointed at s without dialling, so a test can arrange the server's answers first.
 func newTestPlugin(t *testing.T, v6 bool, s *fakeServer, args ...string) *pluginState {
 	t.Helper()
 	p, err := newPluginState(v6, append([]string{s.addr}, args...)...)
@@ -33,10 +31,8 @@ func newTestPlugin(t *testing.T, v6 bool, s *fakeServer, args ...string) *plugin
 	return p
 }
 
-// v4Exchange builds a request and the reply a previous plugin would have
-// started. dhcpv4.NewDiscovery always asks for the DNS option, so the request
-// is built by hand here to keep the parameter request list under the test's
-// control.
+// v4Exchange builds by hand rather than via dhcpv4.NewDiscovery, which always requests DNS,
+// so the parameter request list stays under the test's control.
 func v4Exchange(t *testing.T, mtype dhcpv4.MessageType, mods ...dhcpv4.Modifier) (*dhcpv4.DHCPv4, *dhcpv4.DHCPv4) {
 	t.Helper()
 	req, err := dhcpv4.New(append([]dhcpv4.Modifier{
@@ -49,8 +45,6 @@ func v4Exchange(t *testing.T, mtype dhcpv4.MessageType, mods ...dhcpv4.Modifier)
 	return req, resp
 }
 
-// v6Exchange builds a request carrying an IA_NA and a DUID the MAC can be
-// read from.
 func v6Exchange(t *testing.T, mods ...dhcpv6.Modifier) (*dhcpv6.Message, *dhcpv6.Message) {
 	t.Helper()
 	duid := &dhcpv6.DUIDLL{HWType: iana.HWTypeEthernet, LinkLayerAddr: testMAC}
@@ -143,9 +137,8 @@ func TestParseArgsAddress(t *testing.T) {
 	}
 }
 
-// TestParseArgsURLErrorHidesCredentials covers the one error path that has to
-// be careful about what it says: net/url puts the whole URL in its error, and
-// the URL may carry a password.
+// TestParseArgsURLErrorHidesCredentials matters because net/url embeds the whole URL in its
+// parse error, and that URL may carry a password.
 func TestParseArgsURLErrorHidesCredentials(t *testing.T) {
 	_, err := parseArgs(false, []string{"redis://coredhcp:hunter2@ho st:6379"})
 	require.Error(t, err)
@@ -270,10 +263,6 @@ func TestParseArgsNoAddress(t *testing.T) {
 	assert.Nil(t, s)
 }
 
-// TestParseArgsKeyMode covers the key: argument: its default, the default
-// prefix each mode carries, an explicit prefix overriding that default from
-// either side of key: on the line, and the family checks that keep a DUID out
-// of DHCPv4 and option 61 out of DHCPv6.
 func TestParseArgsKeyMode(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -349,8 +338,7 @@ func TestSetupState(t *testing.T) {
 	})
 
 	t.Run("server is down", func(t *testing.T) {
-		// Setup has to succeed anyway: coredhcp keeps serving its other
-		// plugins while redis comes back.
+		// Setup succeeds anyway; coredhcp keeps serving its other plugins while redis comes back.
 		p, err := setupState(false, "127.0.0.1:1")
 		require.NoError(t, err)
 		require.NotNil(t, p)
@@ -398,8 +386,7 @@ func TestLookup(t *testing.T) {
 
 	fields, err := p.lookup(testMAC.String())
 	require.NoError(t, err)
-	// Unknown fields are handed back untouched; only the handlers decide what
-	// to act on.
+	// Unknown fields are handed back untouched; only the handlers decide what to act on.
 	assert.Equal(t, map[string]string{"ipv4": "10.0.0.5", "hostname": "printer"}, fields)
 
 	s.replyRaw("HGETALL", "-ERR boom\r\n")
@@ -552,9 +539,8 @@ func TestHandler4Inform(t *testing.T) {
 	assert.Empty(t, s.seen(), "an INFORM asks for options, not for a lease, so redis is not consulted")
 }
 
-// TestHandler4SkipsLookupForReleaseAndDecline covers the messages coredhcp
-// never answers: the plugin has to pass them on without spending a Redis
-// round trip that an unauthenticated sender could otherwise trigger at will.
+// TestHandler4SkipsLookupForReleaseAndDecline checks these pass through without a Redis round trip,
+// which an unauthenticated sender could otherwise trigger at will.
 func TestHandler4SkipsLookupForReleaseAndDecline(t *testing.T) {
 	for _, mtype := range []dhcpv4.MessageType{dhcpv4.MessageTypeRelease, dhcpv4.MessageTypeDecline} {
 		t.Run(mtype.String(), func(t *testing.T) {
@@ -573,10 +559,8 @@ func TestHandler4SkipsLookupForReleaseAndDecline(t *testing.T) {
 func TestHandler4(t *testing.T) {
 	cases := []struct {
 		name string
-		// requested is the parameter request list of the request. Leaving it
-		// empty sends no list at all, which RFC 2131 section 3.5 reads as
-		// asking for everything, so a case about an option not being wanted
-		// has to send a list that leaves it out.
+		// requested is the parameter request list; RFC 2131 section 3.5 treats an empty list as
+		// requesting everything, so a case needs an explicit list to test an option NOT being wanted.
 		requested []dhcpv4.OptionCode
 		fields    map[string]string
 		raw       string
@@ -776,10 +760,8 @@ func TestHandler6Structure(t *testing.T) {
 	assert.Empty(t, s.seen(), "none of these requests should have reached redis")
 }
 
-// TestHandler6SkipsLookupForReleaseAndDecline covers the messages coredhcp
-// never answers, both sent directly and behind a relay: the plugin has to
-// read the inner message's type, since a relayed message carries the
-// client's real type inside the RELAY-FORW envelope, not the outer one.
+// TestHandler6SkipsLookupForReleaseAndDecline covers direct and relayed sends: a relayed message's
+// real type sits inside the RELAY-FORW envelope, not the outer message, so the plugin must read the inner type.
 func TestHandler6SkipsLookupForReleaseAndDecline(t *testing.T) {
 	for _, mtype := range []dhcpv6.MessageType{dhcpv6.MessageTypeRelease, dhcpv6.MessageTypeDecline} {
 		t.Run(mtype.String(), func(t *testing.T) {
@@ -936,8 +918,7 @@ func TestHandler6(t *testing.T) {
 	}
 }
 
-// namesOrNil keeps the table readable: a case that expects no DNS option
-// leaves wantDNS unset.
+// namesOrNil lets a table case that expects no DNS option leave wantDNS as nil rather than []string{}.
 func namesOrNil(names []string) []string {
 	if len(names) == 0 {
 		return nil
@@ -945,11 +926,8 @@ func namesOrNil(names []string) []string {
 	return names
 }
 
-// TestHandler4ClientIDKeyMode covers key:client-id end to end: the key it
-// builds, a client that sends no option 61 at all, an option 61 redis has
-// never heard of, and a backend failure. The 01-prefixed identifier is the
-// package doc's own example, an RFC 2132 type 1 (hardware address) client
-// identifier carrying testMAC.
+// TestHandler4ClientIDKeyMode uses the package doc's own example clientID: a 01-prefixed, RFC 2132
+// type 1 (hardware address) identifier carrying testMAC.
 func TestHandler4ClientIDKeyMode(t *testing.T) {
 	clientID := []byte{0x01, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}
 	const wantKey = "client-id:01aabbccddeeff"
@@ -1007,10 +985,8 @@ func TestHandler4ClientIDKeyMode(t *testing.T) {
 	}
 }
 
-// TestHandler6DUIDKeyMode covers key:duid end to end: the key it builds, a
-// client with no client ID at all, a DUID too long to look up, an unknown
-// DUID, and a backend failure. v6Exchange's default client ID is a DUID-LL
-// over testMAC, which hex encodes to the package doc's own example.
+// TestHandler6DUIDKeyMode relies on v6Exchange's default client ID, a DUID-LL over testMAC, hex
+// encoding to the package doc's own example.
 func TestHandler6DUIDKeyMode(t *testing.T) {
 	const wantKey = "duid:00030001aabbccddeeff"
 

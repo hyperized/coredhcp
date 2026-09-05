@@ -12,106 +12,74 @@
 //	  plugins:
 //	    - redis: 10.0.0.9:6379 password:env:REDIS_PASSWORD timeout:2s prefix:mac: lifetime:1h key:mac
 //
-// The first argument is the server address. It is either a plain host:port,
-// or a URL: redis://[user[:password]@]host[:port][/db] for a cleartext
-// connection and rediss://... for TLS. A URL without a port uses 6379, and
-// the path selects the database number. TLS verifies the server against the
-// system trust store using the host from the URL; there is no switch to turn
-// that off.
+// The first argument is the server address: a plain host:port, or a URL
+// redis://[user[:password]@]host[:port][/db] (rediss:// for TLS). A URL
+// without a port uses 6379 and the path selects the database number. TLS
+// verifies against the system trust store, with no switch to turn that off.
 //
 // The remaining arguments are optional and may appear in any order. An
 // argument that is not one of these fails setup by name:
 //
 //   - password:<value> or password:env:<NAME> overrides any password in the
-//     URL. The env: form reads the variable once, during setup, and fails if
-//     it is unset or empty. Passwords are never logged, and neither is the
-//     userinfo part of the URL.
+//     URL. The env: form reads the variable once, during setup.
 //   - timeout:<duration> bounds the dial, the TLS handshake and every
-//     command. It defaults to 2s and has to be positive.
-//   - prefix:<key-prefix> is put in front of the client identifier to build
-//     the key. It defaults to the key mode's own prefix, and an explicit one
-//     wins wherever it appears on the line. An empty prefix means the key is
-//     the bare identifier.
-//   - lifetime:<duration> is the DHCPv6 preferred and valid lifetime used for
-//     clients whose hash carries no leaseTime. It defaults to 1h.
-//   - key:<mac|duid|client-id> selects the client identifier the keys are
-//     built from. It defaults to mac.
+//     command. Defaults to 2s, has to be positive.
+//   - prefix:<key-prefix> goes in front of the client identifier. Defaults to
+//     the key mode's own prefix; empty means a bare identifier.
+//   - lifetime:<duration> is the DHCPv6 lifetime for clients whose hash
+//     carries no leaseTime. Defaults to 1h.
+//   - key:<mac|duid|client-id> selects the identifier the keys are built
+//     from. Defaults to mac.
 //
 // # Data model
 //
-// One hash per client, keyed by <prefix><identifier>. Which identifier that
-// is, and how it is written, follows the key: argument.
+// One hash per client, keyed by <prefix><identifier>.
 //
-// key:mac is the default and works for both families. The MAC is written the
-// way net.HardwareAddr.String() writes it, lowercase hex, colon separated,
-// and the prefix defaults to "mac:".
+// key:mac works for both families. The MAC is written the way
+// net.HardwareAddr.String() writes it, and the prefix defaults to "mac:".
 //
 //	HSET mac:aa:bb:cc:dd:ee:ff ipv4 10.0.0.5/24 router 10.0.0.1 dns 10.0.0.2,10.0.0.3 leaseTime 12h
 //
-// key:duid is for server6 and fails setup under server4. A MAC is a poor key
-// there: a client identifying with a DUID-EN or a DUID-UUID carries no
-// link-layer address in its DUID, and behind a relay that sends no client
-// link-layer address option there is nothing to extract either. The key is
-// the DUID as it goes on the wire, two-octet type code included, in
-// lowercase hex with no separators, behind the default prefix "duid:".
+// key:duid is server6 only, for clients whose DUID-EN or DUID-UUID carries no
+// link-layer address to key a MAC on. The key is the DUID as it goes on the
+// wire, two-octet type code included, in lowercase hex with no separators,
+// behind the default prefix "duid:". At most 130 octets: RFC 8415 section
+// 11.1 caps a DUID at 128 and the type code is two more.
 //
 //	HSET duid:00030001aabbccddeeff ipv6 2001:db8::10:1 leaseTime 12h
 //
-// A DUID is at most 130 octets, since RFC 8415 section 11.1 caps it at 128
-// and the type code is two more. A request carrying a longer one is passed
-// to the next plugin rather than looked up.
-//
-// key:client-id is for server4 and fails setup under server6. The key is the
-// raw bytes of option 61 in lowercase hex, behind the default prefix
-// "client-id:". RFC 2132 section 9.14 puts a type octet first: type 1 is a
-// hardware address, so a client whose identifier is its MAC appears as 01
-// followed by the six address bytes, and an RFC 4361 client puts a DUID
-// behind type 255. A client that sends no option 61 at all is passed to the
-// next plugin.
+// key:client-id is server4 only: the raw bytes of option 61 in lowercase hex,
+// behind the default prefix "client-id:". RFC 2132 section 9.14 puts a type
+// octet first, type 1 being a hardware address and type 255 an RFC 4361 DUID.
 //
 //	HSET client-id:01aabbccddeeff ipv4 10.0.0.5/24
 //
 // The fields this plugin reads:
 //
-//   - ipv4: the address handed to a DHCPv4 client, bare (10.0.0.5) or in CIDR
-//     notation (10.0.0.5/24). The CIDR form also sets the subnet mask option.
-//   - ipv6: the address handed to a DHCPv6 client, bare or in CIDR notation.
-//     A prefix length is accepted and ignored, because an IA_NA carries an
-//     address and no mask.
+//   - ipv4: the DHCPv4 address, bare (10.0.0.5) or CIDR (10.0.0.5/24). The
+//     CIDR form also sets the subnet mask option.
+//   - ipv6: the DHCPv6 address, bare or CIDR. A prefix length is accepted and
+//     ignored: an IA_NA carries an address and no mask.
 //   - router: the IPv4 default gateway, option 3.
-//   - dns: resolver addresses, comma separated. Both families may be listed
-//     in the same field; the DHCPv4 handler uses the IPv4 entries and the
-//     DHCPv6 handler the IPv6 ones. Like the dedicated dns plugin, the option
-//     is only added when the client asked for it. For DHCPv4 that includes a
-//     client that sent no parameter request list at all, which RFC 2131
-//     section 3.5 reads as asking for everything available.
-//   - leaseTime: a Go duration such as 12h or 3600s. It becomes the DHCPv4
-//     lease time option and the DHCPv6 address lifetimes.
+//   - dns: resolver addresses, comma separated. Both families may share the
+//     field; each handler picks its own. Added only when the client asked for
+//     it, which for DHCPv4 includes a client that sent no parameter request
+//     list at all (RFC 2131 section 3.5).
+//   - leaseTime: a Go duration such as 12h. Becomes the DHCPv4 lease time
+//     option and the DHCPv6 address lifetimes.
 //
 // Any other field is ignored, with a line in the debug log naming it.
 //
 // # Behaviour
 //
-// Setup sends one PING. A failure there is logged as a warning naming the
-// address and the error, so a wrong password or a typo in the address shows
-// up at startup, but it does not fail setup: a DHCP server that refuses to
+// A failed PING at setup is a warning, not an error: a server that will not
 // start because a database is briefly down is worse than one that starts and
-// serves its other plugins while the database comes back.
-//
-// At request time the two failure modes are deliberately different. A client
-// that Redis does not know, or knows without an address for this family, is
-// passed on so a later plugin such as range can serve it. A lookup that fails
-// because Redis is unreachable, refuses the credentials, or answers something
-// unparseable drops the request instead: a client with a documented static
-// address must not silently fall through to a dynamic pool because the
-// backend hiccuped, and a dropped DHCP request is retried moments later.
-//
-// A DHCPv4 RELEASE or DECLINE, and their DHCPv6 equivalents, skip the lookup
-// entirely and are passed straight to the next plugin: coredhcp never sends a
-// reply to either message, and this plugin keeps no lease state that one
-// could act on, so looking one up would only spend a Redis round trip that an
-// unauthenticated sender on the segment can trigger at will with a new MAC
-// address each time.
+// serves its other plugins. At request time an unknown client is passed on so
+// a later plugin such as range can serve it, but a lookup that fails drops
+// the request rather than letting a documented static address fall through to
+// a dynamic pool. RELEASE and DECLINE skip the lookup: nothing replies to
+// them and this plugin holds no lease state, so a lookup would only give an
+// unauthenticated sender a Redis round trip per forged MAC.
 //
 // # Placement
 //
@@ -156,8 +124,8 @@ const (
 	lifetimeArg = "lifetime:"
 	keyArg      = "key:"
 
-	// envPrefix marks a password that names an environment variable instead
-	// of carrying the secret in the config file.
+	// Marks a password that names an environment variable instead of carrying
+	// the secret in the config file.
 	envPrefix = "env:"
 
 	// Defaults for the optional arguments.
@@ -165,8 +133,8 @@ const (
 	defaultTimeout  = 2 * time.Second
 	defaultLifetime = time.Hour
 
-	// One default key prefix per key mode, so a database serving more than
-	// one of them keeps the three key spaces apart.
+	// One per key mode, so a database serving more than one keeps the three
+	// key spaces apart.
 	defaultPrefixMAC      = "mac:"
 	defaultPrefixDUID     = "duid:"
 	defaultPrefixClientID = "client-id:"
@@ -183,23 +151,20 @@ const (
 	fieldLeaseTime = "leaseTime"
 )
 
-// settings is the parsed plugin configuration.
 type settings struct {
 	client clientConfig
 	mode   keyMode
 
-	// prefix is only meaningful once parsing is done: it stays empty until
-	// either a prefix: argument sets it, which prefixSet records, or the key
-	// mode's default fills it in.
+	// Empty until a prefix: argument sets it, which prefixSet records, or the
+	// key mode's default fills it in once the whole line is read.
 	prefix    string
 	prefixSet bool
 
 	lifetime time.Duration
 }
 
-// pluginState is one configured instance of the plugin. setup4 and setup6
-// build one each, so a server that uses the plugin for both families keeps
-// two independent connection pools.
+// setup4 and setup6 build one each, so serving both families keeps two
+// independent connection pools.
 type pluginState struct {
 	client   *client
 	prefix   string
@@ -223,8 +188,7 @@ func setup4(args ...string) (handler.Handler4, error) {
 	return p.Handler4, nil
 }
 
-// setupState builds the plugin instance and greets the server. See the
-// package documentation for why a failed greeting is only a warning.
+// See the package documentation for why a failed PING is only a warning.
 func setupState(v6 bool, args ...string) (*pluginState, error) {
 	p, err := newPluginState(v6, args...)
 	if err != nil {
@@ -238,9 +202,7 @@ func setupState(v6 bool, args ...string) (*pluginState, error) {
 	return p, nil
 }
 
-// newPluginState parses the arguments and builds the instance without
-// touching the network. Setup goes through setupState; this is split out so
-// tests can reach the client before it dials.
+// Split out from setupState so tests can reach the client before it dials.
 func newPluginState(v6 bool, args ...string) (*pluginState, error) {
 	s, err := parseArgs(v6, args)
 	if err != nil {
@@ -254,8 +216,6 @@ func newPluginState(v6 bool, args ...string) (*pluginState, error) {
 	}, nil
 }
 
-// optionParsers maps each optional argument to its parser. It is a fixed
-// table, read only after initialization.
 var optionParsers = []struct {
 	prefix string
 	apply  func(*settings, string) error
@@ -267,10 +227,8 @@ var optionParsers = []struct {
 	{keyArg, applyKey},
 }
 
-// parseArgs turns the config line into settings, applying the defaults first
-// so an argument only ever overrides one of them. The key prefix is the
-// exception: its default follows the key mode, which an argument anywhere on
-// the line may have changed, so it is filled in once the line is read.
+// The key prefix default follows the key mode, which an argument anywhere on
+// the line may change, so it is filled in only once the line has been read.
 func parseArgs(v6 bool, args []string) (*settings, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("need a redis address, either host:port or a %s:// or %s:// URL", schemePlain, schemeTLS)
@@ -296,7 +254,6 @@ func parseArgs(v6 bool, args []string) (*settings, error) {
 	return s, nil
 }
 
-// applyOption dispatches one optional argument to its parser.
 func applyOption(s *settings, arg string) error {
 	for _, o := range optionParsers {
 		if raw, ok := strings.CutPrefix(arg, o.prefix); ok {
@@ -307,8 +264,6 @@ func applyOption(s *settings, arg string) error {
 		arg, passwordArg, timeoutArg, prefixArg, lifetimeArg, keyArg)
 }
 
-// applyPassword takes the password literally, or reads it from the
-// environment for the env: form.
 func applyPassword(s *settings, raw string) error {
 	name, fromEnv := strings.CutPrefix(raw, envPrefix)
 	if !fromEnv {
@@ -329,7 +284,6 @@ func applyPassword(s *settings, raw string) error {
 	return nil
 }
 
-// applyTimeout sets the dial and per-command timeout.
 func applyTimeout(s *settings, raw string) error {
 	d, err := parsePositiveDuration(timeoutArg, raw)
 	if err != nil {
@@ -339,7 +293,6 @@ func applyTimeout(s *settings, raw string) error {
 	return nil
 }
 
-// applyLifetime sets the DHCPv6 lifetime used when a hash has no leaseTime.
 func applyLifetime(s *settings, raw string) error {
 	d, err := parsePositiveDuration(lifetimeArg, raw)
 	if err != nil {
@@ -349,15 +302,13 @@ func applyLifetime(s *settings, raw string) error {
 	return nil
 }
 
-// applyPrefix sets the key prefix. An empty value is allowed and means the
-// keys are bare client identifiers.
+// An empty value is allowed and means the keys are bare client identifiers.
 func applyPrefix(s *settings, raw string) error {
 	s.prefix = raw
 	s.prefixSet = true
 	return nil
 }
 
-// applyKey selects which client identifier the keys are built from.
 func applyKey(s *settings, raw string) error {
 	mode, err := parseKeyMode(raw)
 	if err != nil {
@@ -367,8 +318,6 @@ func applyKey(s *settings, raw string) error {
 	return nil
 }
 
-// parsePositiveDuration parses a Go duration and refuses anything that would
-// disable the setting it configures.
 func parsePositiveDuration(arg, raw string) (time.Duration, error) {
 	d, err := time.ParseDuration(raw)
 	if err != nil {
@@ -380,7 +329,6 @@ func parsePositiveDuration(arg, raw string) (time.Duration, error) {
 	return d, nil
 }
 
-// parseAddress reads the first argument, either a host:port or a URL.
 func parseAddress(arg string, s *settings) error {
 	if !strings.Contains(arg, "://") {
 		if err := validAddr(arg); err != nil {
@@ -392,9 +340,8 @@ func parseAddress(arg string, s *settings) error {
 	return parseURL(arg, s)
 }
 
-// parseURL reads the redis:// or rediss:// form. Parse errors are unwrapped
-// down to their cause before they are reported, because net/url puts the
-// whole URL in its error and the URL may carry a password.
+// Parse errors are unwrapped down to their cause before being reported:
+// net/url puts the whole URL in its error, and the URL may carry a password.
 func parseURL(arg string, s *settings) error {
 	u, err := url.Parse(arg)
 	if err != nil {
@@ -423,10 +370,8 @@ func parseURL(arg string, s *settings) error {
 		return err
 	}
 	if u.Scheme == schemeTLS {
-		// The system trust store, verified against the host from the URL.
-		// There is deliberately no way to skip verification: a plugin that
-		// can be told to trust anything on the network is a plugin that
-		// eventually is.
+		// No way to skip verification: a plugin that can be told to trust
+		// anything on the network is a plugin that eventually is.
 		s.client.tls = &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
 	}
 	if u.User != nil {
@@ -436,8 +381,7 @@ func parseURL(arg string, s *settings) error {
 	return nil
 }
 
-// validAddr checks that addr is a host:port with a plausible port, so a
-// mistyped address is a setup error rather than a dial failure at the first
+// A mistyped address is a setup error rather than a dial failure at the first
 // DHCP request.
 func validAddr(addr string) error {
 	host, port, err := net.SplitHostPort(addr)
@@ -450,9 +394,8 @@ func validAddr(addr string) error {
 	return validPort(port)
 }
 
-// validPort refuses a port that is not a number in range. net/url only checks
-// that the port of a URL is made of digits, so the range check has to happen
-// here for both forms of the address.
+// net/url only checks that a URL's port is digits, so the range check has to
+// happen here for both forms of the address.
 func validPort(port string) error {
 	n, err := strconv.Atoi(port)
 	if err != nil || n < 1 || n > 65535 {
@@ -461,7 +404,6 @@ func validPort(port string) error {
 	return nil
 }
 
-// parseDB reads the database number from a URL path.
 func parseDB(path string) (int, error) {
 	trimmed := strings.Trim(path, "/")
 	if trimmed == "" {
@@ -474,9 +416,6 @@ func parseDB(path string) (int, error) {
 	return db, nil
 }
 
-// lookup reads one client's hash. ident is the canonical identifier the key
-// mode built out of the request, and the Redis key is the configured prefix
-// in front of it.
 func (p *pluginState) lookup(ident string) (map[string]string, error) {
 	key := p.prefix + ident
 	fields, err := p.client.hgetall(key)
@@ -491,7 +430,6 @@ func (p *pluginState) lookup(ident string) (map[string]string, error) {
 	return fields, nil
 }
 
-// isKnownField reports whether name is a field this plugin acts on.
 func isKnownField(name string) bool {
 	switch name {
 	case fieldIPv4, fieldIPv6, fieldRouter, fieldDNS, fieldLeaseTime:
@@ -501,8 +439,6 @@ func isKnownField(name string) bool {
 	}
 }
 
-// addressField returns the address field for this family, logging why the
-// request is being passed on when there is none.
 func (p *pluginState) addressField(fields map[string]string, name, ident string) (string, bool) {
 	if len(fields) == 0 {
 		log.Infof("%s %s is unknown, passing", p.mode.label(), ident)
@@ -516,8 +452,7 @@ func (p *pluginState) addressField(fields map[string]string, name, ident string)
 	return value, true
 }
 
-// splitAddr parses either a bare address or a CIDR. bits is -1 when no prefix
-// length was given.
+// bits is -1 when no prefix length was given.
 func splitAddr(value string) (addr netip.Addr, bits int, err error) {
 	if strings.Contains(value, "/") {
 		pfx, err := netip.ParsePrefix(value)
@@ -530,13 +465,11 @@ func splitAddr(value string) (addr netip.Addr, bits int, err error) {
 	if err != nil {
 		return netip.Addr{}, 0, fmt.Errorf("invalid address %q: %w", value, err)
 	}
-	// An IPv4 address written the ::ffff:a.b.c.d way is still an IPv4
-	// address as far as DHCP is concerned.
+	// ::ffff:a.b.c.d is still an IPv4 address as far as DHCP is concerned.
 	return addr.Unmap(), -1, nil
 }
 
-// parseIPv4 reads the ipv4 field. The mask is nil unless the value carried a
-// prefix length.
+// The mask is nil unless the value carried a prefix length.
 func parseIPv4(value string) (net.IP, net.IPMask, error) {
 	addr, bits, err := splitAddr(value)
 	if err != nil {
@@ -551,8 +484,8 @@ func parseIPv4(value string) (net.IP, net.IPMask, error) {
 	return addr.AsSlice(), net.CIDRMask(bits, 32), nil
 }
 
-// parseIPv6 reads the ipv6 field. A prefix length is accepted and dropped:
-// an IA_NA hands out an address, not a subnet.
+// A prefix length is accepted and dropped: an IA_NA hands out an address, not
+// a subnet.
 func parseIPv6(value string) (net.IP, error) {
 	addr, _, err := splitAddr(value)
 	if err != nil {
@@ -564,9 +497,8 @@ func parseIPv6(value string) (net.IP, error) {
 	return addr.AsSlice(), nil
 }
 
-// dnsServers returns the entries of the dns field that belong to the wanted
-// family. Entries that do not parse are skipped with a warning rather than
-// failing the whole request: one typo should not cost the client its lease.
+// An entry that does not parse is skipped with a warning: one typo should not
+// cost the client its lease.
 func dnsServers(value string, want4 bool) []net.IP {
 	parts := strings.Split(value, ",")
 	servers := make([]net.IP, 0, len(parts))
@@ -588,8 +520,8 @@ func dnsServers(value string, want4 bool) []net.IP {
 	return servers
 }
 
-// leaseTime reads the leaseTime field. A missing field and an unusable one
-// are both reported as absent, so callers fall back to their default.
+// A missing field and an unusable one both read as absent, so callers fall
+// back to their default.
 func leaseTime(fields map[string]string) (time.Duration, bool) {
 	value, ok := fields[fieldLeaseTime]
 	if !ok {
@@ -635,12 +567,9 @@ func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 	return resp, true
 }
 
-// skipsLookup4 reports whether mtype is a DHCPv4 message the plugin passes on
-// without consulting Redis. An INFORM asks for options rather than a lease.
-// A RELEASE or DECLINE gets no reply from coredhcp whatever the chain returns
-// and frees no state this plugin holds, so the lookup buys nothing, while
-// doing it would let anyone on the segment turn one unauthenticated packet
-// into a Redis round trip, with a fresh MAC address every time.
+// An INFORM asks for options rather than a lease. A RELEASE or DECLINE gets
+// no reply and frees no state here, so a lookup would only let anyone on the
+// segment turn one unauthenticated packet into a Redis round trip.
 func skipsLookup4(mtype dhcpv4.MessageType) bool {
 	switch mtype {
 	case dhcpv4.MessageTypeInform, dhcpv4.MessageTypeRelease, dhcpv4.MessageTypeDecline:
@@ -650,7 +579,6 @@ func skipsLookup4(mtype dhcpv4.MessageType) bool {
 	}
 }
 
-// addOptions4 adds the router, DNS and lease time options a hash asks for.
 func addOptions4(req, resp *dhcpv4.DHCPv4, fields map[string]string) {
 	if value, ok := fields[fieldRouter]; ok {
 		addRouter(resp, value)
@@ -665,8 +593,6 @@ func addOptions4(req, resp *dhcpv4.DHCPv4, fields map[string]string) {
 	}
 }
 
-// addRouter sets the default gateway option, skipping a value that is not a
-// usable IPv4 address.
 func addRouter(resp *dhcpv4.DHCPv4, value string) {
 	addr, err := netip.ParseAddr(value)
 	if err != nil {
@@ -702,12 +628,8 @@ func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	return p.answer6(decap, resp, iana, ident)
 }
 
-// skipsLookup6 reports whether mtype is a DHCPv6 message the plugin passes on
-// without consulting Redis, for the same reason as skipsLookup4: coredhcp
-// never replies to a RELEASE or DECLINE, and this plugin has no lease state
-// either one could free. mtype has to be the inner message's type, not the
-// outer one, because a relayed message carries the client's real type inside
-// the RELAY-FORW envelope.
+// Same reasoning as skipsLookup4. mtype has to be the inner message's type: a
+// relayed message carries the client's real type inside the RELAY-FORW.
 func skipsLookup6(mtype dhcpv6.MessageType) bool {
 	switch mtype {
 	case dhcpv6.MessageTypeRelease, dhcpv6.MessageTypeDecline:
@@ -717,8 +639,6 @@ func skipsLookup6(mtype dhcpv6.MessageType) bool {
 	}
 }
 
-// answer6 is the part of Handler6 that runs once the request is known to ask
-// for an address on behalf of a client we can name.
 func (p *pluginState) answer6(decap *dhcpv6.Message, resp dhcpv6.DHCPv6, iana *dhcpv6.OptIANA, ident string) (dhcpv6.DHCPv6, bool) {
 	fields, err := p.lookup(ident)
 	if err != nil {

@@ -29,17 +29,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeServer is a RESP2 server just complete enough for this plugin: it
-// speaks the four commands the client sends, serves canned hashes, records
-// what it was asked, and lets a test take over a reply to inject failures
-// that a healthy server would never produce.
+// fakeServer speaks the four commands the client sends and lets a test override a reply to inject
+// failures a healthy server would never produce.
 type fakeServer struct {
 	addr string
 	ln   net.Listener
-	// accepting covers the accept loop, wg the per-connection goroutines.
-	// They are separate so shutdown can wait for the accept loop to stop
-	// before it walks the connection list, which is what makes hanging up on
-	// every client free of races.
+	// accepting and wg are separate so shutdown can wait for the accept loop to stop
+	// before walking the connection list, avoiding a race on hangup.
 	accepting sync.WaitGroup
 	wg        sync.WaitGroup
 
@@ -51,9 +47,8 @@ type fakeServer struct {
 	respond  func(cmd []string, cn net.Conn) bool
 }
 
-// newFakeServer starts a server on a loopback port. Pass a tls.Config to make
-// it speak TLS. The listener and every connection goroutine are reaped in
-// cleanup, so a leak shows up as a hung test rather than as noise later.
+// newFakeServer reaps the listener and every connection goroutine in cleanup, so a leak
+// shows up as a hung test rather than as noise later.
 func newFakeServer(t *testing.T, tlsConf *tls.Config) *fakeServer {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -66,10 +61,8 @@ func newFakeServer(t *testing.T, tlsConf *tls.Config) *fakeServer {
 	s.accepting.Add(1)
 	go s.acceptLoop()
 	t.Cleanup(func() {
-		// Hang up on whatever is still connected. A pooled connection is
-		// only closed by its client, and a plugin built through setup4 hands
-		// out a handler with no way to reach the client behind it, so the
-		// server has to be the one to let go.
+		// The server has to hang up: a handler built through setup4 has no way to reach
+		// the pooled connection its client is holding.
 		_ = ln.Close()
 		s.accepting.Wait()
 		s.mu.Lock()
@@ -166,8 +159,6 @@ func (s *fakeServer) setRespond(fn func(cmd []string, cn net.Conn) bool) {
 	s.respond = fn
 }
 
-// replyRaw makes the server answer cmdName with raw bytes of the test's
-// choosing, which is how the malformed and error replies get produced.
 func (s *fakeServer) replyRaw(cmdName, raw string) {
 	s.setRespond(func(cmd []string, cn net.Conn) bool {
 		if !strings.EqualFold(cmd[0], cmdName) {
@@ -190,8 +181,7 @@ func (s *fakeServer) acceptCount() int {
 	return s.accepts
 }
 
-// readCommand reads one RESP array of bulk strings, which is the only shape a
-// client ever sends.
+// readCommand reads one RESP array of bulk strings, the only shape a client ever sends.
 func readCommand(r *bufio.Reader) ([]string, error) {
 	line, err := readTrimmed(r)
 	if err != nil {
@@ -238,9 +228,7 @@ func readTrimmed(r *bufio.Reader) (string, error) {
 	return strings.TrimRight(line, "\r\n"), nil
 }
 
-// loopbackCert issues a certificate for 127.0.0.1 and the pool that trusts
-// it, so the rediss path can be exercised without a fixture on disk or a
-// switch to skip verification.
+// loopbackCert lets the rediss path be exercised without a fixture on disk or a switch to skip verification.
 func loopbackCert(t *testing.T) (tls.Certificate, *x509.CertPool) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -265,7 +253,6 @@ func loopbackCert(t *testing.T) (tls.Certificate, *x509.CertPool) {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, pool
 }
 
-// newTestClient returns a client pointed at s, closed on cleanup.
 func newTestClient(t *testing.T, s *fakeServer) *client {
 	t.Helper()
 	c := newClient(clientConfig{addr: s.addr, timeout: 5 * time.Second})
@@ -392,8 +379,7 @@ func TestRespReaderErrorReplyType(t *testing.T) {
 	assert.False(t, errors.Is(err, errProtocol))
 }
 
-// FuzzRespReader checks that no input makes the parser panic, and that a
-// failed parse never also yields a value the caller might act on.
+// FuzzRespReader also checks that a failed parse never also yields a value the caller might act on.
 func FuzzRespReader(f *testing.F) {
 	for _, seed := range []string{
 		"+OK\r\n", "-ERR x\r\n", ":1\r\n", "$3\r\nfoo\r\n", "$-1\r\n",
@@ -420,8 +406,7 @@ func TestClientCommands(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"ipv4": "10.0.0.5/24", "router": "10.0.0.1"}, fields)
 
-	// An unknown key is an empty hash, not an error: that is what tells the
-	// handlers to pass the request on.
+	// An unknown key is an empty hash, not an error: that is what tells the handlers to pass the request on.
 	fields, err = c.hgetall("mac:00:00:00:00:00:00")
 	require.NoError(t, err)
 	assert.Empty(t, fields)
@@ -491,8 +476,7 @@ func TestClientKeepsConnectionAfterErrorReply(t *testing.T) {
 	s := newFakeServer(t, nil)
 	c := newTestClient(t, s)
 
-	// An error reply leaves the stream in sync, so the connection is still
-	// good and a second command does not have to dial again.
+	// An error reply leaves the stream in sync, so the connection is reused rather than redialed.
 	s.replyRaw("PING", "-ERR nope\r\n")
 	require.Error(t, c.ping())
 	assert.Equal(t, 1, c.idleCount())
@@ -599,8 +583,7 @@ func TestClientDialFailures(t *testing.T) {
 
 func TestClientTimeout(t *testing.T) {
 	s := newFakeServer(t, nil)
-	// Accept the command and then say nothing, which is what a wedged server
-	// looks like from here.
+	// Accept the command and say nothing: what a wedged server looks like from here.
 	s.setRespond(func(_ []string, _ net.Conn) bool { return true })
 
 	c := newClient(clientConfig{addr: s.addr, timeout: 50 * time.Millisecond})
@@ -686,7 +669,6 @@ func TestClientPoolCap(t *testing.T) {
 	assert.Equal(t, maxIdleConns, c.idleCount())
 }
 
-// writeFailConn accepts deadlines and fails every write.
 type writeFailConn struct {
 	net.Conn
 	err error
@@ -708,8 +690,8 @@ func TestConnDoFailures(t *testing.T) {
 	})
 
 	t.Run("the write fails", func(t *testing.T) {
-		// A socket that takes a deadline and then refuses the write is not
-		// something a kernel offers on demand, so the connection is stubbed.
+		// A kernel won't hand us a socket that takes a deadline and then refuses the write,
+		// so the connection is stubbed instead.
 		ours, theirs := net.Pipe()
 		t.Cleanup(func() {
 			_ = ours.Close()
