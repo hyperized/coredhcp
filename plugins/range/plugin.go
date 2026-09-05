@@ -72,6 +72,7 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv4"
 
 	"github.com/coredhcp/coredhcp/handler"
+	"github.com/coredhcp/coredhcp/leases"
 	"github.com/coredhcp/coredhcp/logger"
 	"github.com/coredhcp/coredhcp/plugins"
 	"github.com/coredhcp/coredhcp/plugins/allocators"
@@ -167,6 +168,12 @@ type pluginState struct {
 	// the declineMax default is derived from, and it is the number setup logs
 	// so an operator can see the quarantine bound in proportion.
 	poolSize uint64
+
+	// name identifies this instance to a lease reader, and poolRange spells
+	// the configured range out for one. Both are built during setup and
+	// read-only afterwards; see leases.go.
+	name      string
+	poolRange string
 
 	// sweepInterval is how often the background sweeper reclaims expired
 	// leases, declineProbation how long a declined address is held back, and
@@ -701,6 +708,9 @@ func setupRange(args ...string) (handler.Handler4, error) {
 	// Started only once setup has fully succeeded: a failed setup must not
 	// leave a goroutine behind sweeping a half-built plugin.
 	p.startSweeper(p.sweepInterval)
+	// Registered last, once everything that could fail has succeeded: a
+	// reader must never find a half-built instance in the registry.
+	leases.Register(p)
 	log.Printf("Serving %d addresses, reclaiming expired DHCPv4 leases every %s, declined addresses after %s, quarantining at most %d at a time",
 		p.poolSize, p.sweepInterval, p.declineProbation, p.declineMax)
 	return p.Handler4, nil
@@ -749,6 +759,8 @@ func newPluginState(args ...string) (*pluginState, error) {
 	}
 
 	p.poolSize = poolSize(ipRangeStart, ipRangeEnd)
+	p.name = "range " + filename
+	p.poolRange = ipRangeStart.String() + "-" + ipRangeEnd.String()
 	opts, err := parseOptions(p.LeaseTime, p.poolSize, args[4:])
 	if err != nil {
 		return nil, err

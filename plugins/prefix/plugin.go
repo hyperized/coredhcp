@@ -65,6 +65,7 @@ import (
 	dhcpIana "github.com/insomniacslk/dhcp/iana"
 
 	"github.com/coredhcp/coredhcp/handler"
+	"github.com/coredhcp/coredhcp/leases"
 	"github.com/coredhcp/coredhcp/logger"
 	"github.com/coredhcp/coredhcp/plugins"
 	"github.com/coredhcp/coredhcp/plugins/allocators"
@@ -146,6 +147,14 @@ type pluginState struct {
 	leaseDuration time.Duration
 	sweepInterval time.Duration
 	maxPrefixes   int
+
+	// name identifies this instance to a lease reader, poolRange spells the
+	// pool out for one, and poolBlocks is how many prefixes of the
+	// allocation size the pool holds. All three are built during setup and
+	// read-only afterwards; see leases.go.
+	name       string
+	poolRange  string
+	poolBlocks int
 
 	// now is the clock seam. It is written once during setup, before the
 	// sweeper goroutine starts, and only read afterwards. Use timeNow rather
@@ -794,6 +803,9 @@ func setupPrefix(args ...string) (handler.Handler6, error) {
 	// Started only once setup has fully succeeded: a failed setup must not
 	// leave a goroutine behind sweeping a half-built plugin.
 	h.startSweeper(h.sweepInterval)
+	// Registered last, once everything that could fail has succeeded: a
+	// reader must never find a half-built instance in the registry.
+	leases.Register(h)
 	log.Printf("Delegating at most %d prefix(es) per client for %s, reclaiming expired ones every %s", h.maxPrefixes, h.leaseDuration, h.sweepInterval)
 	return h.Handle, nil
 }
@@ -838,12 +850,16 @@ func newPluginState(args ...string) (*pluginState, error) {
 		return nil, fmt.Errorf("could not initialize prefix allocator: %w", err)
 	}
 
+	poolLen, _ := prefix.Mask.Size()
 	return &pluginState{
 		Records:       make(map[string][]lease),
 		allocator:     alloc,
 		leaseDuration: leaseDuration,
 		sweepInterval: opts.sweepInterval,
 		maxPrefixes:   opts.maxPrefixes,
+		name:          "prefix " + args[0],
+		poolRange:     prefix.String(),
+		poolBlocks:    poolBlocks(poolLen, allocSize),
 		now:           time.Now,
 		stop:          make(chan struct{}),
 		done:          make(chan struct{}),
