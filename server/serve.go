@@ -143,15 +143,19 @@ func WithObserver(o events.Observer) Option {
 // reportPlugins names the plugins in each chain, in chain order, DHCPv6 first
 // to match the order the listeners start in below. A plugin configured twice
 // is reported twice, since it is two links in the chain.
+//
+// The arguments go through config.RedactArgs first: an observer such as the
+// terminal UI puts them on screen, and a plugin's argument list is where a
+// Redis password or a NetBox token is written.
 func (s *Servers) reportPlugins(chains *plugins.Chains) {
 	if s.observer == nil {
 		return
 	}
 	for _, l := range chains.V6 {
-		s.observer.Plugin(events.Plugin{Family: events.FamilyV6, Name: l.Name, Args: l.Args})
+		s.observer.Plugin(events.Plugin{Family: events.FamilyV6, Name: l.Name, Args: config.RedactArgs(l.Args)})
 	}
 	for _, l := range chains.V4 {
-		s.observer.Plugin(events.Plugin{Family: events.FamilyV4, Name: l.Name, Args: l.Args})
+		s.observer.Plugin(events.Plugin{Family: events.FamilyV4, Name: l.Name, Args: config.RedactArgs(l.Args)})
 	}
 }
 

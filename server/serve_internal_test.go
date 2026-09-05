@@ -516,6 +516,25 @@ func TestReportWithoutObserver(t *testing.T) {
 	assert.Nil(t, s.observer)
 }
 
+// The observer gets the plugin arguments with the credential forms replaced:
+// the terminal UI puts them on screen, and a plugin argument list is where a
+// Redis password or a NetBox token is written. See config.RedactArgs.
+func TestReportPluginsRedactsArgs(t *testing.T) {
+	obs := &recordObserver{}
+	s := &Servers{observer: obs}
+	s.reportPlugins(&plugins.Chains{
+		V6: []plugins.Link6{{Name: "six", Args: []string{"token:s3cret"}}},
+		V4: []plugins.Link4{{Name: "four", Args: []string{"redis://user:hunter2@localhost:6379/0", "255.255.255.0"}}},
+	})
+
+	obs.mu.Lock()
+	defer obs.mu.Unlock()
+	assert.Equal(t, []events.Plugin{
+		{Family: events.FamilyV6, Name: "six", Args: []string{"token:***"}},
+		{Family: events.FamilyV4, Name: "four", Args: []string{"redis://user:***@localhost:6379/0", "255.255.255.0"}},
+	}, obs.plugins)
+}
+
 // A listener bound to an interface reports it, taken from the zone of the
 // configured address.
 func TestReportListenerNamesTheInterface(t *testing.T) {

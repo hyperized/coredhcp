@@ -81,6 +81,11 @@ time=2026-08-19T12:09:32.988+02:00 level=INFO msg="Starting DHCPv6 server" prefi
 time=2026-08-19T12:09:32.988+02:00 level=INFO msg="Listen [::]:547" prefix=server
 ```
 
+Without `-c`, the server looks for `config.yml` in `$XDG_CONFIG_HOME/coredhcp/`,
+`$HOME/.coredhcp/`, `/etc/coredhcp/` and the working directory, in that order.
+The working directory is searched last so a file left lying around next to the
+binary cannot quietly take precedence over the one an operator installed.
+
 The server shuts down cleanly on SIGINT/SIGTERM and exits 0. It exits non-zero
 when a listener dies under it or when the configuration names no address to
 bind, so a service manager sees a failure instead of a silent stop. `-h` lists
@@ -246,8 +251,11 @@ The last two started as the `netbox` and `redis` plugins in the
 [coredhcp/plugins](https://github.com/coredhcp/plugins) repository, which has
 not moved since 2020. They are rewrites, not ports: both families are served,
 results are cached, errors are bounded, and the NetBox one speaks the current
-API. Tokens and passwords can be given as `env:NAME` instead of a literal;
-prefer that, because the config loader logs plugin arguments at startup.
+API. Tokens and passwords can be given as `env:NAME` instead of a literal,
+which is the better option because it keeps the secret out of the config file.
+A literal is not printed either way: the startup log and the terminal UI's
+plugin pane replace the value of a `password:`, `token:` or `secret:` argument,
+and the password in a `scheme://user:pass@host` URL, with `***`.
 
 The `range` plugin also releases expired leases here (a pool on upstream
 fills up forever: coredhcp/coredhcp#148).

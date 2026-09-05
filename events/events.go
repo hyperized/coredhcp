@@ -206,8 +206,11 @@ type Plugin struct {
 	Family Family
 	// Name is the plugin name as configured.
 	Name string
-	// Args are the plugin's arguments exactly as configured. Observers that
-	// display them should assume they may hold credentials.
+	// Args are the plugin's arguments as configured, with the credential
+	// forms the server knows about replaced by "***": see
+	// config.RedactArgs for which those are. A plugin can still take a
+	// secret in a shape the server does not recognise, so observers should
+	// not write these anywhere they would not write a password.
 	Args []string
 }
 

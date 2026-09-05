@@ -81,6 +81,33 @@ func TestLoadWithDefaultSearchPath(t *testing.T) {
 	assert.Nil(t, c.Server6)
 }
 
+func TestLoadSearchOrderPrefersXDGOverWorkingDirectory(t *testing.T) {
+	// The working directory is searched last, so a config sitting in
+	// $XDG_CONFIG_HOME/coredhcp/ must win over one in the directory the
+	// test happens to be running from.
+	xdgParent := t.TempDir()
+	xdgDir := filepath.Join(xdgParent, "coredhcp")
+	require.NoError(t, os.MkdirAll(xdgDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(xdgDir, "config.yml"), []byte(
+		"server4:\n  listen:\n    - \"127.0.0.1:0\"\n  plugins:\n    - netmask: 255.255.255.0\n",
+	), 0o600))
+
+	cwd := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, "config.yml"), []byte(
+		"server4:\n  listen:\n    - \"127.0.0.1:0\"\n  plugins:\n    - netmask: 255.255.255.255\n",
+	), 0o600))
+
+	t.Setenv("XDG_CONFIG_HOME", xdgParent)
+	t.Chdir(cwd)
+
+	c, err := config.Load("")
+	require.NoError(t, err)
+	require.NotNil(t, c)
+	require.NotNil(t, c.Server4)
+	require.Len(t, c.Server4.Plugins, 1)
+	assert.Equal(t, []string{"255.255.255.0"}, c.Server4.Plugins[0].Args)
+}
+
 func TestError(t *testing.T) {
 	e := config.ErrorFromString("boom %d", 42)
 	require.Error(t, e)
