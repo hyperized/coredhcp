@@ -23,15 +23,8 @@ import (
 var log = logger.GetLogger("plugins")
 
 // Plugin represents a plugin object.
-//
-// A plugin declares at most one setup function per protocol family: Setup4 or
-// Setup4Ctx for DHCPv4, Setup6 or Setup6Ctx for DHCPv6. The Ctx forms get a
-// context carrying handler.RequestInfo, which is where the interface a
-// request arrived on and its source address come from; the plain forms are
-// the original signature and stay supported. Declaring both for one family is
-// refused by RegisterPlugin, since only one of the two could ever be called.
-// All four may be nil: a family with no setup function is one this plugin
-// does not handle.
+// At most one setup function per family: declaring both forms for one family
+// is refused, since only one of the two could ever be called.
 type Plugin struct {
 	Name      string
 	Setup6    SetupFunc6
@@ -55,10 +48,7 @@ type SetupFunc6Ctx func(args ...string) (handler.Handler6Ctx, error)
 // SetupFunc4Ctx defines a context-aware plugin setup function for DHCPv4.
 type SetupFunc4Ctx func(args ...string) (handler.Handler4Ctx, error)
 
-// ErrConflictingSetup is what RegisterPlugin reports for a plugin that
-// declares both the plain and the context-aware setup function for one
-// family. Loading it would have to pick one and quietly ignore the other,
-// which is never what the author meant.
+// ErrConflictingSetup reports a plugin declaring both setup forms for one family.
 var ErrConflictingSetup = errors.New("plugin declares both a plain and a context-aware setup function for the same protocol family")
 
 // RegisterPlugin registers a plugin.
@@ -71,17 +61,13 @@ func RegisterPlugin(plugin *Plugin) error {
 	}
 	log.Printf("Registering plugin '%s'", plugin.Name)
 	if _, ok := RegisteredPlugins[plugin.Name]; ok {
-		// TODO: the package-global registry map is the last piece of shared
-		// state here; replace it with a Registry type the caller constructs
-		// and injects, alongside the planned functional-options server API.
+		// TODO: replace the package-global registry with an injected Registry type.
 		log.Panicf("Plugin '%s' is already registered", plugin.Name)
 	}
 	RegisteredPlugins[plugin.Name] = plugin
 	return nil
 }
 
-// checkSetupFuncs rejects a plugin that declares both setup forms for the
-// same protocol family.
 func checkSetupFuncs(p *Plugin) error {
 	if p.Setup4 != nil && p.Setup4Ctx != nil {
 		return fmt.Errorf("plugin `%s`, DHCPv4: %w", p.Name, ErrConflictingSetup)
@@ -92,20 +78,16 @@ func checkSetupFuncs(p *Plugin) error {
 	return nil
 }
 
-// Link4 is one entry of a DHCPv4 handler chain, together with the plugin it
-// was loaded from. Plugins with no setup function for the family are skipped
-// while loading, so a position in the chain does not line up with the
-// configured plugin list: the name has to travel with the handler.
+// Link4 is one entry of a DHCPv4 handler chain.
+// Skipped plugins leave chain positions out of step with the configured list,
+// so the name has to travel with the handler.
 type Link4 struct {
 	Name    string
 	Args    []string
 	Handler handler.Handler4Ctx
 
-	// WantsContext is set for a plugin loaded through Setup4Ctx, whose
-	// handler reads the context it is called with. A handler from a plain
-	// Setup4 is wrapped in an adapter that ignores it, so the server can
-	// leave the context empty when no link in the chain wants one. See
-	// WantsContext.
+	// False for a plain Setup4, whose handler is wrapped in an adapter that
+	// drops the context.
 	WantsContext bool
 }
 
@@ -117,23 +99,16 @@ type Link6 struct {
 	WantsContext bool
 }
 
-// chainLink is the one thing WantsContext needs of a chain entry. The method
-// is unexported, so Link4 and Link6 are the only types that satisfy it.
 type chainLink interface {
 	wantsContext() bool
 }
 
-// wantsContext reports whether this link's plugin reads the context.
 func (l Link4) wantsContext() bool { return l.WantsContext }
 
-// wantsContext reports whether this link's plugin reads the context.
 func (l Link6) wantsContext() bool { return l.WantsContext }
 
-// WantsContext reports whether any link in chain came from a context-aware
-// setup function. The server asks once per listener while starting up and
-// then skips building a context per packet when the answer is no, which
-// leaves a chain of plain handlers as cheap as it was before contexts
-// existed.
+// WantsContext reports whether any link in chain reads the context.
+// The server asks once per listener, then skips building one per packet.
 func WantsContext[L chainLink](chain []L) bool {
 	for i := range chain {
 		if chain[i].wantsContext() {
@@ -144,18 +119,12 @@ func WantsContext[L chainLink](chain []L) bool {
 }
 
 // Chains holds both families' loaded handler chains in configuration order.
-// A family without a server section in the configuration gets a nil chain.
+// A family with no server section in the configuration gets a nil chain.
 type Chains struct {
 	V4 []Link4
 	V6 []Link6
 }
 
-// loadHandlers walks one protocol family's plugin list, calling each
-// configured plugin's setup function in order and turning every handler it
-// gets back into a chain link. Plugins without a setup function for this
-// family are skipped with a warning, matching the long-standing behaviour.
-// setup also reports whether the plugin asked for a context, which travels
-// into the link.
 func loadHandlers[H, L any](family string, list []config.PluginConfig,
 	setup func(*Plugin) (func(...string) (H, error), bool), isNil func(H) bool,
 	link func(config.PluginConfig, H, bool) L,
@@ -169,6 +138,7 @@ func loadHandlers[H, L any](family string, list []config.PluginConfig,
 		log.Printf("%s: loading plugin `%s`", family, pluginConf.Name)
 		setupFn, wantsCtx := setup(plugin)
 		if setupFn == nil {
+			// Not an error: a plugin commonly serves only one family.
 			log.Warningf("%s: plugin `%s` has no setup function for %s", family, pluginConf.Name, family)
 			continue
 		}
@@ -184,11 +154,6 @@ func loadHandlers[H, L any](family string, list []config.PluginConfig,
 	return links, nil
 }
 
-// setup4Of picks the DHCPv4 setup function to call for a plugin and says
-// whether that plugin reads the context. A plain Setup4 comes back wrapped in
-// an adapter that drops the context; the error and the nil handler it may
-// return pass through unchanged, because loadHandlers has to keep telling
-// those two apart. A plugin with neither setup function returns nil.
 func setup4Of(p *Plugin) (func(...string) (handler.Handler4Ctx, error), bool) {
 	if p.Setup4Ctx != nil {
 		return p.Setup4Ctx, true
@@ -198,6 +163,8 @@ func setup4Of(p *Plugin) (func(...string) (handler.Handler4Ctx, error), bool) {
 	}
 	return func(args ...string) (handler.Handler4Ctx, error) {
 		h, err := p.Setup4(args...)
+		// A nil handler passes through as nil, not as an error: loadHandlers
+		// reports a different failure for each.
 		if err != nil || h == nil {
 			return nil, err
 		}
@@ -207,7 +174,6 @@ func setup4Of(p *Plugin) (func(...string) (handler.Handler4Ctx, error), bool) {
 	}, false
 }
 
-// setup6Of is setup4Of for DHCPv6.
 func setup6Of(p *Plugin) (func(...string) (handler.Handler6Ctx, error), bool) {
 	if p.Setup6Ctx != nil {
 		return p.Setup6Ctx, true
@@ -226,22 +192,17 @@ func setup6Of(p *Plugin) (func(...string) (handler.Handler6Ctx, error), bool) {
 	}, false
 }
 
-// newLink4 pairs a loaded DHCPv4 handler with the configuration it came from.
-// Args are copied because the link outlives the load and callers hold on to
-// it for the life of the server.
+// Args are cloned: the link is held for the life of the server.
 func newLink4(conf config.PluginConfig, h handler.Handler4Ctx, wantsCtx bool) Link4 {
 	return Link4{Name: conf.Name, Args: slices.Clone(conf.Args), Handler: h, WantsContext: wantsCtx}
 }
 
-// newLink6 is newLink4's DHCPv6 counterpart.
 func newLink6(conf config.PluginConfig, h handler.Handler6Ctx, wantsCtx bool) Link6 {
 	return Link6{Name: conf.Name, Args: slices.Clone(conf.Args), Handler: h, WantsContext: wantsCtx}
 }
 
-// LoadChains reads a Config object and loads the plugins as specified in the
-// `plugins` section, in order, into one handler chain per protocol family.
-// For a plugin to be available, it must have been previously registered with
-// plugins.RegisterPlugin. This is normally done at plugin import time.
+// LoadChains loads the configured plugins into one handler chain per family.
+// A plugin must already have been registered, normally at import time.
 func LoadChains(conf *config.Config) (*Chains, error) {
 	log.Print("Loading plugins...")
 
@@ -272,16 +233,8 @@ func LoadChains(conf *config.Config) (*Chains, error) {
 	return &chains, nil
 }
 
-// LoadPlugins loads the configured plugins and returns the bare handler
-// chains, dropping the plugin names LoadChains keeps alongside them. Callers
-// that have to name the plugin a handler came from want LoadChains instead.
-// This function returns the list of loaded v4 plugins, the list of loaded v6
-// plugins, and an error if any.
-//
-// The handlers it returns take no context, so a context-aware plugin loaded
-// this way is called with context.Background() and sees no
-// handler.RequestInfo: there is no request here to describe one. Callers that
-// serve real traffic use LoadChains, which the server does.
+// LoadPlugins is LoadChains without the plugin names, kept for compatibility.
+// Its handlers carry no RequestInfo; anything serving real traffic uses LoadChains.
 func LoadPlugins(conf *config.Config) ([]handler.Handler4, []handler.Handler6, error) {
 	chains, err := LoadChains(conf)
 	if err != nil {

@@ -19,9 +19,7 @@ import (
 	"github.com/coredhcp/coredhcp/plugins"
 )
 
-// register registers plugin for the lifetime of the test and removes it
-// from the shared registry on cleanup, so tests stay order-independent as
-// long as each one picks a unique plugin name.
+// register keeps tests order-independent, provided each picks a unique plugin name.
 func register(t *testing.T, plugin *plugins.Plugin) {
 	t.Helper()
 	require.NoError(t, plugins.RegisterPlugin(plugin))
@@ -212,9 +210,8 @@ func TestLoadChainsNoConfig(t *testing.T) {
 	assert.EqualError(t, err, "no configuration found for either DHCPv6 or DHCPv4")
 }
 
-// The chain records the plugin each handler came from, in configuration
-// order. A plugin without a setup function for the family is skipped, so the
-// chain is shorter than the configured list and the positions shift.
+// The chain records each plugin in configuration order, but skips one with no
+// setup function for the family, so the chain is shorter and positions shift.
 func TestLoadChainsNamesInChainOrder(t *testing.T) {
 	both := &plugins.Plugin{Name: "test-chain-both", Setup6: stubHandler6, Setup4: stubHandler4}
 	v4only := &plugins.Plugin{Name: "test-chain-v4-only", Setup4: stubHandler4}
@@ -350,10 +347,7 @@ func TestLoadChainsCopiesArgs(t *testing.T) {
 	assert.Equal(t, []string{"original"}, chains.V4[0].Args)
 }
 
-// TestRegisterPluginConflictingSetup covers a plugin declaring both setup
-// forms for one family, once per family. The registry refuses it outright
-// rather than picking one and ignoring the other, which is what
-// ErrConflictingSetup exists to say.
+// Refused outright, rather than picking one form and quietly ignoring the other.
 func TestRegisterPluginConflictingSetup(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -394,11 +388,8 @@ func TestRegisterPluginConflictingSetup(t *testing.T) {
 	}
 }
 
-// TestLoadChainsContextAwarePlugin loads a chain with one context-aware
-// plugin next to a plain one. It checks the link-level bookkeeping
-// (WantsContext, a non-nil Handler) and that the handler can actually read
-// back the RequestInfo the caller attaches to the context it is invoked
-// with, which is the entire reason Setup4Ctx/Setup6Ctx exist.
+// Reading the RequestInfo back off the context is the whole reason Setup4Ctx
+// and Setup6Ctx exist.
 func TestLoadChainsContextAwarePlugin(t *testing.T) {
 	var gotV4, gotV6 handler.RequestInfo
 	ctxPlugin := &plugins.Plugin{
@@ -458,10 +449,8 @@ func TestLoadChainsContextAwarePlugin(t *testing.T) {
 	assert.Equal(t, info, gotV6)
 }
 
-// TestLoadChainsPlainPluginIgnoresContext loads a plugin declaring only the
-// plain Setup4/Setup6 forms and checks the link says WantsContext false, and
-// that the adapter around its handler swallows the context: a plain handler
-// was never written to expect one.
+// A plain handler was never written to expect a context, so the adapter around
+// it swallows one.
 func TestLoadChainsPlainPluginIgnoresContext(t *testing.T) {
 	plugin := &plugins.Plugin{Name: "test-plain-only", Setup4: stubHandler4, Setup6: stubHandler6}
 	register(t, plugin)
@@ -491,9 +480,6 @@ func TestLoadChainsPlainPluginIgnoresContext(t *testing.T) {
 	assert.Nil(t, resp6)
 }
 
-// TestWantsContextEmptyChain rounds out WantsContext's cases that don't need
-// a loaded plugin behind them: nothing to range over reports false, for both
-// protocol families.
 func TestWantsContextEmptyChain(t *testing.T) {
 	cases := []struct {
 		name string
@@ -512,10 +498,8 @@ func TestWantsContextEmptyChain(t *testing.T) {
 	}
 }
 
-// TestLoadPluginsContextAwarePluginSeesNoRequestInfo checks the documented
-// gap in the legacy LoadPlugins path: it calls a context-aware handler with
-// context.Background(), so RequestInfoFrom must report false inside it,
-// because there was never a real request behind this call.
+// The legacy LoadPlugins path runs handlers on context.Background(), so
+// RequestInfoFrom reports false.
 func TestLoadPluginsContextAwarePluginSeesNoRequestInfo(t *testing.T) {
 	var sawV4, sawV6 bool
 	plugin := &plugins.Plugin{
