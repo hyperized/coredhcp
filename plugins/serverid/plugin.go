@@ -5,7 +5,8 @@
 // Package serverid implements a plugin that enforces the server identifier
 // on DHCPv4 and DHCPv6 messages: a request explicitly addressed to a
 // different server (DHCPv4 option 54, DHCPv6 the ServerID option) is
-// dropped rather than answered.
+// dropped rather than answered, and so is a DHCPv4 RELEASE or DECLINE that
+// carries no server identifier at all, since RFC 2131 requires one on both.
 package serverid
 
 import (
@@ -95,7 +96,17 @@ func (p *pluginState4) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool)
 		log.Warningf("not a BootRequest, ignoring")
 		return resp, false
 	}
-	if sid := req.ServerIdentifier(); sid != nil && !sid.Equal(p.serverID) {
+	sid := req.ServerIdentifier()
+	if sid == nil && requiresServerID(req.MessageType()) {
+		// RFC 2131 Table 5 makes option 54 a MUST on RELEASE and DECLINE:
+		// both are unicast to the server that owns the lease, so one with
+		// no server identifier (or a malformed option 54, which
+		// ServerIdentifier also reports as nil) cannot be shown to be
+		// addressed to us and is dropped like a mismatch would be.
+		log.Infof("%s with no server identifier, dropping", req.MessageType())
+		return nil, true
+	}
+	if sid != nil && !sid.Equal(p.serverID) {
 		// This request is for a different server, drop it.
 		log.Infof("requested server ID does not match this server's ID. Got %v, want %v", sid, p.serverID)
 		return nil, true
@@ -104,6 +115,13 @@ func (p *pluginState4) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool)
 	copy(resp.ServerIPAddr[:], p.serverID)
 	resp.UpdateOption(dhcpv4.OptServerIdentifier(p.serverID))
 	return resp, false
+}
+
+// requiresServerID reports whether RFC 2131 Table 5 requires message type t
+// to carry option 54. RELEASE and DECLINE are unicast to the server that
+// owns the lease, so a message of either type is meaningless without one.
+func requiresServerID(t dhcpv4.MessageType) bool {
+	return t == dhcpv4.MessageTypeRelease || t == dhcpv4.MessageTypeDecline
 }
 
 func setup4(args ...string) (handler.Handler4, error) {

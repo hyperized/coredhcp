@@ -281,7 +281,9 @@ forged packets per address park an entire pool for the day.
 The `file` plugin no longer stamps its static reservation onto a RELEASE or
 DECLINE, and `server_id` decides whether a DHCPv4 request is addressed to
 this server by option 54 rather than by `siaddr`, so two servers on one
-segment stop both answering the same REQUEST.
+segment stop both answering the same REQUEST. It also drops a RELEASE or
+DECLINE that carries no option 54 at all, which RFC 2131 Table 5 makes a MUST
+on both.
 
 The `prefix` plugin got the same treatment for DHCPv6 delegations. Upstream
 wrote an expiry it never read and never called `Free`, so its pool drained

@@ -116,6 +116,61 @@ func TestSetup4(t *testing.T) {
 		assert.Nil(t, result)
 		assert.True(t, stop)
 	})
+
+	// RFC 2131 Table 5: RELEASE and DECLINE MUST carry option 54, since both
+	// are unicast to the server that owns the lease.
+	requireServerIDCases := []struct {
+		name        string
+		messageType dhcpv4.MessageType
+	}{
+		{"RELEASE", dhcpv4.MessageTypeRelease},
+		{"DECLINE", dhcpv4.MessageTypeDecline},
+	}
+	for _, tc := range requireServerIDCases {
+		t.Run(tc.name+" with no option 54, dropped", func(t *testing.T) {
+			h4, err := serverid.Plugin.Setup4("192.0.2.1")
+			require.NoError(t, err)
+
+			req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest}
+			req.UpdateOption(dhcpv4.OptMessageType(tc.messageType))
+			resp := &dhcpv4.DHCPv4{}
+
+			result, stop := h4(req, resp)
+			assert.Nil(t, result)
+			assert.True(t, stop)
+		})
+
+		t.Run(tc.name+" with our option 54, accepted with our identifier stamped", func(t *testing.T) {
+			h4, err := serverid.Plugin.Setup4("192.0.2.1")
+			require.NoError(t, err)
+
+			req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest}
+			req.UpdateOption(dhcpv4.OptMessageType(tc.messageType))
+			req.UpdateOption(dhcpv4.OptServerIdentifier(net.ParseIP("192.0.2.1").To4()))
+			resp := &dhcpv4.DHCPv4{}
+
+			result, stop := h4(req, resp)
+			require.NotNil(t, result)
+			assert.False(t, stop)
+			assert.True(t, net.ParseIP("192.0.2.1").Equal(result.ServerIPAddr))
+			assert.True(t, net.ParseIP("192.0.2.1").Equal(dhcpv4.GetIP(dhcpv4.OptionServerIdentifier, result.Options)))
+		})
+	}
+
+	// Regression: option 54 is only required for RELEASE and DECLINE. A
+	// REQUEST with no server identifier still passes.
+	t.Run("REQUEST with no option 54, accepted", func(t *testing.T) {
+		h4, err := serverid.Plugin.Setup4("192.0.2.1")
+		require.NoError(t, err)
+
+		req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest}
+		req.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeRequest))
+		resp := &dhcpv4.DHCPv4{}
+
+		result, stop := h4(req, resp)
+		require.NotNil(t, result)
+		assert.False(t, stop)
+	})
 }
 
 func TestSetup6(t *testing.T) {

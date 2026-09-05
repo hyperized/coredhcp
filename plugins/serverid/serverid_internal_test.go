@@ -218,4 +218,50 @@ func TestPluginState4Handler4(t *testing.T) {
 			assert.True(t, stop)
 		})
 	}
+
+	requireServerIDCases := []struct {
+		name        string
+		messageType dhcpv4.MessageType
+	}{
+		{"RELEASE", dhcpv4.MessageTypeRelease},
+		{"DECLINE", dhcpv4.MessageTypeDecline},
+	}
+	for _, tc := range requireServerIDCases {
+		t.Run(tc.name+" with no option 54, rejected", func(t *testing.T) {
+			req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest}
+			req.UpdateOption(dhcpv4.OptMessageType(tc.messageType))
+			resp := &dhcpv4.DHCPv4{}
+
+			result, stop := p.Handler4(req, resp)
+			assert.Nil(t, result)
+			assert.True(t, stop)
+		})
+
+		t.Run(tc.name+" with matching option 54, accepted", func(t *testing.T) {
+			req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest}
+			req.UpdateOption(dhcpv4.OptMessageType(tc.messageType))
+			req.UpdateOption(dhcpv4.OptServerIdentifier(serverID))
+			resp := &dhcpv4.DHCPv4{}
+
+			result, stop := p.Handler4(req, resp)
+			require.NotNil(t, result)
+			assert.False(t, stop)
+			assert.True(t, serverID.Equal(result.ServerIPAddr))
+
+			sid := dhcpv4.GetIP(dhcpv4.OptionServerIdentifier, result.Options)
+			assert.True(t, serverID.Equal(sid))
+		})
+	}
+
+	// Regression: option 54 is only required for RELEASE and DECLINE. A
+	// DISCOVER with no server identifier still passes.
+	t.Run("DISCOVER with no option 54, accepted", func(t *testing.T) {
+		req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest}
+		req.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeDiscover))
+		resp := &dhcpv4.DHCPv4{}
+
+		result, stop := p.Handler4(req, resp)
+		require.NotNil(t, result)
+		assert.False(t, stop)
+	})
 }
