@@ -22,7 +22,6 @@ import (
 	"github.com/coredhcp/coredhcp/plugins/allocators/bitmap"
 )
 
-// mockAllocator is a simple mock for testing
 type mockAllocator struct {
 	mock.Mock
 }
@@ -50,10 +49,7 @@ func (m *mockFailingAllocator) Free(ip net.IPNet) error {
 	return args.Error(0)
 }
 
-// TestSetupRangeAllocatorCreationError substitutes the newIPv4Allocator seam
-// to simulate bitmap.NewIPv4Allocator failing. setupRange's own start/end
-// validation already guarantees the real allocator constructor can't fail,
-// so this is otherwise unreachable through the public API.
+// Substitutes the newIPv4Allocator seam, since setupRange's own validation guarantees the real constructor can't otherwise fail.
 func TestSetupRangeAllocatorCreationError(t *testing.T) {
 	orig := newIPv4Allocator
 	t.Cleanup(func() { newIPv4Allocator = orig })
@@ -172,8 +168,7 @@ func TestHandler4NewAllocationSaveError(t *testing.T) {
 	req := &dhcpv4.DHCPv4{ClientHWAddr: hwaddr}
 	resp := &dhcpv4.DHCPv4{Options: make(dhcpv4.Options)}
 
-	// a storage failure while allocating is only logged; the client still
-	// gets its lease for this session.
+	// A storage failure while allocating is only logged; the client still gets its lease.
 	result, stop := pl.Handler4(req, resp)
 	require.NotNil(t, result)
 	assert.False(t, stop)
@@ -191,10 +186,7 @@ func TestHandler4RenewalExtendsLease(t *testing.T) {
 
 	hwaddr, err := net.ParseMAC("02:00:00:00:00:13")
 	require.NoError(t, err)
-	// Still valid, but expiring long before the hour-long lease we are about
-	// to advertise, so Handler4 must extend it in place. An already-expired
-	// record would instead be reclaimed and re-allocated, which is
-	// TestHandler4ExpiredLeaseIsReallocated's job.
+	// Expires soon but not yet, so Handler4 extends it in place rather than reclaiming it (see TestHandler4ExpiredLeaseReclamation).
 	existing := &Record{
 		IP:       net.IPv4(10, 0, 0, 13),
 		expires:  int(time.Now().Add(time.Minute).Unix()),
@@ -247,8 +239,7 @@ func TestHandler4RenewalSaveError(t *testing.T) {
 	req := &dhcpv4.DHCPv4{ClientHWAddr: hwaddr}
 	resp := &dhcpv4.DHCPv4{Options: make(dhcpv4.Options)}
 
-	// a storage failure while renewing is only logged; the in-memory lease
-	// is still extended and returned to the client.
+	// A storage failure while renewing is only logged; the lease is extended anyway.
 	result, stop := pl.Handler4(req, resp)
 	require.NotNil(t, result)
 	assert.False(t, stop)
@@ -276,7 +267,6 @@ func TestHandler4Release(t *testing.T) {
 	}
 	pl.Recordsv4 = loadedRecords
 
-	// Verify record exists before release
 	hwaddr, _ := net.ParseMAC(records[1].mac)
 	record, exists := pl.Recordsv4[hwaddr.String()]
 	assert.True(t, exists, "Record should exist before release")
@@ -293,7 +283,6 @@ func TestHandler4Release(t *testing.T) {
 	expectedIPNet := net.IPNet{IP: record.IP}
 	mockAlloc.On("Free", expectedIPNet).Return(nil)
 
-	// Call Handler4 with RELEASE message
 	result, stop := pl.Handler4(req, resp)
 
 	assert.Same(t, resp, result, "later plugins must still see the release")
@@ -349,7 +338,6 @@ func TestHandler4ReleaseAllocatorError(t *testing.T) {
 	expectedError := fmt.Errorf("mock allocator free failure")
 	mockAlloc.On("Free", expectedIPNet).Return(expectedError)
 
-	// Call Handler4 - this should fail on allocator.Free()
 	result, stop := pl.Handler4(req, resp)
 
 	assert.Same(t, resp, result, "a failed release is still passed down the chain")
@@ -398,7 +386,6 @@ func TestHandler4ReleaseStorageError(t *testing.T) {
 
 	resp := &dhcpv4.DHCPv4{Options: make(dhcpv4.Options)}
 
-	// Close the database to simulate storage failure
 	require.NoError(t, db.Close())
 
 	result, stop := pl.Handler4(req, resp)
@@ -413,17 +400,13 @@ func TestHandler4ReleaseStorageError(t *testing.T) {
 	mockAlloc.AssertNotCalled(t, "Allocate")
 }
 
-// fakeClock is a manually advanced clock, so lease lifetimes can be exercised
-// without sleeping. It is safe for concurrent use because the background
-// sweeper reads it from its own goroutine while the test advances it.
+// fakeClock lets lease lifetimes advance without sleeping; safe for concurrent use since the sweeper goroutine reads it while tests advance it.
 type fakeClock struct {
 	mu sync.Mutex
 	t  time.Time
 }
 
-// newFakeClock starts on a whole second. Lease expiry is stored with second
-// granularity, so this keeps the arithmetic in the tests exact instead of
-// leaving sub-second truncation to reason about.
+// Starts on a whole second, matching lease expiry's second-granularity storage, so the tests' arithmetic stays exact.
 func newFakeClock() *fakeClock {
 	return &fakeClock{t: time.Date(2026, time.August, 19, 12, 0, 0, 0, time.UTC)}
 }
@@ -440,16 +423,10 @@ func (c *fakeClock) Advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// testLeaseTime is the lease term every expiry test runs on. The fake clock
-// makes the value itself arbitrary, so one shared term keeps the "advance past
-// expiry" arithmetic in the tests readable.
+// The value is arbitrary since the fake clock drives expiry; one shared term just keeps the tests' arithmetic readable.
 const testLeaseTime = time.Hour
 
-// newTestPlugin builds a plugin instance over the inclusive range
-// [start, end], backed by a real bitmap allocator, a temp-dir lease database
-// and a fake clock. The database is a file rather than ":memory:" so that the
-// assertions can read it back over a pooled connection, and so that the
-// sweeper goroutine and the test see the same rows.
+// Uses a file-backed db, not ":memory:", so the sweeper goroutine and the test's assertions see the same rows over a pooled connection.
 func newTestPlugin(t *testing.T, start, end net.IP) (*pluginState, *fakeClock) {
 	t.Helper()
 
@@ -476,8 +453,7 @@ func newTestPlugin(t *testing.T, start, end net.IP) (*pluginState, *fakeClock) {
 	}, clock
 }
 
-// release drives Handler4 with a DHCPRELEASE from mac naming ciaddr. A nil
-// ciaddr stands for a client that named no address at all.
+// release drives a DHCPRELEASE from mac; a nil ciaddr means no address was named.
 func release(t *testing.T, pl *pluginState, mac string, ciaddr net.IP) (*dhcpv4.DHCPv4, bool) {
 	t.Helper()
 	hwaddr, err := net.ParseMAC(mac)
@@ -488,8 +464,7 @@ func release(t *testing.T, pl *pluginState, mac string, ciaddr net.IP) (*dhcpv4.
 	return pl.Handler4(req, &dhcpv4.DHCPv4{Options: make(dhcpv4.Options)})
 }
 
-// decline drives Handler4 with a DHCPDECLINE from mac naming addr in option
-// 50. A nil addr leaves the option off entirely.
+// decline drives a DHCPDECLINE from mac; a nil addr leaves option 50 off entirely.
 func decline(t *testing.T, pl *pluginState, mac string, addr net.IP) (*dhcpv4.DHCPv4, bool) {
 	t.Helper()
 	hwaddr, err := net.ParseMAC(mac)
@@ -503,8 +478,7 @@ func decline(t *testing.T, pl *pluginState, mac string, addr net.IP) (*dhcpv4.DH
 	return pl.Handler4(req, &dhcpv4.DHCPv4{Options: make(dhcpv4.Options)})
 }
 
-// request drives Handler4 for mac and returns the offered address, or nil when
-// the request was dropped.
+// request drives Handler4 for mac and returns the offered address, or nil if dropped.
 func request(t *testing.T, pl *pluginState, mac string) net.IP {
 	t.Helper()
 	hwaddr, err := net.ParseMAC(mac)
@@ -519,11 +493,7 @@ func request(t *testing.T, pl *pluginState, mac string) net.IP {
 	return result.YourIPAddr
 }
 
-// leaseRowCount counts a MAC's rows with raw SQL rather than going through
-// loadRecords, so an assertion about storage cannot be satisfied by the
-// plugin's own view of it. It reports -1 on a query failure instead of failing
-// the test, so it is also safe to call from a require.Eventually condition,
-// which runs on its own goroutine.
+// Uses raw SQL so assertions aren't just checking the plugin's own view; returns -1 on error so it's safe to call from a require.Eventually goroutine.
 func leaseRowCount(db *sql.DB, mac string) int {
 	var n int
 	if err := db.QueryRow("select count(*) from leases4 where mac = ?", mac).Scan(&n); err != nil {
@@ -567,11 +537,7 @@ func TestTimeNowSeam(t *testing.T) {
 	})
 }
 
-// TestHandler4ExpiredLeaseReclamation is the regression test for upstream
-// issues #148 and #182: a single-address pool whose only lease has lapsed must
-// be handed out again, whether the original client comes back or a new one
-// asks. Before the fix the address stayed allocated forever and the second
-// request was dropped.
+// Regression test for upstream issues #148 and #182: a single-address pool must hand out its only lease again once it lapses.
 func TestHandler4ExpiredLeaseReclamation(t *testing.T) {
 	const (
 		macA = "02:00:00:00:0a:00"
@@ -586,16 +552,14 @@ func TestHandler4ExpiredLeaseReclamation(t *testing.T) {
 		{"a different client takes over the expired address", macB, macA},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// A pool of exactly one address: nothing can be handed out until
-			// the expired lease is actually reclaimed.
+			// A pool of exactly one address forces reclamation before anything can be handed out.
 			pl, clock := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 1))
 
 			leased := request(t, pl, macA)
 			require.NotNil(t, leased)
 			assert.Equal(t, net.IPv4(10, 0, 0, 1).To4(), leased)
 
-			// While that lease is live the pool really is exhausted, and
-			// reclamation must not steal it.
+			// While the lease is live, reclamation must not steal it out from under the holder.
 			assert.Nil(t, request(t, pl, macB), "a live lease must not be reclaimed")
 
 			clock.Advance(testLeaseTime + time.Second)
@@ -615,9 +579,7 @@ func TestHandler4ExpiredLeaseReclamation(t *testing.T) {
 	}
 }
 
-// TestHandler4AllocationSweepsExhaustedPool covers the lazy reclamation path:
-// the allocator fails, a sweep frees whatever has lapsed, and the retry
-// succeeds. The pool is filled completely so the first attempt cannot succeed.
+// The pool is filled completely so the first allocation attempt fails; a sweep frees what's lapsed for the retry.
 func TestHandler4AllocationSweepsExhaustedPool(t *testing.T) {
 	pl, clock := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2))
 
@@ -640,9 +602,7 @@ func TestHandler4AllocationSweepsExhaustedPool(t *testing.T) {
 	assert.Equal(t, 1, leaseRowCount(pl.leasedb, filled[1]), "the live lease must be untouched")
 }
 
-// TestHandler4RenewalLeavesFullTermLeaseAlone pins the no-op branch of renew:
-// a lease that already outlives the term we are about to advertise is not
-// rewritten, so a client hammering DHCPREQUEST does not hammer sqlite.
+// A lease that already outlives the advertised term isn't rewritten, so a client hammering DHCPREQUEST doesn't hammer sqlite.
 func TestHandler4RenewalLeavesFullTermLeaseAlone(t *testing.T) {
 	pl, _ := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2))
 
@@ -654,10 +614,7 @@ func TestHandler4RenewalLeavesFullTermLeaseAlone(t *testing.T) {
 	assert.Equal(t, first.expires, pl.Recordsv4[mac].expires, "a full-term lease must not be re-persisted")
 }
 
-// TestHandler4ExpiredLeaseStorageFailure covers reclamation failing on the
-// renewal path. The row cannot be deleted, so the address is still spoken for
-// and must not be handed out again: the client keeps it and the next sweep
-// retries.
+// The row can't be deleted, so the address stays spoken for; the client keeps it and the next sweep retries.
 func TestHandler4ExpiredLeaseStorageFailure(t *testing.T) {
 	pl, clock := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2))
 	mockAlloc := &mockAllocator{}
@@ -690,8 +647,7 @@ func TestSweepExpiredSkipsUndeletableRows(t *testing.T) {
 		require.NotNil(t, request(t, pl, mac))
 	}
 
-	// A trigger that refuses to delete one client's row, standing in for any
-	// storage failure that hits a single record mid-sweep.
+	// Stands in for any storage failure that hits a single record mid-sweep.
 	_, err := pl.leasedb.Exec(fmt.Sprintf(`
 		CREATE TRIGGER prevent_delete
 		BEFORE DELETE ON leases4
@@ -722,9 +678,7 @@ func TestSweepOnceWithNothingExpired(t *testing.T) {
 	assert.Equal(t, 1, leaseRowCount(pl.leasedb, mac))
 }
 
-// TestSweeperReclaimsInBackground drives the real ticker at a very short
-// interval: without any client asking for an address, an expired lease must
-// disappear from the map, the allocator and the database on its own.
+// Drives the real ticker at a short interval: with no client asking, an expired lease must vanish on its own.
 func TestSweeperReclaimsInBackground(t *testing.T) {
 	pl, clock := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 1))
 
@@ -741,8 +695,7 @@ func TestSweeperReclaimsInBackground(t *testing.T) {
 		return len(pl.Recordsv4) == 0 && leaseRowCount(pl.leasedb, mac) == 0
 	}, 5*time.Second, 2*time.Millisecond, "the background sweeper must reclaim the expired lease")
 
-	// Removal from the map alone would not prove reclamation; the address
-	// must be allocatable again.
+	// Removal from the map alone wouldn't prove reclamation; the address must be allocatable again.
 	assert.NotNil(t, request(t, pl, "02:00:00:00:10:01"))
 }
 
@@ -764,9 +717,7 @@ func TestDefaultSweepInterval(t *testing.T) {
 }
 
 func TestParseOptions(t *testing.T) {
-	// The pool size only feeds the decline-max default, so one representative
-	// size keeps the table readable; testPoolSize is big enough for a tenth of
-	// it to land above the floor of one.
+	// One representative pool size keeps the table readable; testPoolSize is big enough for a tenth of it to clear the floor of one.
 	const testPoolSize = 100
 
 	for _, tc := range []struct {
@@ -823,10 +774,7 @@ func TestParseOptions(t *testing.T) {
 	}
 }
 
-// TestPoolSize pins the address count the decline-max default is derived from,
-// including the boundary the arithmetic has to survive: a range covering the
-// whole address space is 2^32 addresses, which wraps to zero if the increment
-// happens in uint32.
+// The whole address space is 2^32 addresses, which wraps to zero if the increment happens in uint32 rather than a wider type.
 func TestPoolSize(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -844,8 +792,7 @@ func TestPoolSize(t *testing.T) {
 	}
 }
 
-// TestNewPluginStateStartsIdle pins that construction does not start the
-// sweeper: setupRange starts it only once every other step has succeeded.
+// setupRange starts the sweeper only once every other step has succeeded.
 func TestNewPluginStateStartsIdle(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "leases.db")
 	pl, err := newPluginState(dbPath, "10.0.0.1", "10.0.0.5", "1h", "sweep:90s")
@@ -864,10 +811,7 @@ func TestNewPluginStateStartsIdle(t *testing.T) {
 	}
 }
 
-// TestHandler4ReleaseFromUnknownMAC is the regression test for the forged
-// release: a thousand DHCPRELEASEs from MACs that hold nothing must leave the
-// map, the database and the pool exactly as they were. Before the fix every
-// one of them fell through to the allocation path and consumed an address.
+// Regression test for a forged release: it must never fall through to the allocation path and consume an address.
 func TestHandler4ReleaseFromUnknownMAC(t *testing.T) {
 	const poolSize = 11
 	pl, _ := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, poolSize))
@@ -881,17 +825,13 @@ func TestHandler4ReleaseFromUnknownMAC(t *testing.T) {
 
 	assert.Empty(t, pl.Recordsv4, "no lease may have been created")
 
-	// Removal from the map alone would not prove the pool is intact, so make
-	// it serve every address it has.
+	// Removal from the map alone wouldn't prove the pool is intact, so serve every address it has.
 	for i := range poolSize {
 		require.NotNil(t, request(t, pl, fmt.Sprintf("02:00:00:01:00:%02x", i)), "the pool must be untouched")
 	}
 }
 
-// TestHandler4ReleaseWrongAddress covers the releases a client is not entitled
-// to send. RFC 2131 §4.4.6 has it name the lease it gives up in ciaddr, so a
-// release for anything else changes nothing, including a release aimed at the
-// neighbour's address.
+// RFC 2131 §4.4.6 has the client name the lease it releases in ciaddr, so a release naming anything else changes nothing.
 func TestHandler4ReleaseWrongAddress(t *testing.T) {
 	const (
 		holder    = "02:00:00:00:11:00"
@@ -926,9 +866,7 @@ func TestHandler4ReleaseWrongAddress(t *testing.T) {
 	}
 }
 
-// TestHandler4ReleaseFreesTheNamedLease is the happy path: ciaddr matches, the
-// lease goes, and the response is handed on so a lease hook further down the
-// chain still gets to see the message.
+// The response is handed on so a lease hook further down the chain still sees the release.
 func TestHandler4ReleaseFreesTheNamedLease(t *testing.T) {
 	pl, _ := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 1))
 
@@ -946,14 +884,7 @@ func TestHandler4ReleaseFreesTheNamedLease(t *testing.T) {
 	assert.NotNil(t, request(t, pl, "02:00:00:00:12:01"), "the address must be back in the pool")
 }
 
-// TestHandler4DeclineQuarantinesTheAddress is the point of the probation: the
-// client reported the address as already in use, so the next client must not
-// be walked into the same conflict. The address comes back only once probation
-// has run out and a sweep has run.
-//
-// The pool holds a spare address on purpose. Probation gives way to a client
-// with nowhere else to go, which TestAllocateEvictsTheOldestQuarantine covers,
-// so a pool of one would test that rule instead of this one.
+// The pool holds a spare address on purpose: giving way to a client with nowhere else to go is TestAllocateEvictsTheOldestQuarantine's job.
 func TestHandler4DeclineQuarantinesTheAddress(t *testing.T) {
 	pl, clock := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2))
 
@@ -987,8 +918,6 @@ func TestHandler4DeclineQuarantinesTheAddress(t *testing.T) {
 	assert.Equal(t, leased, got)
 }
 
-// TestHandler4DeclineWithoutProbation covers decline-probation:0, where the
-// address is not parked at all and goes straight back to the pool.
 func TestHandler4DeclineWithoutProbation(t *testing.T) {
 	pl, _ := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 1))
 	pl.declineProbation = 0
@@ -1008,8 +937,6 @@ func TestHandler4DeclineWithoutProbation(t *testing.T) {
 	assert.Equal(t, leased, got)
 }
 
-// TestHandler4DeclineChangesNothing covers the declines a client is not
-// entitled to send. None of them may free anything, and none may allocate.
 func TestHandler4DeclineChangesNothing(t *testing.T) {
 	const (
 		holder   = "02:00:00:00:15:00"
@@ -1041,10 +968,7 @@ func TestHandler4DeclineChangesNothing(t *testing.T) {
 	}
 }
 
-// TestHandler4DeclineStorageFailure covers a decline whose row cannot be
-// deleted. Both branches of quarantine go through storage first, so neither
-// may forget a lease it could not remove: a restart would reload the row and
-// hand the address back to a client that told us it was already taken.
+// Both quarantine branches persist to storage first, so a restart can't reissue an address already reported as conflicted.
 func TestHandler4DeclineStorageFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -1070,9 +994,7 @@ func TestHandler4DeclineStorageFailure(t *testing.T) {
 	}
 }
 
-// TestSweepDeclinedKeepsUnfreeableAddresses pins that an address the allocator
-// refuses to give back stays parked instead of being dropped from the map: the
-// next sweep retries, rather than leaking the bit for the life of the process.
+// An address the allocator refuses to free stays parked for the next sweep, rather than leaking the bit for good.
 func TestSweepDeclinedKeepsUnfreeableAddresses(t *testing.T) {
 	pl, clock := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2))
 	mockAlloc := &mockFailingAllocator{}
@@ -1087,12 +1009,7 @@ func TestSweepDeclinedKeepsUnfreeableAddresses(t *testing.T) {
 	mockAlloc.AssertExpectations(t)
 }
 
-// TestDeclineFloodLeavesThePoolServing is the regression for the starvation a
-// bounded quarantine exists to stop. A DISCOVER and a DECLINE from a fresh MAC
-// are two unauthenticated packets, and while every pair took an address out
-// for a day, 22 of them emptied an eleven-address pool. No lease was left for
-// expiry to reclaim either, so real clients were refused until the probation
-// ran out.
+// Regression for the starvation a bounded quarantine prevents: unauthenticated DISCOVER+DECLINE pairs must not be able to exhaust the pool.
 func TestDeclineFloodLeavesThePoolServing(t *testing.T) {
 	pl, _ := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 11))
 
@@ -1113,8 +1030,7 @@ func TestDeclineFloodLeavesThePoolServing(t *testing.T) {
 	assert.Len(t, pl.declined, pl.declineMax, "only the bound is held back")
 	assert.Empty(t, pl.Recordsv4, "and the flood is left holding no lease")
 
-	// Whatever the flood could not quarantine is still allocatable, without
-	// the quarantine having to give way for any of it.
+	// What the flood couldn't quarantine is still allocatable, without the quarantine giving way for it.
 	for i := range poolAddresses - pl.declineMax {
 		require.NotNil(t, request(t, pl, fmt.Sprintf("02:00:00:00:21:%02x", i)), "a real client must still be served")
 	}
@@ -1122,9 +1038,7 @@ func TestDeclineFloodLeavesThePoolServing(t *testing.T) {
 	assert.Len(t, pl.declined, pl.declineMax, "the quarantine held through all of it")
 }
 
-// TestAllocateEvictsTheOldestQuarantine pins the last resort in allocate. With
-// every address either leased or in probation, the address held back longest
-// goes to the client instead of the client being turned away.
+// With every address leased or in probation, the address held back longest goes to the client instead of turning it away.
 func TestAllocateEvictsTheOldestQuarantine(t *testing.T) {
 	pl, clock := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 3))
 	pl.declineMax = 2
@@ -1157,9 +1071,7 @@ func TestAllocateEvictsTheOldestQuarantine(t *testing.T) {
 	assert.Contains(t, pl.declined, second.String(), "the more recent quarantine is left alone")
 }
 
-// TestHandler4DeclineMaxZero covers decline-max:0, the other way of saying
-// never quarantine: the address goes straight back even though a probation
-// period is configured.
+// Unlike TestHandler4DeclineWithoutProbation, a probation period is configured here — decline-max:0 alone must still skip the quarantine.
 func TestHandler4DeclineMaxZero(t *testing.T) {
 	pl, _ := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 1))
 	pl.declineMax = 0
@@ -1179,10 +1091,7 @@ func TestHandler4DeclineMaxZero(t *testing.T) {
 	assert.Equal(t, leased, got)
 }
 
-// TestEvictOldestDeclinedKeepsUnfreeableAddresses pins that an address the
-// allocator refuses to give back stays parked rather than being dropped from
-// the map, the same as in sweepDeclined: the bit would otherwise leak for the
-// life of the process.
+// Same invariant as sweepDeclined: an unfreeable address stays parked rather than leaking the bit for the life of the process.
 func TestEvictOldestDeclinedKeepsUnfreeableAddresses(t *testing.T) {
 	pl, clock := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2))
 	mockAlloc := &mockFailingAllocator{}

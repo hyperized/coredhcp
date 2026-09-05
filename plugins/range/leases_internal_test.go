@@ -19,9 +19,8 @@ import (
 	"github.com/coredhcp/coredhcp/leases"
 )
 
-// stateWithLeases builds an instance holding the given records, without a
-// database, an allocator or a sweeper: Leases and Pools read the maps and
-// nothing else.
+// stateWithLeases omits the db, allocator and sweeper: Leases and Pools only
+// read the maps.
 func stateWithLeases(recs map[string]*Record, declined map[string]time.Time) *pluginState {
 	return &pluginState{
 		name:      "range leases.sqlite3",
@@ -32,8 +31,7 @@ func stateWithLeases(recs map[string]*Record, declined map[string]time.Time) *pl
 	}
 }
 
-// byAddress orders leases so a map's iteration order does not leak into the
-// assertions.
+// byAddress sorts leases so map iteration order doesn't leak into assertions.
 func byAddress(a, b leases.Lease) int {
 	return a.Address.Addr().Compare(b.Address.Addr())
 }
@@ -61,8 +59,7 @@ func TestLeases(t *testing.T) {
 			name: "a live and a lapsed lease",
 			recs: map[string]*Record{
 				"02:00:00:00:00:01": {IP: net.IP{10, 0, 0, 1}, expires: int(live.Unix()), hostname: "laptop"},
-				// Expired but not swept yet: reported all the same, with the
-				// expiry that has already passed.
+				// Expired but not swept yet, so it's still reported.
 				"02:00:00:00:00:02": {IP: net.IP{10, 0, 0, 2}, expires: int(expired.Unix())},
 			},
 			want: []leases.Lease{

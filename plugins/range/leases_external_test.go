@@ -18,9 +18,8 @@ import (
 	rangeplugin "github.com/coredhcp/coredhcp/plugins/range"
 )
 
-// registeredSource returns the source setup registered under name, and drops
-// it again when the test finishes so the next test does not see this
-// instance.
+// registeredSource unregisters itself via cleanup so later tests don't see
+// stale global registry state.
 func registeredSource(t *testing.T, name string) leases.Source {
 	t.Helper()
 	for _, s := range leases.Sources() {
@@ -85,9 +84,8 @@ func TestDeclinedAddressesAreReportedAsQuarantined(t *testing.T) {
 	decline.UpdateOption(dhcpv4.OptRequestedIPAddress(resp.YourIPAddr))
 	_, _ = h4(decline, &dhcpv4.DHCPv4{Options: make(dhcpv4.Options)})
 
-	// The address is nobody's lease any more, but it is not free either: it
-	// sits in probation, and a pool report that only counted leases would
-	// show it as available.
+	// Declined addresses sit in probation: nobody's lease, but not free
+	// either, so a leases-only report would wrongly show it as available.
 	assert.Empty(t, src.Leases())
 	pool := src.Pools()[0]
 	assert.Equal(t, 0, pool.Used)
