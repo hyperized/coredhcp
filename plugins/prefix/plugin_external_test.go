@@ -103,6 +103,13 @@ func TestSetupPrefixArgValidation(t *testing.T) {
 		{"alloc size above 128", []string{"2001:db8::/48", "200"}, "invalid prefix length"},
 		{"alloc size negative", []string{"2001:db8::/48", "-1"}, "invalid prefix length"},
 		{"alloc size smaller than pool", []string{"2001:db8::/48", "40"}, "could not initialize prefix allocator"},
+		{"malformed lease duration", []string{"2001:db8::/48", "64", "forever"}, "invalid lease duration"},
+		{"zero lease duration", []string{"2001:db8::/48", "64", "0s"}, "lease duration has to be positive"},
+		{"negative lease duration", []string{"2001:db8::/48", "64", "-1h"}, "lease duration has to be positive"},
+		{"unknown trailing argument", []string{"2001:db8::/48", "64", "1h", "reap:5m"}, "unexpected argument"},
+		{"too many arguments", []string{"2001:db8::/48", "64", "1h", "sweep:5m", "sweep:6m"}, "too many arguments"},
+		{"malformed sweep interval", []string{"2001:db8::/48", "64", "1h", "sweep:soon"}, "invalid sweep interval"},
+		{"zero sweep interval", []string{"2001:db8::/48", "64", "1h", "sweep:0s"}, "sweep interval has to be positive"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -330,4 +337,147 @@ func TestHandleNilHintPrefixWithExistingLease(t *testing.T) {
 	iapds := second.Options.IAPD()
 	require.Len(t, iapds, 1)
 	assert.NotEmpty(t, iapds[0].Options.Prefixes())
+}
+
+// TestSetupPrefixOptionalArguments covers the argument shapes that must be
+// accepted: the lease duration is positional and optional, and the sweep
+// argument may appear with or without it.
+func TestSetupPrefixOptionalArguments(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"defaults", []string{"2001:db8::/48", "64"}},
+		{"an explicit lease duration", []string{"2001:db8::/48", "64", "30m"}},
+		{"a sweep argument with no lease duration", []string{"2001:db8::/48", "64", "sweep:45s"}},
+		{"both", []string{"2001:db8::/48", "64", "30m", "sweep:45s"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, err := prefix.Plugin.Setup6(tc.args...)
+			require.NoError(t, err)
+			assert.NotNil(t, h)
+		})
+	}
+}
+
+// releaseWith runs one RELEASE listing the given prefixes in a single IA_PD and
+// returns the Reply the plugin filled in. The server builds the Reply and sends
+// it whatever the chain returns, so the handler must hand it back rather than
+// ending the chain.
+func releaseWith(t *testing.T, handle func(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool), duid dhcpv6.DUID, iaid [4]byte, prefixes ...*dhcpv6.OptIAPrefix) *dhcpv6.Message {
+	t.Helper()
+
+	req, err := dhcpv6.NewMessage(dhcpv6.WithClientID(duid), dhcpv6.WithIAPD(iaid, prefixes...))
+	require.NoError(t, err)
+	req.MessageType = dhcpv6.MessageTypeRelease
+
+	resp, err := dhcpv6.NewMessage()
+	require.NoError(t, err)
+	resp.MessageType = dhcpv6.MessageTypeReply
+
+	result, stop := handle(req, resp)
+	require.NotNil(t, result, "later plugins must still see the release")
+	assert.False(t, stop)
+	return result.(*dhcpv6.Message)
+}
+
+// iapdStatus reads the status code of the IA_PD answering iaid.
+func iapdStatus(t *testing.T, msg *dhcpv6.Message, iaid [4]byte) dhcpIana.StatusCode {
+	t.Helper()
+
+	for _, iapd := range msg.Options.IAPD() {
+		if iapd.IaId != iaid {
+			continue
+		}
+		status := iapd.Options.Status()
+		require.NotNil(t, status, "every released IA_PD must carry a status code")
+		return status.StatusCode
+	}
+	t.Fatalf("no IA_PD in the reply for IAID %x", iaid)
+	return 0
+}
+
+// TestHandleReleaseFreesAndAnswersSuccess covers RFC 8415 §18.3.7 for a
+// binding the server holds: the prefix goes back to the pool, the IA_PD is
+// answered with Success, and the Reply carries a message-level Success.
+func TestHandleReleaseFreesAndAnswersSuccess(t *testing.T) {
+	// A pool of exactly one prefix, so the release is the only thing that can
+	// make the second allocation possible.
+	h, err := prefix.Plugin.Setup6("2001:db8::/64", "64")
+	require.NoError(t, err)
+
+	duid := testDUID()
+	iaid := [4]byte{1, 2, 3, 4}
+
+	held := solicitWith(t, h, duid).Options.IAPD()[0].Options.Prefixes()
+	require.Len(t, held, 1)
+
+	reply := releaseWith(t, h, duid, iaid, held[0])
+	assert.Equal(t, dhcpIana.StatusSuccess, iapdStatus(t, reply, iaid))
+
+	status := reply.Options.Status()
+	require.NotNil(t, status, "the Reply itself must carry a status code")
+	assert.Equal(t, dhcpIana.StatusSuccess, status.StatusCode)
+
+	// The prefix is genuinely back: a different client can take it.
+	other := &dhcpv6.DUIDLL{
+		HWType:        dhcpIana.HWTypeEthernet,
+		LinkLayerAddr: net.HardwareAddr{0x11, 0x22, 0x33, 0x44, 0x55, 0x66},
+	}
+	assert.Len(t, solicitWith(t, h, other).Options.IAPD()[0].Options.Prefixes(), 1)
+}
+
+// TestHandleReleaseAnswersNoBinding covers the IA_PDs the server holds nothing
+// for. NoBinding is what tells the client to stop retrying, so every one of
+// these shapes has to produce it rather than a bare Success.
+func TestHandleReleaseAnswersNoBinding(t *testing.T) {
+	_, someoneElses, err := net.ParseCIDR("2001:db8:0:ffff::/64")
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name     string
+		prefixes []*dhcpv6.OptIAPrefix
+	}{
+		{"an IA_PD listing no prefixes at all", nil},
+		{"a prefix this client does not hold", []*dhcpv6.OptIAPrefix{{Prefix: someoneElses}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, err := prefix.Plugin.Setup6("2001:db8::/48", "64")
+			require.NoError(t, err)
+
+			duid := testDUID()
+			iaid := [4]byte{1, 2, 3, 4}
+			require.Len(t, solicitWith(t, h, duid).Options.IAPD()[0].Options.Prefixes(), 1)
+
+			reply := releaseWith(t, h, duid, iaid, tc.prefixes...)
+			assert.Equal(t, dhcpIana.StatusNoBinding, iapdStatus(t, reply, iaid))
+
+			// The lease the client did not release must survive.
+			assert.Len(t, solicitWith(t, h, duid).Options.IAPD()[0].Options.Prefixes(), 1)
+		})
+	}
+}
+
+// TestHandleDeclineIsIgnored covers RFC 8415 §18.3.8: DECLINE is about IA_NA
+// and IA_TA addresses a client found in use on the link, so a delegating router
+// answers with no IA_PD at all rather than renewing what the client holds.
+func TestHandleDeclineIsIgnored(t *testing.T) {
+	h, err := prefix.Plugin.Setup6("2001:db8::/48", "64")
+	require.NoError(t, err)
+
+	duid := testDUID()
+	require.Len(t, solicitWith(t, h, duid).Options.IAPD()[0].Options.Prefixes(), 1)
+
+	req, err := dhcpv6.NewMessage(dhcpv6.WithClientID(duid), dhcpv6.WithIAPD([4]byte{1, 2, 3, 4}))
+	require.NoError(t, err)
+	req.MessageType = dhcpv6.MessageTypeDecline
+
+	resp, err := dhcpv6.NewMessage()
+	require.NoError(t, err)
+	resp.MessageType = dhcpv6.MessageTypeReply
+
+	result, stop := h(req, resp)
+	require.NotNil(t, result)
+	assert.False(t, stop)
+	assert.Empty(t, result.(*dhcpv6.Message).Options.IAPD(), "a decline is not about prefixes")
 }

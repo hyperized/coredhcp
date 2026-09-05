@@ -269,6 +269,12 @@ DECLINE, and `server_id` decides whether a DHCPv4 request is addressed to
 this server by option 54 rather than by `siaddr`, so two servers on one
 segment stop both answering the same REQUEST.
 
+The `prefix` plugin got the same treatment for DHCPv6 delegations. Upstream
+wrote an expiry it never read and never called `Free`, so its pool drained
+permanently; delegations now lapse and go back to the pool, the lease time
+is a configuration argument rather than a hardcoded hour, and a RELEASE is
+answered with a status code per IA_PD instead of being treated as a renewal.
+
 ## Server with custom plugins
 
 To build a server with a custom set of plugins you can use the
