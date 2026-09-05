@@ -21,10 +21,7 @@ import (
 	"github.com/coredhcp/coredhcp/plugins/metrics"
 )
 
-// freeAddr returns a loopback address with an OS-assigned free port, by
-// binding to port 0 and immediately closing the listener. The window
-// between the close and the caller rebinding the same address is
-// negligible on loopback inside a test process.
+// freeAddr grabs a free loopback port by binding to :0 and closing immediately; the reuse race is negligible on loopback in one test process.
 func freeAddr(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -127,8 +124,6 @@ func TestConflictingAddress(t *testing.T) {
 func TestBindFailure(t *testing.T) {
 	metrics.ResetRegistry(t)
 
-	// Keep this listener open instead of closing it, so the address is still
-	// occupied when Setup4 tries to bind it.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer func() { _ = ln.Close() }()
@@ -168,8 +163,7 @@ func TestEndToEnd(t *testing.T) {
 	assert.False(t, stop6)
 	assert.Same(t, v6resp, gotResp6)
 
-	// The plugin binds synchronously inside Setup, so by the time Setup
-	// returned above the listener was already accepting; no need to wait.
+	// Setup binds synchronously, so the listener is already accepting by now.
 	resp, err := http.Get("http://" + addr + "/metrics")
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()

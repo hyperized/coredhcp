@@ -5,17 +5,13 @@
 // Package metrics implements a plugin that counts DHCP traffic and serves the
 // counters over HTTP in the Prometheus text exposition format.
 //
-// The exposition is written by hand instead of through the Prometheus client
-// library. All this plugin needs is two monotonic counters and one static
-// gauge, and the text format for those is a handful of Fprintf calls; the
-// client library would pull a dependency subtree into a fork that keeps its
-// go.mod deliberately short.
+// The exposition is written by hand rather than through the Prometheus client
+// library: two counters and one gauge are a handful of Fprintf calls, and the
+// library would pull a dependency subtree into a deliberately short go.mod.
 //
-// The one thing to know before reading the rest: the listener lives in a
-// package-level registry (see registry). setup4 and setup6 are called
-// independently, once per server section in config.yml, but operators expect a
-// single scrape endpoint covering both families. The registry is what lets the
-// two calls share one listener and one set of counters.
+// setup4 and setup6 are called independently, once per server section, but
+// operators expect one scrape endpoint covering both families. A package-level
+// registry is what lets the two calls share a listener and a set of counters.
 package metrics
 
 import (
@@ -49,14 +45,10 @@ var log = logger.GetLogger("plugins/metrics")
 //	  plugins:
 //	    - metrics: 127.0.0.1:9754
 //
-// Both handlers only count and hand the response straight on, so list
-// `metrics` first in each plugin section. Any plugin ahead of it that stops the
-// chain hides those requests from the counters entirely.
-//
-// When server4 and server6 both configure the plugin with the same address,
-// one listener serves both. A second address while one is already bound is a
-// setup error: there is a single set of counters, so a second endpoint would
-// only duplicate the first.
+// List it first in each plugin section: any plugin ahead of it that stops the
+// chain hides those requests from the counters. Both server sections may name
+// the same address and share one listener; a second address is a setup error,
+// since a second endpoint would only duplicate the one set of counters.
 var Plugin = plugins.Plugin{
 	Name:   "metrics",
 	Setup6: setup6,
@@ -64,63 +56,48 @@ var Plugin = plugins.Plugin{
 }
 
 const (
-	// metricBuildInfo and metricRequests are the two exposed metric names.
 	metricBuildInfo = "coredhcp_build_info"
 	metricRequests  = "coredhcp_requests_total"
 
-	// family4 and family6 are the values of the "family" label.
 	family4 = "4"
 	family6 = "6"
 
-	// typeUnknown labels a request whose message type could not be read at
-	// all, as opposed to one carrying a type this dhcp library has no name
-	// for: those keep the library's rendering, e.g. "unknown_(42)".
+	// A message type that could not be read at all, as opposed to one the dhcp
+	// library has no name for: those keep its rendering, e.g. "unknown_(42)".
 	typeUnknown = "unknown"
 
-	// contentType is the Prometheus text format version this plugin emits.
 	contentType = "text/plain; version=0.0.4; charset=utf-8"
 
-	// Timeouts for the scrape endpoint. A scrape is a sub-millisecond
-	// request against a local buffer, so these only exist to keep a stuck or
-	// hostile client from holding a connection open indefinitely.
+	// A scrape is a sub-millisecond request against a local buffer, so these
+	// only stop a stuck or hostile client holding a connection open.
 	readHeaderTimeout = 5 * time.Second
 	readTimeout       = 10 * time.Second
 	writeTimeout      = 10 * time.Second
 	idleTimeout       = 60 * time.Second
 )
 
-// registry maps a configured listen address to the collector serving it.
-//
-// This is deliberately package-level shared state. Plugin setup functions
-// receive nothing but their arguments and there is no object server4 and
-// server6 setup could otherwise share, yet both families have to end up in one
-// exposition. Keying by the configured address string makes the second setup
-// on the same address a no-op returning the collector the first one started.
-//
-// mu guards the map. The counters inside a collector do their own
-// synchronisation, so a scrape never blocks a setup and vice versa.
+// Package-level because setup functions receive nothing but their arguments,
+// yet both families have to end up in one exposition. mu guards the map only;
+// a collector's counters synchronise themselves, so a scrape never blocks a
+// setup.
 var registry = struct {
 	mu        sync.Mutex
 	listeners map[string]*collector
 }{listeners: make(map[string]*collector)}
 
-// requestKey identifies one coredhcp_requests_total series.
 type requestKey struct {
 	family  string
 	msgType string
 }
 
-// collector holds the counters behind one HTTP listener and serves them.
-//
-// collector is safe for concurrent use. requests is guarded by mu, and its
-// values are pointers so incrementing a series that already exists needs only
-// the read lock plus one atomic add: every handler goroutine the server spawns
-// per packet hits that path.
+// Safe for concurrent use. The map values are pointers, so incrementing an
+// existing series takes only the read lock plus one atomic add -- the path
+// every per-packet handler goroutine hits.
 type collector struct {
 	srv *http.Server
 	ln  net.Listener
-	// done is closed when the serve goroutine returns. Nothing in production
-	// waits on it; tests do, so they can tear a listener down without sleeping.
+	// Nothing in production waits on this; tests do, so they can tear a
+	// listener down without sleeping.
 	done chan struct{}
 
 	mu       sync.RWMutex
@@ -145,8 +122,6 @@ func setup6(args ...string) (handler.Handler6, error) {
 	return c.Handler6, nil
 }
 
-// setup validates the plugin arguments and returns the collector to count into,
-// starting the HTTP listener if this is the first setup for that address.
 func setup(args []string) (*collector, error) {
 	addr, err := listenAddr(args)
 	if err != nil {
@@ -155,12 +130,8 @@ func setup(args []string) (*collector, error) {
 	return obtain(addr)
 }
 
-// listenAddr validates the plugin's single argument, a host:port listen address
-// such as "127.0.0.1:9754" or ":9754".
-//
 // The syntax check is not redundant with the bind that follows: it names the
-// offending argument, where net.Listen would report a parse failure that reads
-// like a network problem.
+// offending argument, where net.Listen reports what reads like a network fault.
 func listenAddr(args []string) (string, error) {
 	if len(args) != 1 {
 		return "", fmt.Errorf("metrics: expected exactly one argument, a listen address, got %d", len(args))
@@ -172,13 +143,9 @@ func listenAddr(args []string) (string, error) {
 	return addr, nil
 }
 
-// obtain returns the collector for addr, starting a listener the first time the
-// address is seen.
-//
-// One address per process is the whole contract: a second server section either
-// names the same address, and shares the listener, or the configuration asks
-// for two endpoints over one set of counters, which is a mistake worth failing
-// on at startup rather than resolving silently.
+// One address per process: a second server section either names the same one
+// and shares the listener, or asks for two endpoints over one set of counters,
+// which is worth failing on at startup rather than resolving silently.
 func obtain(addr string) (*collector, error) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
@@ -187,8 +154,7 @@ func obtain(addr string) (*collector, error) {
 		return c, nil
 	}
 	for running := range registry.listeners {
-		// The map holds at most one entry, so this loop reads the address
-		// already bound and returns; see the doc comment above.
+		// The map holds at most one entry, so this reads the bound address.
 		return nil, fmt.Errorf("metrics: already listening on %s, refusing to also listen on %s", running, addr)
 	}
 	c, err := newCollector(addr)
@@ -199,7 +165,6 @@ func obtain(addr string) (*collector, error) {
 	return c, nil
 }
 
-// newCollector binds addr and starts serving the exposition on it.
 func newCollector(addr string) (*collector, error) {
 	c := &collector{
 		done:     make(chan struct{}),
@@ -207,8 +172,8 @@ func newCollector(addr string) (*collector, error) {
 	}
 
 	mux := http.NewServeMux()
-	// The method and path filtering is the ServeMux pattern's job (Go 1.22+):
-	// any other path gets a 404, /metrics with any other method a 405.
+	// The pattern does the method and path filtering: any other path gets a
+	// 404, /metrics with any other method a 405.
 	mux.HandleFunc("GET /metrics", c.serveMetrics)
 	c.srv = &http.Server{
 		Handler:           mux,
@@ -218,20 +183,17 @@ func newCollector(addr string) (*collector, error) {
 		IdleTimeout:       idleTimeout,
 	}
 
-	// Bind synchronously so an occupied port fails the setup and the server
-	// refuses to start, rather than logging into the void a second later.
+	// Bind synchronously so an occupied port fails setup, rather than logging
+	// into the void a second later.
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("metrics: cannot listen on %s: %w", addr, err)
 	}
 	c.ln = ln
 
-	// Serving is asynchronous: setup has to return a handler, not block.
-	//
-	// The server is never stopped. Plugin setup in this fork runs once at
-	// startup and the handlers it returns live for the lifetime of the
-	// process, so there is no teardown hook to hang a Shutdown call on -
-	// process exit is the only shutdown path there is.
+	// Setup has to return a handler, not block. The server is never stopped:
+	// there is no teardown hook to hang a Shutdown call on, and process exit
+	// is the only shutdown path there is.
 	go func() {
 		defer close(c.done)
 		if err := c.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -254,13 +216,9 @@ func (c *collector) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	return resp, false
 }
 
-// msgType6 returns the "type" label for a DHCPv6 request.
-//
-// Relayed requests are decapsulated first: counting the outer type would label
-// every client behind a relay as RELAY-FORWARD and lose the distribution that
-// makes the metric worth scraping. A packet that will not decapsulate is still
-// counted, as typeUnknown, because dropping it would hide precisely the
-// malformed traffic an operator went looking for.
+// Relayed requests are decapsulated first, or every client behind a relay
+// would count as RELAY-FORWARD. One that will not decapsulate still counts, as
+// typeUnknown: dropping it would hide the traffic an operator came looking for.
 func msgType6(req dhcpv6.DHCPv6) string {
 	msg, err := req.GetInnerMessage()
 	if err != nil {
@@ -270,12 +228,8 @@ func msgType6(req dhcpv6.DHCPv6) string {
 	return sanitizeLabelValue(msg.Type().String())
 }
 
-// count increments the counter for one family and message type, creating the
-// series the first time that combination is seen.
-//
-// Series count is bounded: two families times the 256 strings a message-type
-// byte can render as, unknown types included. A client cannot grow the map
-// past that.
+// Series count is bounded at two families times the 256 strings a message-type
+// byte can render as, so a client cannot grow the map without limit.
 func (c *collector) count(family, msgType string) {
 	k := requestKey{family: family, msgType: msgType}
 	c.mu.RLock()
@@ -287,8 +241,8 @@ func (c *collector) count(family, msgType string) {
 	ctr.Add(1)
 }
 
-// series returns the counter for k, creating it unless another goroutine won
-// the race between count dropping the read lock and this taking the write one.
+// Rechecks under the write lock: another goroutine may have won the race since
+// count dropped the read lock.
 func (c *collector) series(k requestKey) *atomic.Uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -300,33 +254,29 @@ func (c *collector) series(k requestKey) *atomic.Uint64 {
 	return ctr
 }
 
-// serveMetrics answers a scrape.
 func (c *collector) serveMetrics(w http.ResponseWriter, _ *http.Request) {
 	body := c.expose()
 	w.Header().Set("Content-Type", contentType)
 	if _, err := w.Write(body); err != nil {
 		// A scraper hanging up mid-body is its own problem, but a flapping
-		// Prometheus is worth a line when someone turns debug logging on.
+		// Prometheus is worth a line at debug level.
 		log.Debugf("writing metrics response: %v", err)
 	}
 }
 
-// expose renders the current state of every metric.
-//
-// The output is deterministic: the series are sorted, so two scrapes differ
-// only where the counters differ.
+// The series are sorted, so two scrapes differ only where the counters do.
 func (c *collector) expose() []byte {
 	var buf bytes.Buffer
-	// A scrape is a few dozen short lines. Pre-size for that rather than
-	// pooling buffers for an endpoint hit once every scrape interval.
+	// A few dozen short lines; not worth pooling buffers for an endpoint hit
+	// once a scrape interval.
 	buf.Grow(512)
 
 	fmt.Fprintf(&buf, "# HELP %s Version information about the running coredhcp binary.\n", metricBuildInfo)
 	fmt.Fprintf(&buf, "# TYPE %s gauge\n", metricBuildInfo)
 	fmt.Fprintf(&buf, "%s{goversion=\"%s\"} 1\n", metricBuildInfo, sanitizeLabelValue(runtime.Version()))
 
-	// HELP and TYPE are emitted even with no samples yet, so a scrape taken
-	// before the first packet still tells the operator the metric exists.
+	// Emitted even with no samples, so a scrape before the first packet still
+	// tells the operator the metric exists.
 	fmt.Fprintf(&buf, "# HELP %s Number of DHCP requests received, by IP family and message type.\n", metricRequests)
 	fmt.Fprintf(&buf, "# TYPE %s counter\n", metricRequests)
 	for _, line := range c.requestLines() {
@@ -335,11 +285,8 @@ func (c *collector) expose() []byte {
 	return buf.Bytes()
 }
 
-// requestLines renders one sample line per series, sorted.
-//
-// Sorting the rendered lines is enough to order by family then message type:
-// every line shares the metric name and label-name prefix, so lexical order on
-// the whole line is lexical order on the label values.
+// Sorting the rendered lines orders by family then message type: every line
+// shares the metric name and label-name prefix.
 func (c *collector) requestLines() []string {
 	c.mu.RLock()
 	lines := make([]string, 0, len(c.requests))
@@ -352,10 +299,9 @@ func (c *collector) requestLines() []string {
 	return lines
 }
 
-// labelSanitizer normalises a label value: spaces to underscores, because both
-// dhcpv4 and dhcpv6 render an unrecognised message type as "unknown (42)", plus
-// the three characters the text format requires to be escaped inside a quoted
-// value.
+// Spaces become underscores because both dhcpv4 and dhcpv6 render an
+// unrecognised message type as "unknown (42)"; the rest is the escaping the
+// text format requires inside a quoted value.
 var labelSanitizer = strings.NewReplacer(
 	" ", "_",
 	`\`, `\\`,
@@ -363,12 +309,8 @@ var labelSanitizer = strings.NewReplacer(
 	"\n", `\n`,
 )
 
-// sanitizeLabelValue returns s ready to be placed between the quotes of a label
-// value, lowercased.
-//
-// Every message-type string the dhcp library returns today is plain ASCII; the
-// escaping is here so that a name added upstream with a quote or a backslash in
-// it cannot produce an exposition body Prometheus refuses to parse.
+// The escaping guards against a message-type name added upstream with a quote
+// or backslash in it producing a body Prometheus refuses to parse.
 func sanitizeLabelValue(s string) string {
 	return labelSanitizer.Replace(strings.ToLower(s))
 }
