@@ -26,10 +26,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The helper program the exec tests run. The exec target passes no arguments,
-// so -test.run cannot be used to select a helper test the usual way; the
-// parent steers the child with these variables instead, and TestMain routes
-// on them.
+// The exec target passes no arguments, so -test.run cannot select a helper
+// test the usual way; the parent steers the re-exec'd child with these
+// variables instead, and TestMain routes on them.
 const (
 	helperModeEnv = "COREDHCP_LEASEHOOK_HELPER"
 	helperOutEnv  = "COREDHCP_LEASEHOOK_OUT"
@@ -48,8 +47,6 @@ var (
 	testXID6 = dhcpv6.TransactionID{0xaa, 0xbb, 0xcc}
 )
 
-// TestMain routes a re-executed test binary to the helper program instead of
-// running the tests a second time.
 func TestMain(m *testing.M) {
 	if mode := os.Getenv(helperModeEnv); mode != "" {
 		os.Exit(helperMain(mode))
@@ -57,9 +54,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// helperMain is the lease-event program the exec tests point the plugin at.
-// One helper covers the three paths worth testing: it records what it was
-// sent, fails loudly, or hangs until it is killed.
+// One helper covers three paths: it records what it was sent, fails loudly, or hangs until killed.
 func helperMain(mode string) int {
 	switch mode {
 	case helperFail:
@@ -87,8 +82,7 @@ func helperMain(mode string) int {
 	return 0
 }
 
-// newTestPlugin builds an instance from a config line, with the worker left
-// unstarted so a test can look in the queue itself.
+// Worker left unstarted so a test can look in the queue itself.
 func newTestPlugin(t *testing.T, args ...string) *pluginState {
 	t.Helper()
 	s, err := parseArgs(args)
@@ -96,7 +90,6 @@ func newTestPlugin(t *testing.T, args ...string) *pluginState {
 	return newPluginState(s)
 }
 
-// v4Request builds a request carrying the fields the tests share.
 func v4Request(t *testing.T, mtype dhcpv4.MessageType, mods ...dhcpv4.Modifier) *dhcpv4.DHCPv4 {
 	t.Helper()
 	req, err := dhcpv4.New(append([]dhcpv4.Modifier{
@@ -108,7 +101,6 @@ func v4Request(t *testing.T, mtype dhcpv4.MessageType, mods ...dhcpv4.Modifier) 
 	return req
 }
 
-// v4Reply builds the response the rest of the chain would be carrying.
 func v4Reply(t *testing.T, req *dhcpv4.DHCPv4, mods ...dhcpv4.Modifier) *dhcpv4.DHCPv4 {
 	t.Helper()
 	resp, err := dhcpv4.NewReplyFromRequest(req, mods...)
@@ -116,8 +108,7 @@ func v4Reply(t *testing.T, req *dhcpv4.DHCPv4, mods ...dhcpv4.Modifier) *dhcpv4.
 	return resp
 }
 
-// v6Message builds a DHCPv6 message with a fixed transaction ID, so the
-// rendered event is the same on every run.
+// Fixed transaction ID, so the rendered event is the same on every run.
 func v6Message(t *testing.T, mtype dhcpv6.MessageType, mods ...dhcpv6.Modifier) *dhcpv6.Message {
 	t.Helper()
 	msg, err := dhcpv6.NewMessage(mods...)
@@ -127,7 +118,6 @@ func v6Message(t *testing.T, mtype dhcpv6.MessageType, mods ...dhcpv6.Modifier) 
 	return msg
 }
 
-// mustCIDR parses a prefix for an IA_PD option.
 func mustCIDR(t *testing.T, s string) *net.IPNet {
 	t.Helper()
 	_, ipnet, err := net.ParseCIDR(s)
@@ -188,8 +178,7 @@ func TestEvent4(t *testing.T) {
 				t.Helper()
 				req := v4Request(t, dhcpv4.MessageTypeRelease,
 					dhcpv4.WithClientIP(net.IPv4(10, 0, 0, 5)))
-				// The server answers no RELEASE, so the response the chain
-				// carries has no message type at all.
+				// No message type set: the server never answers a RELEASE.
 				return req, v4Reply(t, req)
 			},
 			want: `{"family":4,"event":"release","time":"2026-09-05T12:00:00Z","mac":"aa:bb:cc:dd:ee:ff",` +
@@ -599,8 +588,6 @@ func TestApplySecretFromEnvironment(t *testing.T) {
 	assert.Equal(t, []byte("s3cr3t"), s.secret)
 }
 
-// fakeTarget stands in for a webhook or a program, so the worker can be
-// driven without either.
 type fakeTarget struct {
 	delivered chan delivery
 	err       error
@@ -683,8 +670,7 @@ func TestWorker(t *testing.T) {
 		t.Fatal("the event was never delivered")
 	}
 
-	// stopWorker blocks until the goroutine is gone, so a worker that did not
-	// notice would fail this test by timing out.
+	// Blocks until the goroutine exits, so a worker that missed stop hangs the test.
 	p.stopWorker()
 }
 
@@ -740,14 +726,11 @@ func TestSetupState(t *testing.T) {
 	})
 }
 
-// received is one request the test endpoint was sent.
 type received struct {
 	body   []byte
 	header http.Header
 }
 
-// newRecorder starts an endpoint answering with status, and reports what it
-// was sent on the returned channel.
 func newRecorder(t *testing.T, status int) (*httptest.Server, <-chan received) {
 	t.Helper()
 	got := make(chan received, 4)
@@ -776,8 +759,7 @@ func TestWebhookDeliver(t *testing.T) {
 		req := <-got
 		assert.Equal(t, payload, req.body)
 		assert.Equal(t, contentType, req.header.Get("Content-Type"))
-		// Recomputed here rather than pasted in, which is what a receiver
-		// has to do anyway.
+		// Recomputed here rather than pasted in, as a receiver would do it.
 		assert.Equal(t, sign([]byte("s3cr3t"), payload), req.header.Get(signatureHeader))
 		assert.True(t, strings.HasPrefix(req.header.Get(signatureHeader), signaturePrefix))
 	})
@@ -798,9 +780,8 @@ func TestWebhookDeliver(t *testing.T) {
 	})
 
 	t.Run("a slow endpoint runs into the timeout", func(t *testing.T) {
-		// The handler blocks until the test lets it go. Cleanups run last in
-		// first out, so release is closed before the server is, and Close
-		// does not sit waiting on a handler that will never return.
+		// Cleanups run last-in-first-out, so release closes before the
+		// server does, and Close never waits on a handler that never returns.
 		release := make(chan struct{})
 		srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 			<-release
@@ -825,8 +806,7 @@ func TestWebhookDeliver(t *testing.T) {
 	})
 
 	t.Run("a URL no request can be built from is an error", func(t *testing.T) {
-		// parseArgs refuses this at setup, so only a hand-built webhook can
-		// reach the branch.
+		// parseArgs refuses this at setup; only a hand-built webhook reaches it.
 		err := (&webhook{url: "://ipam.example", hc: &http.Client{}}).deliver(t.Context(), d)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "building the request")
