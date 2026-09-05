@@ -236,7 +236,8 @@ This fork adds six plugins upstream does not have built in:
 * [metrics](plugins/metrics/) serves request counters in Prometheus text
   format, with no new dependencies
 * [macfilter](plugins/macfilter/) allows or denies clients by MAC, inline or
-  from a file
+  from a file, with the caveat spelled out in its package doc: a MAC is not a
+  credential, so allow mode is tidiness rather than authentication
 * [ntp](plugins/ntp/) announces NTP servers, option 42 on DHCPv4 and the
   RFC 5908 option on DHCPv6
 * [netbox](plugins/netbox/) serves each client the address documented in
