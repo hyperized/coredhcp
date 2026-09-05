@@ -147,6 +147,39 @@ func TestResolveToken(t *testing.T) {
 			},
 			want: "secret123",
 		},
+		{
+			name: "token:env:NAME with the variable set returns that value",
+			arg:  "token:env:NETBOX_TEST_TOKEN_TAGGED_VALUE",
+			setup: func(t *testing.T) {
+				t.Helper()
+				t.Setenv("NETBOX_TEST_TOKEN_TAGGED_VALUE", "tagged-secret")
+			},
+			want: "tagged-secret",
+		},
+		{
+			name: "token:env:NAME with the variable unset errors",
+			arg:  "token:env:NETBOX_TEST_TOKEN_TAGGED_UNSET",
+			setup: func(t *testing.T) {
+				t.Helper()
+				require.NoError(t, os.Unsetenv("NETBOX_TEST_TOKEN_TAGGED_UNSET"))
+			},
+			wantErrText: "unset or empty",
+		},
+		{
+			name: "token:<value> is the literal token",
+			arg:  "token:plain-token-value",
+			want: "plain-token-value",
+		},
+		{
+			name:        "token: alone errors, naming the argument",
+			arg:         "token:",
+			wantErrText: `"token:"`,
+		},
+		{
+			name:        "token:env: alone errors",
+			arg:         "token:env:",
+			wantErrText: "needs an environment variable name",
+		},
 	}
 
 	for _, tc := range cases {

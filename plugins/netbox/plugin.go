@@ -10,15 +10,18 @@
 //
 //	server4/server6:
 //	  plugins:
-//	    - netbox: https://netbox.example.com env:NETBOX_TOKEN ttl:5m
+//	    - netbox: https://netbox.example.com token:env:NETBOX_TOKEN ttl:5m
 //
 // The URL is the root of the NetBox installation, with or without a subpath
 // (https://netbox.example.com or https://host/netbox); the plugin appends
 // /api/... to it. Only http and https are accepted.
 //
-// The token is either the token itself or env:NAME, which reads it from the
-// environment when the server starts. Setup fails when that variable is unset
-// or empty. Tokens starting with "nbt_" are the v2 tokens NetBox 4.5
+// The token is best given as token:env:NAME, which reads NAME from the
+// environment when the server starts and marks the argument as a secret.
+// token:<value> carries the token itself, and the older env:NAME and bare
+// forms are still accepted. Setup fails when the named variable is unset or
+// empty.
+// Tokens starting with "nbt_" are the v2 tokens NetBox 4.5
 // introduced and are sent as "Authorization: Bearer"; everything else is sent
 // as "Authorization: Token". NetBox deprecated the legacy tokens in 4.6 and
 // plans to drop them in 5.0, so new deployments should be issuing v2 tokens
@@ -293,9 +296,24 @@ func (p *pluginState) lookup(hwaddr net.HardwareAddr) (lookupResult, error) {
 	return result, nil
 }
 
+// skipsLookup4 reports whether msgType never needs a NetBox lookup. INFORM
+// carries no address request. RELEASE and DECLINE are skipped too: the
+// server never replies to either whatever the plugin chain returns, this
+// plugin holds no lease state that a release could free, and looking them up
+// anyway would let a spoofed MAC turn every DECLINE it sends into a NetBox
+// API call.
+func skipsLookup4(msgType dhcpv4.MessageType) bool {
+	switch msgType {
+	case dhcpv4.MessageTypeInform, dhcpv4.MessageTypeRelease, dhcpv4.MessageTypeDecline:
+		return true
+	default:
+		return false
+	}
+}
+
 // Handler4 handles DHCPv4 packets for the netbox plugin.
 func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
-	if req.MessageType() == dhcpv4.MessageTypeInform {
+	if skipsLookup4(req.MessageType()) {
 		return resp, false
 	}
 
@@ -315,12 +333,31 @@ func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 	return resp, true
 }
 
+// skipsLookup6 reports whether msgType never needs a NetBox lookup, for the
+// same reasons as skipsLookup4: RELEASE and DECLINE get no reply and free no
+// state this plugin holds.
+func skipsLookup6(msgType dhcpv6.MessageType) bool {
+	switch msgType {
+	case dhcpv6.MessageTypeRelease, dhcpv6.MessageTypeDecline:
+		return true
+	default:
+		return false
+	}
+}
+
 // Handler6 handles DHCPv6 packets for the netbox plugin.
 func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	m, err := req.GetInnerMessage()
 	if err != nil {
 		log.Errorf("BUG: could not decapsulate: %v", err)
 		return nil, true
+	}
+
+	// A relayed message carries the client's own type inside; the relay
+	// wrapper's type is RELAY-FORW or RELAY-REPL and says nothing about
+	// what the client sent, so the check runs on m, not req.
+	if skipsLookup6(m.MessageType) {
+		return resp, false
 	}
 
 	iana := m.Options.OneIANA()

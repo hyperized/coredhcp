@@ -258,15 +258,20 @@ The last two started as the `netbox` and `redis` plugins in the
 [coredhcp/plugins](https://github.com/coredhcp/plugins) repository, which has
 not moved since 2020. They are rewrites, not ports: both families are served,
 results are cached, errors are bounded, and the NetBox one speaks the current
-API. Tokens and passwords can be given as `env:NAME` instead of a literal,
-which keeps the secret out of the config file. A literal is kept out of the
-log as well: the loader prints each plugin's name and argument count at the
-default level and the arguments themselves only at debug, and both that line
-and the terminal UI's plugin pane replace the value of a `password:`, `token:`
-or `secret:` argument, the password in a `scheme://user:pass@host` URL, and
-anything shaped like a NetBox API token with `***`. The last of those is
-matched on the value's shape rather than on a prefix, so `env:NAME` is still
-the form to prefer.
+API. Neither asks its backend anything for a RELEASE or a DECLINE: the server
+replies to neither and neither plugin holds lease state, so the lookup only
+ever paid for an unauthenticated packet.
+
+Give secrets as `token:env:NAME` and `password:env:NAME`, which keeps them out
+of the config file. A literal is kept out of the log as well: the loader
+prints each plugin's name and argument count at the default level and the
+arguments themselves only at debug, and both that line and the terminal UI's
+plugin pane replace the value of a `password:`, `token:` or `secret:`
+argument, the password in a `scheme://user:pass@host` URL, and anything
+shaped like a NetBox API token with `***`. The last of those is matched on
+the value's shape rather than on a prefix, so `env:NAME` is still the form to
+prefer; NetBox accepts a bare token for compatibility and warns at startup to
+move it.
 
 The `range` plugin also releases expired leases here (a pool on upstream
 fills up forever: coredhcp/coredhcp#148). It frees a lease only when the

@@ -82,8 +82,11 @@ server6:
         # netbox serves the IPv6 address documented in NetBox on the interface
         # that carries the client's MAC address (NetBox 4.2 or newer). Results
         # are cached; ttl:, negative-ttl:, timeout: and lifetime: tune it.
-        # - netbox: <base URL> <token | env:NAME> [ttl:5m] [negative-ttl:30s] [timeout:5s] [lifetime:1h]
-        # - netbox: https://netbox.example.com env:NETBOX_TOKEN
+        # The token: prefix is what tells the startup log the argument is a
+        # secret, so give the token as token:env:NAME. A bare token still
+        # works and is warned about at startup, because nothing can redact it.
+        # - netbox: <base URL> <token:env:NAME> [ttl:5m] [negative-ttl:30s] [timeout:5s] [lifetime:1h]
+        # - netbox: https://netbox.example.com token:env:NETBOX_TOKEN
 
         # redis serves the ipv6 field of the hash stored at mac:<client MAC>,
         # plus dns and leaseTime when present. The address may be a host:port
@@ -205,8 +208,11 @@ server4:
         # devices and virtual machines alike (NetBox 4.2 or newer). Unknown
         # clients fall through to the plugins after it; list it before range
         # and after the option plugins, as with file.
-        # - netbox: <base URL> <token | env:NAME> [ttl:5m] [negative-ttl:30s] [timeout:5s]
-        # - netbox: https://netbox.example.com env:NETBOX_TOKEN
+        # The token: prefix is what tells the startup log the argument is a
+        # secret, so give the token as token:env:NAME. A bare token still
+        # works and is warned about at startup, because nothing can redact it.
+        # - netbox: <base URL> <token:env:NAME> [ttl:5m] [negative-ttl:30s] [timeout:5s]
+        # - netbox: https://netbox.example.com token:env:NETBOX_TOKEN
 
         # redis serves static leases from Redis hashes keyed mac:<client MAC>,
         # with fields ipv4 (address or CIDR, CIDR also sets the subnet mask),
