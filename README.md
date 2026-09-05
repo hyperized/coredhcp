@@ -176,14 +176,41 @@ on demand against an existing NetBox instance with `NETBOX_URL`,
 ## Docker
 
 The [Dockerfile](./Dockerfile) builds a cgo-free binary and ships it on
-debian-slim. `make docker-image` builds it, and the entrypoint reads its
+distroless static. `make docker-image` builds it, and the entrypoint reads its
 configuration from `/etc/coredhcp/config.yaml`, so mount one there.
 
-Running the container takes some care: a DHCP server has to share a broadcast
-domain with its clients, so publishing ports out of a NAT network achieves
-nothing. The compose stack in [test/compose/](test/compose/) is a working
-example. It puts the server and its clients on one user-defined bridge and
-grants `NET_BIND_SERVICE` and `NET_RAW` rather than running privileged.
+The server runs as uid 65532, not as root, so the two things it needs from the
+kernel have to be granted. Binding udp/67 needs `NET_BIND_SERVICE`, and
+answering a client that has no address yet goes over an AF_PACKET socket, which
+needs `NET_RAW`. The binary carries both as file capabilities, so granting
+those two to the container is enough and privileged mode is never needed:
+
+```
+services:
+  coredhcp:
+    image: coredhcp
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE, NET_RAW]
+    volumes:
+      - ./config.yaml:/etc/coredhcp/config.yaml:ro
+      - coredhcp-leasedb:/var/lib/coredhcp
+
+volumes:
+  coredhcp-leasedb:
+```
+
+The `range` plugin creates its lease database at the path the config gives it,
+and uid 65532 has to be able to write there. `/var/lib/coredhcp` in the image
+belongs to that user, and a named volume mounted over it inherits that owner. A
+bind mount does not: the directory keeps the ownership it has on the host, and
+the database fails to open. Either keep the lease database on a named
+volume or chown the host directory to 65532 first.
+
+Beyond the file system, running the container takes some care: a DHCP server
+has to share a broadcast domain with its clients, so publishing ports out of a
+NAT network achieves nothing. The compose stack in [test/compose/](test/compose/)
+is a working example, with the server and its clients on one user-defined
+bridge.
 
 # Plugins
 

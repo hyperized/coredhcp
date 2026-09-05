@@ -27,7 +27,7 @@ x-dhcp-client: &dhcp-client
   # second kill timeout.
   init: true
   depends_on:
-    server:
+    server-ready:
       condition: service_healthy
   # udhcpc opens an AF_PACKET socket; nothing else is needed, in particular no
   # NET_ADMIN, because the capture script never configures the interface.
@@ -89,24 +89,44 @@ services:
     # yet. Both are in docker's default set; everything else is dropped.
     cap_drop: [ALL]
     cap_add: [NET_BIND_SERVICE, NET_RAW]
-    # Healthy once udp/67 is actually bound. 0043 is port 67 in the hex
-    # notation /proc/net/udp uses. Without this the clients would race the
-    # listener and rely on udhcpc's retries to paper over the gap.
-    healthcheck:
-      test: ["CMD-SHELL", "grep -q ':0043 ' /proc/net/udp"]
-      interval: 1s
-      timeout: 2s
-      retries: 30
     volumes:
       - coredhcp-conf:/etc/coredhcp:ro
       # The range plugin writes its lease database, so it gets its own
-      # writable volume rather than loosening the config mount.
+      # writable volume rather than loosening the config mount. A named volume
+      # takes the owner of the directory it covers in the image, which is the
+      # unprivileged user the server runs as; a bind mount from the repo would
+      # arrive owned by root and the database would fail to open.
       - coredhcp-leasedb:/var/lib/coredhcp
     networks:
       dhcp:
         # Fixed address, because the server_id the clients are checked against
         # is baked into the rendered config.
         ipv4_address: ${DHCP_NET_PREFIX:-172.31.240}.2
+
+  # Says when udp/67 is actually bound, so the clients don't race the listener
+  # and lean on udhcpc's retries to paper over the gap.
+  #
+  # It is a service of its own because the check has to run somewhere with a
+  # shell, and the server image is distroless. Sharing the server's network
+  # namespace puts it in front of the same /proc/net/udp, where 0043 is port 67
+  # in the hex notation that file uses.
+  #
+  # It idles rather than exiting, for the reason config-render does: the
+  # checker has to be the only service that ever exits.
+  server-ready:
+    image: busybox:${BUSYBOX_TAG:-1.37.0}
+    init: true
+    depends_on: [server]
+    # Joins the server's netns, so no `networks:` here and no address of its
+    # own. Reading a file needs no capabilities at all.
+    network_mode: "service:server"
+    cap_drop: [ALL]
+    command: ["/bin/sh", "-c", "trap 'exit 0' TERM INT; sleep ${SERVICE_LINGER:-3600} & wait $$!"]
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q ':0043 ' /proc/net/udp"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
 
   # Three clients with a static lease keyed on their MAC, one without, so the
   # range plugin's allocation path is covered too.
