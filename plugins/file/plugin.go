@@ -60,6 +60,7 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv6"
 
 	"github.com/coredhcp/coredhcp/handler"
+	"github.com/coredhcp/coredhcp/leases"
 	"github.com/coredhcp/coredhcp/logger"
 	"github.com/coredhcp/coredhcp/plugins"
 )
@@ -94,6 +95,12 @@ var (
 type pluginState struct {
 	mu   sync.RWMutex
 	recs map[string]netip.Addr
+
+	// name identifies this instance to a lease reader and family says which
+	// protocol its reservations are for. Both are set during setup and
+	// read-only afterwards; see leases.go.
+	name   string
+	family uint8
 }
 
 // numRecords returns the number of currently loaded records.
@@ -193,7 +200,7 @@ func setupFile(v6 bool, args ...string) (handler.Handler6, handler.Handler4, err
 		return nil, nil, errors.New("got empty file name")
 	}
 
-	s := &pluginState{}
+	s := &pluginState{name: "file " + filename, family: familyOf(v6)}
 
 	// load initial database from lease file
 	if err = s.loadFromFile(v6, filename); err != nil {
@@ -230,6 +237,9 @@ func setupFile(v6 bool, args ...string) (handler.Handler6, handler.Handler4, err
 		}()
 	}
 
+	// Registered last, once everything that could fail has succeeded: a
+	// reader must never find a half-built instance in the registry.
+	leases.Register(s)
 	log.Infof("loaded %d leases from %s", s.numRecords(), filename)
 	return s.Handler6, s.Handler4, nil
 }
