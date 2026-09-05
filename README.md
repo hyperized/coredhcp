@@ -295,6 +295,10 @@ wrote an expiry it never read and never called `Free`, so its pool drained
 permanently; delegations now lapse and go back to the pool, the lease time
 is a configuration argument rather than a hardcoded hour, and a RELEASE is
 answered with a status code per IA_PD instead of being treated as a renewal.
+What one packet can claim is capped as well: at most 8 IA_PDs in a message
+are answered, and one client holds at most `max-prefixes` delegations (4 by
+default). Without either, a 146-byte SOLICIT carrying eight IA_PDs emptied a
+pool of four /64s, and about 4096 of them fit in one datagram.
 
 ## Server with custom plugins
 

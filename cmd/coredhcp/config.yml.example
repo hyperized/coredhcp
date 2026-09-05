@@ -103,9 +103,16 @@ server6:
         - nbp: "http://[2001:db8:a::1]/nbp"
 
         # prefix provides prefix delegation.
-        # - prefix: <prefix> <allocation size>
-        # prefix is the prefix pool from which the allocations will be carved
+        # - prefix: <prefix> <allocation size> [lease duration] [sweep:<interval>] [max-prefixes:<count>]
+        # prefix is the IPv6 prefix pool from which the allocations will be carved
         # allocation size is the maximum size for prefixes that will be allocated to clients
+        # The lease duration defaults to 1h and lapsed delegations go back to
+        # the pool on a background sweep, by default every max(30s, half the
+        # lease duration). max-prefixes caps how many delegations one client
+        # may hold at a time (4 by default); an IA_PD past that is answered
+        # with NoPrefixAvail. At most 8 IA_PDs in one message are answered at
+        # all, since nothing authenticates the sender of a packet carrying
+        # thousands of them.
         # EG for allocating /64 or smaller prefixes within 2001:db8::/48 :
         - prefix: 2001:db8::/48 64
 

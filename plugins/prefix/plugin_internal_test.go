@@ -115,6 +115,7 @@ func newTestPlugin(t *testing.T, pool string) (*pluginState, *fakeClock) {
 		Records:       make(map[string][]lease),
 		allocator:     alloc,
 		leaseDuration: testLeaseDuration,
+		maxPrefixes:   defaultMaxPrefixes,
 		now:           clock.Now,
 		stop:          make(chan struct{}),
 		done:          make(chan struct{}),
@@ -346,6 +347,7 @@ func TestParseLeaseDuration(t *testing.T) {
 		{name: "omitted", want: defaultLeaseDuration, wantRest: nil},
 		{name: "explicit", extra: []string{"30m"}, want: 30 * time.Minute, wantRest: []string{}},
 		{name: "skipped, sweep argument follows", extra: []string{"sweep:45s"}, want: defaultLeaseDuration, wantRest: []string{"sweep:45s"}},
+		{name: "skipped, max-prefixes argument follows", extra: []string{"max-prefixes:4"}, want: defaultLeaseDuration, wantRest: []string{"max-prefixes:4"}},
 		{name: "followed by a sweep argument", extra: []string{"30m", "sweep:45s"}, want: 30 * time.Minute, wantRest: []string{"sweep:45s"}},
 		{name: "malformed", extra: []string{"forever"}, wantErrSub: "invalid lease duration"},
 		{name: "zero", extra: []string{"0s"}, wantErrSub: "has to be positive"},
@@ -365,23 +367,94 @@ func TestParseLeaseDuration(t *testing.T) {
 	}
 }
 
-func TestParseSweepInterval(t *testing.T) {
+// TestParseOptions pins parseOptions: the defaults it fills in, the two named
+// arguments accepted in either order, and the error paths shared by both -
+// an unknown key, a key given with no value, a key given twice, and a bad
+// value for either one.
+func TestParseOptions(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		extra      []string
-		want       time.Duration
+		want       pluginOptions
 		wantErrSub string
 	}{
-		{name: "derived from the lease duration", want: 30 * time.Minute},
-		{name: "explicit override", extra: []string{"sweep:90s"}, want: 90 * time.Second},
-		{name: "unknown argument", extra: []string{"90s"}, wantErrSub: "unexpected argument"},
-		{name: "too many arguments", extra: []string{"sweep:90s", "sweep:2m"}, wantErrSub: "too many arguments"},
-		{name: "malformed duration", extra: []string{"sweep:soon"}, wantErrSub: "invalid sweep interval"},
-		{name: "zero", extra: []string{"sweep:0s"}, wantErrSub: "has to be positive"},
-		{name: "negative", extra: []string{"sweep:-1m"}, wantErrSub: "has to be positive"},
+		{
+			name: "no arguments falls back to the derived sweep interval and the default max",
+			want: pluginOptions{sweepInterval: 30 * time.Minute, maxPrefixes: defaultMaxPrefixes},
+		},
+		{
+			name:  "sweep alone",
+			extra: []string{"sweep:90s"},
+			want:  pluginOptions{sweepInterval: 90 * time.Second, maxPrefixes: defaultMaxPrefixes},
+		},
+		{
+			name:  "max-prefixes alone",
+			extra: []string{"max-prefixes:8"},
+			want:  pluginOptions{sweepInterval: 30 * time.Minute, maxPrefixes: 8},
+		},
+		{
+			name:  "sweep followed by max-prefixes",
+			extra: []string{"sweep:90s", "max-prefixes:8"},
+			want:  pluginOptions{sweepInterval: 90 * time.Second, maxPrefixes: 8},
+		},
+		{
+			name:  "max-prefixes followed by sweep",
+			extra: []string{"max-prefixes:8", "sweep:90s"},
+			want:  pluginOptions{sweepInterval: 90 * time.Second, maxPrefixes: 8},
+		},
+		{
+			name:       "unknown key",
+			extra:      []string{"reap:5m"},
+			wantErrSub: "unexpected argument",
+		},
+		{
+			name:       "a key with no value",
+			extra:      []string{"sweep"},
+			wantErrSub: "unexpected argument",
+		},
+		{
+			name:       "sweep given twice",
+			extra:      []string{"sweep:90s", "sweep:2m"},
+			wantErrSub: "argument sweep given more than once",
+		},
+		{
+			name:       "max-prefixes given twice",
+			extra:      []string{"max-prefixes:4", "max-prefixes:8"},
+			wantErrSub: "argument max-prefixes given more than once",
+		},
+		{
+			name:       "malformed sweep interval",
+			extra:      []string{"sweep:soon"},
+			wantErrSub: "invalid sweep interval",
+		},
+		{
+			name:       "zero sweep interval",
+			extra:      []string{"sweep:0s"},
+			wantErrSub: "has to be positive",
+		},
+		{
+			name:       "negative sweep interval",
+			extra:      []string{"sweep:-1m"},
+			wantErrSub: "has to be positive",
+		},
+		{
+			name:       "non-numeric max-prefixes",
+			extra:      []string{"max-prefixes:abc"},
+			wantErrSub: "invalid prefix maximum",
+		},
+		{
+			name:       "zero max-prefixes",
+			extra:      []string{"max-prefixes:0"},
+			wantErrSub: "prefix maximum has to be positive",
+		},
+		{
+			name:       "negative max-prefixes",
+			extra:      []string{"max-prefixes:-1"},
+			wantErrSub: "prefix maximum has to be positive",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseSweepInterval(time.Hour, tc.extra)
+			got, err := parseOptions(time.Hour, tc.extra)
 			if tc.wantErrSub != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErrSub)
@@ -408,4 +481,60 @@ func TestNewPluginStateStartsIdle(t *testing.T) {
 		t.Fatal("newPluginState must not start the sweeper")
 	default:
 	}
+}
+
+// TestNewPluginStateMaxPrefixes pins that the max-prefixes argument sets
+// pluginState.maxPrefixes, and that leaving it out falls back to
+// defaultMaxPrefixes.
+func TestNewPluginStateMaxPrefixes(t *testing.T) {
+	t.Run("defaults when absent", func(t *testing.T) {
+		h, err := newPluginState("2001:db8::/48", "64")
+		require.NoError(t, err)
+		assert.Equal(t, defaultMaxPrefixes, h.maxPrefixes)
+	})
+
+	t.Run("set from the argument", func(t *testing.T) {
+		h, err := newPluginState("2001:db8::/48", "64", "1h", "max-prefixes:9")
+		require.NoError(t, err)
+		assert.Equal(t, 9, h.maxPrefixes)
+	})
+}
+
+// buildIAPDMessage returns a message carrying n IA_PD options, one per IAID
+// from 1 to n, for exercising iapdsToAnswer without going through a full
+// SOLICIT or RELEASE.
+func buildIAPDMessage(t *testing.T, n int) *dhcpv6.Message {
+	t.Helper()
+
+	msg, err := dhcpv6.NewMessage()
+	require.NoError(t, err)
+	for i := 1; i <= n; i++ {
+		msg.AddOption(&dhcpv6.OptIAPD{IaId: [4]byte{0, 0, 0, byte(i)}})
+	}
+	return msg
+}
+
+// TestIapdsToAnswer pins the per-message IA_PD cap: a message under or at the
+// limit is answered in full, and one over it is truncated to the first
+// maxIAPDsPerMessage IA_PDs, identified by IAID, so the reply cannot be made
+// to grow just by adding more IA_PDs to the request.
+func TestIapdsToAnswer(t *testing.T) {
+	t.Run("fewer than the limit returns them all", func(t *testing.T) {
+		msg := buildIAPDMessage(t, maxIAPDsPerMessage-1)
+		assert.Len(t, iapdsToAnswer(msg), maxIAPDsPerMessage-1)
+	})
+
+	t.Run("exactly the limit returns them all", func(t *testing.T) {
+		msg := buildIAPDMessage(t, maxIAPDsPerMessage)
+		assert.Len(t, iapdsToAnswer(msg), maxIAPDsPerMessage)
+	})
+
+	t.Run("over the limit keeps only the first ones by IAID", func(t *testing.T) {
+		msg := buildIAPDMessage(t, maxIAPDsPerMessage+4)
+		got := iapdsToAnswer(msg)
+		require.Len(t, got, maxIAPDsPerMessage)
+		for i, iapd := range got {
+			assert.Equal(t, [4]byte{0, 0, 0, byte(i + 1)}, iapd.IaId)
+		}
+	})
 }

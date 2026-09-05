@@ -6,17 +6,22 @@
 // them with IA_PREFIX requests.
 //
 // The plugin takes the pool and the allocation size, and optionally a lease
-// duration and a sweep interval:
+// duration and named arguments in any order:
 //
 //	server6:
 //	  plugins:
-//	    - prefix: 2001:db8::/48 64 1h sweep:30m
+//	    - prefix: 2001:db8::/48 64 1h sweep:30m max-prefixes:4
 //
-// The pool is the base prefix that assigned prefixes are carved from. The
-// allocation size is the largest prefix handed to a client: one asking for
-// something bigger gets a prefix of this size. The lease duration defaults to
-// 1h. sweep:<duration> sets how often lapsed delegations are reclaimed in the
-// background, and defaults to half the lease duration, floored at 30s.
+// The pool is the base prefix that assigned prefixes are carved from, and has
+// to be an IPv6 prefix: delegation only exists for DHCPv6. The allocation size
+// is the largest prefix handed to a client: one asking for something bigger
+// gets a prefix of this size. The lease duration defaults to 1h.
+//
+//	sweep:<duration>       how often lapsed delegations are reclaimed in the
+//	                       background. Defaults to half the lease duration,
+//	                       floored at 30s.
+//	max-prefixes:<count>   how many delegations one client may hold at a
+//	                       time. Defaults to 4.
 //
 // Delegations used to be handed out and never taken back. The expiry was
 // written and pushed out on renewal, but nothing read it and the allocator was
@@ -24,6 +29,25 @@
 // and then served nobody, with the lease map still holding every client that
 // had ever asked. Prefixes now go back to the pool from two places: the
 // background sweeper, and the request path for the client in front of us.
+//
+// # What one packet may cost
+//
+// Nothing in DHCPv6 authenticates a client, so the work and the addresses one
+// datagram can claim are all capped.
+//
+// A message is answered for at most maxIAPDsPerMessage IA_PD options. Every
+// IA_PD in a message used to be served: a 146-byte SOLICIT carrying eight of
+// them emptied a /62 pool of four /64s, and roughly 4096 fit in a full
+// datagram, at which point the reply grew too large to send and the sender
+// paid nothing at all.
+//
+// One client, meaning one DUID, holds at most max-prefixes delegations. An
+// IA_PD that would take it past that is answered with NoPrefixAvail rather
+// than served, which is the same answer an exhausted pool gives.
+//
+// A client DUID longer than RFC 8415 §11.1 allows is dropped, since the lease
+// map is keyed by the DUID's wire form and would otherwise grow by whatever a
+// sender cared to put in the option.
 package prefix
 
 import (
@@ -56,9 +80,16 @@ var Plugin = plugins.Plugin{
 }
 
 const (
-	// sweepArgPrefix marks the optional trailing argument that overrides the
-	// background sweep interval, e.g. "sweep:5m".
-	sweepArgPrefix = "sweep:"
+	// sweepArg names the optional argument that overrides the background sweep
+	// interval, e.g. "sweep:5m".
+	sweepArg = "sweep"
+
+	// maxPrefixesArg names the optional argument that overrides how many
+	// delegations one client may hold, e.g. "max-prefixes:8".
+	maxPrefixesArg = "max-prefixes"
+
+	// optionSyntax spells the named arguments out for error messages.
+	optionSyntax = sweepArg + ":<duration> or " + maxPrefixesArg + ":<count>"
 
 	// defaultLeaseDuration is what a delegation lasts when the config does not
 	// say. It is the value this plugin hardcoded before the argument existed.
@@ -68,6 +99,22 @@ const (
 	// duration does not turn the sweeper into a hot loop taking the plugin
 	// lock.
 	minSweepInterval = 30 * time.Second
+
+	// defaultMaxPrefixes is how many delegations one client may hold unless
+	// the config says otherwise. A home router asks for one, and four leaves
+	// room for a site that genuinely subnets behind itself without letting a
+	// single DUID walk off with a pool.
+	defaultMaxPrefixes = 4
+
+	// maxIAPDsPerMessage caps how many IA_PD options one message is answered
+	// for. Eight is more than any client legitimately asks for in one go, and
+	// low enough that the reply still fits in a datagram.
+	maxIAPDsPerMessage = 8
+
+	// maxDUIDLength is the longest client DUID this plugin will key its lease
+	// map on: the 128 octets RFC 8415 §11.1 allows, plus the two-octet type
+	// code that the wire form recordKey uses carries in front of them.
+	maxDUIDLength = 130
 )
 
 type lease struct {
@@ -93,10 +140,12 @@ type pluginState struct {
 	allocator allocators.Allocator
 
 	// leaseDuration is how long a delegation lasts, sweepInterval how often
-	// lapsed ones are reclaimed in the background. Both are set during setup
-	// and read-only afterwards.
+	// lapsed ones are reclaimed in the background, and maxPrefixes how many
+	// delegations one client may hold. All three are set during setup and
+	// read-only afterwards.
 	leaseDuration time.Duration
 	sweepInterval time.Duration
+	maxPrefixes   int
 
 	// now is the clock seam. It is written once during setup, before the
 	// sweeper goroutine starts, and only read afterwards. Use timeNow rather
@@ -147,6 +196,10 @@ func (h *pluginState) Handle(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 		log.Error("Invalid packet received, no clientID")
 		return nil, true
 	}
+	if n := len(client.ToBytes()); n > maxDUIDLength {
+		log.Infof("Dropping %s: client DUID is %d octets, over the %d RFC 8415 §11.1 allows", msg.MessageType, n, maxDUIDLength)
+		return nil, true
+	}
 
 	switch msg.MessageType {
 	case dhcpv6.MessageTypeRelease:
@@ -161,11 +214,24 @@ func (h *pluginState) Handle(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	}
 
 	// Each request IA_PD requires an IA_PD response
-	for _, iapd := range msg.Options.IAPD() {
+	for _, iapd := range iapdsToAnswer(msg) {
 		resp.AddOption(h.respondToIAPD(client, iapd))
 	}
 
 	return resp, false
+}
+
+// iapdsToAnswer returns the IA_PD options of msg that will be answered, at
+// most maxIAPDsPerMessage of them. The rest are ignored rather than answered
+// with a status, because the point is to keep the reply from growing with
+// whatever the sender put in the request.
+func iapdsToAnswer(msg *dhcpv6.Message) []*dhcpv6.OptIAPD {
+	iapds := msg.Options.IAPD()
+	if len(iapds) <= maxIAPDsPerMessage {
+		return iapds
+	}
+	log.Debugf("Ignoring %d IA_PD option(s) past the first %d in one %s", len(iapds)-maxIAPDsPerMessage, maxIAPDsPerMessage, msg.MessageType)
+	return iapds[:maxIAPDsPerMessage]
 }
 
 // handleRelease frees the prefixes a RELEASE lists and answers per RFC 8415
@@ -178,7 +244,7 @@ func (h *pluginState) handleRelease(client dhcpv6.DUID, msg *dhcpv6.Message, res
 	defer h.Unlock()
 
 	key := recordKey(client)
-	for _, iapd := range msg.Options.IAPD() {
+	for _, iapd := range iapdsToAnswer(msg) {
 		resp.AddOption(h.releaseIAPD(key, iapd))
 	}
 	resp.AddOption(&dhcpv6.OptStatusCode{
@@ -195,14 +261,16 @@ func (h *pluginState) handleRelease(client dhcpv6.DUID, msg *dhcpv6.Message, res
 // holds. An IA_PD listing no prefixes at all therefore also gets NoBinding,
 // which is the answer that stops a client retrying. The caller must hold h's
 // lock.
+//
+// NoBinding carries no message text. It is the one status a sender can ask
+// for over and over, by releasing prefixes it never held, and RFC 8415 §21.13
+// leaves the text optional. Text there made the reply grow to three times the
+// request, which is a reflector anyone on the segment can point somewhere.
 func (h *pluginState) releaseIAPD(key string, iapd *dhcpv6.OptIAPD) *dhcpv6.OptIAPD {
 	answer := &dhcpv6.OptIAPD{IaId: iapd.IaId}
 	if h.releasePrefixes(key, iapd.Options.Prefixes()) == 0 {
 		log.Debugf("No binding to release for IAID %x", iapd.IaId)
-		answer.Options.Add(&dhcpv6.OptStatusCode{
-			StatusCode:    dhcpIana.StatusNoBinding,
-			StatusMessage: "no prefix bound to this IAID",
-		})
+		answer.Options.Add(&dhcpv6.OptStatusCode{StatusCode: dhcpIana.StatusNoBinding})
 		return answer
 	}
 	answer.Options.Add(&dhcpv6.OptStatusCode{
@@ -530,12 +598,19 @@ func (e *pdExchange) grant(hintIdx, leaseIdx int) {
 // of requests will come with an empty, or length-only hint)
 //
 // The accumulator starts from the known leases so that a lease allocated for an
-// earlier hint of the same request survives (7f79c14).
+// earlier hint of the same request survives (7f79c14). Its length is also what
+// the per-client limit is measured against: leases already held count towards
+// it, which is what makes the limit hold across several IA_PDs in one message
+// and across several messages.
 func (h *pluginState) allocateForUnsatisfied(e *pdExchange) []lease {
 	newLeases := e.knownLeases
 
 	for hintIdx, hint := range e.hints {
 		if e.satisfied.Test(uint(hintIdx)) {
+			continue
+		}
+		if len(newLeases) >= h.maxPrefixes {
+			log.Debugf("Client %s already holds %d prefix(es), not delegating another (IAID: %x)", e.client, len(newLeases), e.iaid)
 			continue
 		}
 
@@ -622,11 +697,12 @@ func defaultSweepInterval(leaseDuration time.Duration) time.Duration {
 }
 
 // parseLeaseDuration reads the optional third positional argument and returns
-// it along with whatever came after it. The argument is positional and the
-// sweep argument is named, so an extra argument that already looks like a sweep
-// argument means the lease duration was left out.
+// it along with whatever came after it. The lease duration is the last
+// positional argument and everything after it is named key:value, so an
+// argument carrying a colon means the lease duration was left out. A duration
+// never contains one.
 func parseLeaseDuration(extra []string) (time.Duration, []string, error) {
-	if len(extra) == 0 || strings.HasPrefix(extra[0], sweepArgPrefix) {
+	if len(extra) == 0 || strings.Contains(extra[0], ":") {
 		return defaultLeaseDuration, extra, nil
 	}
 	duration, err := time.ParseDuration(extra[0])
@@ -639,28 +715,74 @@ func parseLeaseDuration(extra []string) (time.Duration, []string, error) {
 	return duration, extra[1:], nil
 }
 
-// parseSweepInterval reads the optional trailing "sweep:<duration>" argument,
-// falling back to defaultSweepInterval. Anything that is not a sweep argument
-// is rejected rather than silently ignored.
-func parseSweepInterval(leaseDuration time.Duration, extra []string) (time.Duration, error) {
-	if len(extra) == 0 {
-		return defaultSweepInterval(leaseDuration), nil
+// pluginOptions holds the settings taken from the named key:value arguments
+// that may follow the positional ones.
+type pluginOptions struct {
+	sweepInterval time.Duration
+	maxPrefixes   int
+}
+
+// optionParsers dispatches on the argument key. parseOptions handles ordering,
+// duplicates and unknown keys for every entry here, so accepting another
+// argument is one line plus its parser.
+var optionParsers = map[string]func(*pluginOptions, string) error{
+	sweepArg:       parseSweepInterval,
+	maxPrefixesArg: parseMaxPrefixes,
+}
+
+// parseOptions reads the named key:value arguments, which may come in any
+// order. extra holds whatever followed the lease duration. An unknown key, or
+// a key given twice, is an error rather than something quietly ignored: a typo
+// must not leave the operator with a default they believe they overrode.
+func parseOptions(leaseDuration time.Duration, extra []string) (pluginOptions, error) {
+	opts := pluginOptions{
+		sweepInterval: defaultSweepInterval(leaseDuration),
+		maxPrefixes:   defaultMaxPrefixes,
 	}
-	if len(extra) > 1 {
-		return 0, fmt.Errorf("too many arguments, want at most 4 (pool, allocation size, lease duration, %s<duration>), got %d", sweepArgPrefix, len(extra)+2)
+	seen := make(map[string]bool, len(extra))
+	for _, arg := range extra {
+		key, value, hasValue := strings.Cut(arg, ":")
+		parse, known := optionParsers[key]
+		if !hasValue || !known {
+			return pluginOptions{}, fmt.Errorf("unexpected argument %q, want %s", arg, optionSyntax)
+		}
+		if seen[key] {
+			return pluginOptions{}, fmt.Errorf("argument %s given more than once", key)
+		}
+		seen[key] = true
+		if err := parse(&opts, value); err != nil {
+			return pluginOptions{}, err
+		}
 	}
-	raw, ok := strings.CutPrefix(extra[0], sweepArgPrefix)
-	if !ok {
-		return 0, fmt.Errorf("unexpected argument %q, want %s<duration>", extra[0], sweepArgPrefix)
-	}
+	return opts, nil
+}
+
+// parseSweepInterval reads the value of a "sweep:" argument.
+func parseSweepInterval(opts *pluginOptions, raw string) error {
 	interval, err := time.ParseDuration(raw)
 	if err != nil {
-		return 0, fmt.Errorf("invalid sweep interval %q: %w", raw, err)
+		return fmt.Errorf("invalid sweep interval %q: %w", raw, err)
 	}
 	if interval <= 0 {
-		return 0, fmt.Errorf("sweep interval has to be positive, got: %v", raw)
+		return fmt.Errorf("sweep interval has to be positive, got: %v", raw)
 	}
-	return interval, nil
+	opts.sweepInterval = interval
+	return nil
+}
+
+// parseMaxPrefixes reads the value of a "max-prefixes:" argument. Zero is
+// refused rather than read as "no delegations at all": an operator who wants
+// that leaves the plugin out of the config.
+func parseMaxPrefixes(opts *pluginOptions, raw string) error {
+	count, err := strconv.Atoi(raw)
+	if err != nil {
+		return fmt.Errorf("invalid prefix maximum %q: %w", raw, err)
+	}
+	if count < 1 {
+		return fmt.Errorf("prefix maximum has to be positive, got: %v", raw)
+	}
+	opts.maxPrefixes = count
+	return nil
 }
 
 // setupPrefix builds the plugin instance and starts its background sweeper.
@@ -672,7 +794,7 @@ func setupPrefix(args ...string) (handler.Handler6, error) {
 	// Started only once setup has fully succeeded: a failed setup must not
 	// leave a goroutine behind sweeping a half-built plugin.
 	h.startSweeper(h.sweepInterval)
-	log.Printf("Delegating prefixes for %s, reclaiming expired ones every %s", h.leaseDuration, h.sweepInterval)
+	log.Printf("Delegating at most %d prefix(es) per client for %s, reclaiming expired ones every %s", h.maxPrefixes, h.leaseDuration, h.sweepInterval)
 	return h.Handle, nil
 }
 
@@ -689,6 +811,12 @@ func newPluginState(args ...string) (*pluginState, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid pool subnet: %w", err)
 	}
+	// Prefix delegation is DHCPv6 only. An IPv4 pool used to pass setup and
+	// then fail every allocation at runtime, because the allocator carves
+	// 128-bit prefixes out of whatever it is given.
+	if prefix.IP.To4() != nil {
+		return nil, fmt.Errorf("pool subnet %q is not IPv6", args[0])
+	}
 
 	allocSize, err := strconv.Atoi(args[1])
 	if err != nil || allocSize > 128 || allocSize < 0 {
@@ -699,7 +827,7 @@ func newPluginState(args ...string) (*pluginState, error) {
 	if err != nil {
 		return nil, err
 	}
-	sweepInterval, err := parseSweepInterval(leaseDuration, rest)
+	opts, err := parseOptions(leaseDuration, rest)
 	if err != nil {
 		return nil, err
 	}
@@ -714,7 +842,8 @@ func newPluginState(args ...string) (*pluginState, error) {
 		Records:       make(map[string][]lease),
 		allocator:     alloc,
 		leaseDuration: leaseDuration,
-		sweepInterval: sweepInterval,
+		sweepInterval: opts.sweepInterval,
+		maxPrefixes:   opts.maxPrefixes,
 		now:           time.Now,
 		stop:          make(chan struct{}),
 		done:          make(chan struct{}),
