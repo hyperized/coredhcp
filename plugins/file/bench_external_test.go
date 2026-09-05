@@ -19,8 +19,6 @@ import (
 	"github.com/coredhcp/coredhcp/plugins/file"
 )
 
-// benchLeaseFile writes a 10k-record DHCPv4 lease file to a temp dir and
-// returns its path together with the MAC addresses in the order written.
 func benchLeaseFile(b *testing.B) (string, []net.HardwareAddr) {
 	b.Helper()
 
@@ -40,8 +38,6 @@ func benchLeaseFile(b *testing.B) (string, []net.HardwareAddr) {
 	return path, macs
 }
 
-// BenchmarkHandler4Lookup exercises Handler4's read path against 10k loaded
-// records, built through the exported Setup4 entry point.
 func BenchmarkHandler4Lookup(b *testing.B) {
 	b.ReportAllocs()
 	// Handler4 logs one line per lookup at the default Info level;
@@ -61,8 +57,6 @@ func BenchmarkHandler4Lookup(b *testing.B) {
 	}
 }
 
-// BenchmarkLoadDHCPv4Records parses a 10k-line lease file from scratch on
-// every iteration, covering the file read and per-line parsing cost.
 func BenchmarkLoadDHCPv4Records(b *testing.B) {
 	b.ReportAllocs()
 	logger.WithNoStdOutErr()
@@ -76,9 +70,6 @@ func BenchmarkLoadDHCPv4Records(b *testing.B) {
 	}
 }
 
-// benchLeaseFileClientID writes a 10k-record DHCPv4 lease file keyed on
-// option 61 client identifiers and returns its path together with the raw
-// identifier bytes in the order written.
 func benchLeaseFileClientID(b *testing.B) (string, [][]byte) {
 	b.Helper()
 
@@ -98,8 +89,6 @@ func benchLeaseFileClientID(b *testing.B) (string, [][]byte) {
 	return path, ids
 }
 
-// BenchmarkHandler4LookupClientID mirrors BenchmarkHandler4Lookup for the
-// key:client-id path, so the new lookup mode has its own numbers.
 func BenchmarkHandler4LookupClientID(b *testing.B) {
 	b.ReportAllocs()
 	logger.WithNoStdOutErr()
@@ -118,12 +107,8 @@ func BenchmarkHandler4LookupClientID(b *testing.B) {
 	}
 }
 
-// BenchmarkLoadDHCPv4RecordsClientID mirrors BenchmarkLoadDHCPv4Records for
-// the key:client-id path. There is no exported per-mode loader, only
-// LoadDHCPv4Records's fixed MAC keying, so this goes through Setup4 instead;
-// Setup4's own overhead (arg parsing, one log line) is fixed cost paid once
-// per iteration by both benchmarks and negligible next to parsing 10k lines,
-// so it doesn't skew the mac-vs-client-id comparison.
+// No per-mode loader exists (LoadDHCPv4Records only keys on MAC), so this goes
+// through Setup4; its fixed per-call overhead is negligible against parsing 10k lines.
 func BenchmarkLoadDHCPv4RecordsClientID(b *testing.B) {
 	b.ReportAllocs()
 	logger.WithNoStdOutErr()

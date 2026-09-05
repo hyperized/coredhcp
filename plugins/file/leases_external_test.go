@@ -15,10 +15,8 @@ import (
 	"github.com/coredhcp/coredhcp/plugins/file"
 )
 
-// registeredSources returns every source setup registered under name, and
-// drops them again when the test finishes so the next test does not see this
-// instance. The server4 and server6 instances of this plugin reading one file
-// share a name, so this returns a slice where the other plugins return one.
+// Unregisters in Cleanup since the source registry is global. Server4 and
+// server6 instances sharing a file share a name, hence the slice return.
 func registeredSources(t *testing.T, name string) []leases.Source {
 	t.Helper()
 	var found []leases.Source
@@ -78,9 +76,8 @@ func TestBothFamiliesRegisterSeparately(t *testing.T) {
 	_, err = file.Plugin.Setup6(path)
 	require.NoError(t, err)
 
-	// Two instances of the plugin on one file are two sources. They report
-	// the same name, which is why a reader filtering by source has to expect
-	// more than one.
+	// Same file, two Setup6 calls: two sources sharing one name, so filtering
+	// by source name can yield more than one match.
 	assert.Len(t, registeredSources(t, "file "+path), 2)
 }
 

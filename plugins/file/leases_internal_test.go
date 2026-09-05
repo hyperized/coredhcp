@@ -118,7 +118,6 @@ func TestPools(t *testing.T) {
 		recs:   map[string]netip.Addr{"00:11:22:33:44:55": netip.MustParseAddr("10.0.0.1")},
 	}
 
-	// Reservations are not a pool: there is no address space this plugin
-	// manages and nothing to compute a utilisation against.
+	// Reservations aren't a pool: no address space to manage, nothing to compute utilisation against.
 	assert.Nil(t, s.Pools())
 }

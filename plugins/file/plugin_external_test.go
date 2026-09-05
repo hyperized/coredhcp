@@ -49,8 +49,7 @@ func TestLoadDHCPv4Records(t *testing.T) {
 		{name: "invalid MAC address", contents: "abcd 192.0.2.102\n", wantErr: true},
 		{name: "invalid IP address", contents: "22:33:44:55:66:77 bcde\n", wantErr: true},
 		{
-			// The MAC is the map key, so the second line overwrites the
-			// first rather than producing two entries.
+			// The MAC is the map key, so the second line overwrites rather than adding an entry.
 			name:      "duplicate MAC address is allowed",
 			contents:  "aa:11:11:11:11:11 1.2.3.4\nAA:11:11:11:11:11 5.6.7.8\n",
 			wantCount: 1,
@@ -113,8 +112,7 @@ func TestLoadDHCPv6Records(t *testing.T) {
 		{name: "invalid MAC address", contents: "abcd 2001:db8::10:3\n", wantErr: true},
 		{name: "invalid IP address", contents: "22:33:44:55:66:77 bcde\n", wantErr: true},
 		{
-			// The MAC is the map key, so the second line overwrites the
-			// first rather than producing two entries.
+			// The MAC is the map key, so the second line overwrites rather than adding an entry.
 			name:      "duplicate MAC address is allowed",
 			contents:  "aa:11:11:11:11:11 2001:db8::10:1\nAA:11:11:11:11:11 2001:db8::10:2\n",
 			wantCount: 1,
@@ -219,9 +217,8 @@ func TestHandler4(t *testing.T) {
 		assert.Nil(t, result.YourIPAddr)
 	})
 
-	// A static reservation has nothing to free, so RELEASE and DECLINE from a
-	// known MAC must pass through untouched rather than getting the reserved
-	// address stamped in and the chain cut short.
+	// A static reservation has nothing to free, so RELEASE/DECLINE from a
+	// known MAC must pass through untouched rather than getting the address stamped in.
 	releaseDeclineCases := []struct {
 		name string
 		mt   dhcpv4.MessageType
@@ -243,8 +240,7 @@ func TestHandler4(t *testing.T) {
 		})
 	}
 
-	// Guard against the RELEASE/DECLINE check swallowing message types that
-	// must still get the reserved address.
+	// Guards against the RELEASE/DECLINE check swallowing message types that should still get the address.
 	regularCases := []struct {
 		name string
 		mt   dhcpv4.MessageType
@@ -300,8 +296,7 @@ func TestHandler6(t *testing.T) {
 		}
 	})
 
-	// A Reply to a Release or Decline must not hand the address back to the
-	// client, even for a MAC with a known reservation.
+	// Reply to Release/Decline must not hand the address back, even for a known reservation.
 	noIANACases := []struct {
 		name string
 		mt   dhcpv6.MessageType
@@ -325,8 +320,7 @@ func TestHandler6(t *testing.T) {
 		})
 	}
 
-	// Guard against the Release/Decline check swallowing message types that
-	// must still get their IA_NA.
+	// Guards against the Release/Decline check swallowing message types that should still get an IA_NA.
 	t.Run("Request from a known MAC still gets its IA_NA", func(t *testing.T) {
 		claddr, _ := net.ParseMAC(knownMAC)
 		req, err := dhcpv6.NewSolicit(claddr)
@@ -344,8 +338,6 @@ func TestHandler6(t *testing.T) {
 	})
 
 	t.Run("cannot decapsulate", func(t *testing.T) {
-		// A RelayMessage with no embedded relay-message option fails to
-		// decapsulate.
 		req := &dhcpv6.RelayMessage{MessageType: dhcpv6.MessageTypeRelayForward}
 		resp, err := dhcpv6.NewMessage()
 		require.NoError(t, err)
@@ -367,8 +359,7 @@ func TestHandler6(t *testing.T) {
 	})
 
 	t.Run("cannot extract MAC", func(t *testing.T) {
-		// An IA_NA is present (so the OneIANA check passes) but there is no
-		// client ID option to derive a MAC from.
+		// IA_NA present so the OneIANA check passes, but no client ID option to derive a MAC from.
 		req, err := dhcpv6.NewMessage(dhcpv6.WithIANA())
 		require.NoError(t, err)
 		resp, err := dhcpv6.NewMessage()
@@ -381,12 +372,8 @@ func TestHandler6(t *testing.T) {
 	})
 }
 
-// TestAutorefresh exercises the full autorefresh lifecycle: the initial load,
-// picking up a valid update, surviving a malformed update without losing the
-// previously loaded leases, and recovering once a valid file is written
-// again. All waits use require.Eventually against directly observable state
-// rather than fixed sleeps: handler responses, and the logged warning for
-// the otherwise invisible failed-reload case.
+// All waits use require.Eventually against observable state (handler
+// responses, the logged warning) rather than fixed sleeps, since a failed reload is otherwise invisible.
 func TestAutorefresh(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "leases.txt")
@@ -422,17 +409,12 @@ func TestAutorefresh(t *testing.T) {
 
 	require.True(t, resolves(mac1)(), "initial lease must resolve right after setup")
 
-	// A valid update should be picked up.
 	require.NoError(t, os.WriteFile(path, []byte(mac1+" 2001:db8::10:1\n"+mac2+" 2001:db8::10:2\n"), 0o600))
 	require.Eventually(t, resolves(mac2), 5*time.Second, 20*time.Millisecond,
 		"autorefresh did not pick up the newly added record")
 
-	// A malformed update must fail the reload (logging a warning) without
-	// disturbing the previously loaded leases. It is written in place rather
-	// than with os.WriteFile, which truncates first: the watcher can reload
-	// between the truncate and the write, and an empty file is a valid file
-	// with no leases, so the leases would already be gone before the bad
-	// content ever landed.
+	// Written in place, not via os.WriteFile: that truncates first, and the watcher
+	// could reload the resulting empty file (a valid, lease-less file) before the bad content lands.
 	overwrite(t, path, "this is not a valid lease line\n")
 	require.Eventually(t, func() bool {
 		data, err := os.ReadFile(logPath)
@@ -444,16 +426,14 @@ func TestAutorefresh(t *testing.T) {
 	assert.True(t, resolves(mac1)(), "previously loaded lease must keep resolving after a bad reload")
 	assert.True(t, resolves(mac2)(), "previously loaded lease must keep resolving after a bad reload")
 
-	// The watcher goroutine must still be running after the failed reload:
-	// a further valid update should be picked up too.
+	// Confirms the watcher goroutine is still running after the failed reload, not wedged.
 	require.NoError(t, os.WriteFile(path, []byte(mac1+" 2001:db8::10:1\n"+mac3+" 2001:db8::10:3\n"), 0o600))
 	require.Eventually(t, resolves(mac3), 5*time.Second, 20*time.Millisecond,
 		"autorefresh did not recover after a bad reload")
 }
 
-// overwrite replaces the start of path with data without truncating it, so a
-// watcher never sees the file empty. What was there before stays on after the
-// new content, which is fine for content that is meant to be malformed.
+// Writes without truncating so a watcher never observes an empty file; any
+// leftover tail is harmless since the content here is meant to be malformed.
 func overwrite(t *testing.T, path, data string) {
 	t.Helper()
 	f, err := os.OpenFile(path, os.O_WRONLY, 0o600)
@@ -463,9 +443,6 @@ func overwrite(t *testing.T, path, data string) {
 	require.NoError(t, f.Close())
 }
 
-// TestKeyModeFamilyRejection checks that key:duid and key:client-id are
-// refused by the family that cannot produce them, naming the mode in the
-// error, and that key:mac works on both.
 func TestKeyModeFamilyRejection(t *testing.T) {
 	pathV4 := writeLeases(t, "aa:11:22:33:44:55 192.0.2.1\n")
 	pathV6 := writeLeases(t, "aa:11:22:33:44:55 2001:db8::10:1\n")
@@ -493,8 +470,6 @@ func TestKeyModeFamilyRejection(t *testing.T) {
 	})
 }
 
-// TestArgumentOrderAndUnknown checks that the two optional arguments are
-// accepted in either order, and that anything else fails setup by name.
 func TestArgumentOrderAndUnknown(t *testing.T) {
 	path := writeLeases(t, "0x00030001aabbccddeeff 2001:db8::10:1\n")
 
@@ -521,10 +496,6 @@ func TestArgumentOrderAndUnknown(t *testing.T) {
 	})
 }
 
-// TestHandler4KeyClientID exercises key:client-id end to end: every hex
-// spelling of the same identifier resolving the same lease, the text: form,
-// its empty-value error, passing a request with no option 61 through
-// untouched, and two spellings of one identifier collapsing to one record.
 func TestHandler4KeyClientID(t *testing.T) {
 	claddr, err := net.ParseMAC("aa:11:22:33:44:55")
 	require.NoError(t, err)
@@ -600,16 +571,11 @@ func TestHandler4KeyClientID(t *testing.T) {
 
 		result, stop := h4(req, resp)
 		assert.True(t, stop)
-		// The second spelling of the identifier overwrites the record the
-		// first spelling wrote.
+		// The second spelling overwrites the record the first spelling wrote.
 		assert.Equal(t, net.IP(netip.MustParseAddr("192.0.2.71").AsSlice()), result.YourIPAddr)
 	})
 }
 
-// TestHandler6KeyDUID mirrors TestHandler4KeyClientID for key:duid: hex
-// spellings resolving the same lease, a request with no client ID passing
-// through, a DUID over the length cap passing through, and two spellings of
-// one DUID collapsing to one record.
 func TestHandler6KeyDUID(t *testing.T) {
 	duid := &dhcpv6.DUIDLL{
 		HWType:        iana.HWTypeEthernet,
@@ -693,14 +659,11 @@ func TestHandler6KeyDUID(t *testing.T) {
 		result, stop := h6(newReq(t), resp)
 		assert.False(t, stop)
 		opt := result.GetOneOption(dhcpv6.OptionIANA)
-		// The second spelling of the DUID overwrites the record the first
-		// spelling wrote.
+		// The second spelling overwrites the record the first spelling wrote.
 		assert.Contains(t, opt.String(), "IP=2001:db8::10:2")
 	})
 }
 
-// TestMalformedLeaseLines checks that a bad line's error names the line it
-// came from, across the field-count check and every key-mode parser.
 func TestMalformedLeaseLines(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -771,8 +734,7 @@ func TestMalformedLeaseLines(t *testing.T) {
 	}
 }
 
-// TestAutorefreshDUID mirrors TestAutorefresh for a key:duid lease file:
-// autorefresh has to keep working once the lookup key is no longer the MAC.
+// Mirrors TestAutorefresh with key:duid, since the lookup key is no longer the MAC.
 func TestAutorefreshDUID(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "leases.txt")
@@ -814,15 +776,12 @@ func TestAutorefreshDUID(t *testing.T) {
 
 	require.True(t, resolves(duid1)(), "initial lease must resolve right after setup")
 
-	// A valid update should be picked up.
 	require.NoError(t, os.WriteFile(path,
 		[]byte(leaseLine(duid1, "2001:db8::10:1")+leaseLine(duid2, "2001:db8::10:2")), 0o600))
 	require.Eventually(t, resolves(duid2), 5*time.Second, 20*time.Millisecond,
 		"autorefresh did not pick up the newly added DUID record")
 
-	// A malformed update must fail the reload without disturbing the
-	// previously loaded leases. See TestAutorefresh for why this is written
-	// in place rather than with os.WriteFile.
+	// Written in place rather than os.WriteFile; see TestAutorefresh for why.
 	overwrite(t, path, "this is not a valid lease line\n")
 	require.Eventually(t, func() bool {
 		data, err := os.ReadFile(logPath)
@@ -834,7 +793,7 @@ func TestAutorefreshDUID(t *testing.T) {
 	assert.True(t, resolves(duid1)(), "previously loaded lease must keep resolving after a bad reload")
 	assert.True(t, resolves(duid2)(), "previously loaded lease must keep resolving after a bad reload")
 
-	// The watcher goroutine must still be running after the failed reload.
+	// Confirms the watcher goroutine is still running after the failed reload, not wedged.
 	require.NoError(t, os.WriteFile(path,
 		[]byte(leaseLine(duid1, "2001:db8::10:1")+leaseLine(duid3, "2001:db8::10:3")), 0o600))
 	require.Eventually(t, resolves(duid3), 5*time.Second, 20*time.Millisecond,

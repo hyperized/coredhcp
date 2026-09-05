@@ -12,7 +12,6 @@ import (
 	"testing"
 )
 
-// validRecordsSeedV4/V6 are well-formed leases file bodies for each parser.
 const validRecordsSeedV4 = "00:11:22:33:44:aa 192.0.2.100\n" +
 	" 11:BB:33:DD:55:FF \t 192.0.2.101  # trailing comment\n" +
 	" # standalone comment\n"
@@ -21,10 +20,8 @@ const validRecordsSeedV6 = "00:11:22:33:44:aa 2001:db8::10:1\n" +
 	" 11:BB:33:DD:55:FF \t 2001:db8::10:2  # trailing comment\n" +
 	" # standalone comment\n"
 
-// fuzzRecordsSeeds are shared between the v4 and v6 fuzz targets: each
-// exercises the same malformed-input branches (missing field, bad MAC, bad
-// IP, wrong address family) that plugin_external_test.go's table already
-// covers for the exported loaders.
+// Exercises the malformed-input branches (missing field, bad MAC, bad IP,
+// wrong family) already covered for the exported loaders in plugin_external_test.go.
 var fuzzRecordsSeeds = []string{
 	"",
 	"foo\n",
@@ -36,11 +33,8 @@ var fuzzRecordsSeeds = []string{
 	"\x00\x01\x02 not-a-line-at-all\xff",
 }
 
-// FuzzParseDHCPv4Records fuzzes parseDHCPRecords directly with arbitrary
-// bytes for the MAC-keyed v4 case, sidestepping the filesystem so the fuzz
-// engine spends its time on the line/field/address parsing logic. The
-// invariant is: return an error or a result, never panic; and on success
-// every returned address must actually be a valid IPv4 address.
+// Sidesteps the filesystem so fuzzing spends its budget on parsing logic.
+// Must never panic; on success every address must be a valid IPv4 address.
 func FuzzParseDHCPv4Records(f *testing.F) {
 	f.Add([]byte(validRecordsSeedV4))
 	for _, s := range fuzzRecordsSeeds {
@@ -63,8 +57,6 @@ func FuzzParseDHCPv4Records(f *testing.F) {
 	})
 }
 
-// FuzzParseDHCPv6Records mirrors FuzzParseDHCPv4Records for the IPv6,
-// MAC-keyed case.
 func FuzzParseDHCPv6Records(f *testing.F) {
 	f.Add([]byte(validRecordsSeedV6))
 	for _, s := range fuzzRecordsSeeds {
@@ -87,9 +79,7 @@ func FuzzParseDHCPv6Records(f *testing.F) {
 	})
 }
 
-// duidRecordsSeeds cover the hex-form variations key:duid accepts, plus the
-// over-long DUID that has to be rejected rather than hex encoded onto every
-// request.
+// Includes an over-long DUID, which must be rejected rather than hex-encoded regardless.
 var duidRecordsSeeds = []string{
 	"0x00030001aabbccddeeff 2001:db8::10:1\n",
 	"00:03:00:01:aa:bb:cc:dd:ee:ff 2001:db8::10:1\n",
@@ -100,9 +90,7 @@ var duidRecordsSeeds = []string{
 	"0x 2001:db8::10:1\n",
 }
 
-// FuzzParseDHCPRecordsDUID fuzzes parseDHCPRecords for key:duid. Besides the
-// no-panic invariant, every returned key must be the lowercase hex encoding
-// parseDUIDField promises, at even length.
+// Every returned key must be the lowercase, even-length hex encoding parseDUIDField promises.
 func FuzzParseDHCPRecordsDUID(f *testing.F) {
 	for _, s := range duidRecordsSeeds {
 		f.Add([]byte(s))
@@ -125,8 +113,6 @@ func FuzzParseDHCPRecordsDUID(f *testing.F) {
 	})
 }
 
-// clientIDRecordsSeeds cover the hex forms and the text: form key:client-id
-// accepts.
 var clientIDRecordsSeeds = []string{
 	"0x01aabbccddeeff 10.0.0.1\n",
 	"01:aa:bb:cc:dd:ee:ff 10.0.0.1\n",
@@ -136,8 +122,6 @@ var clientIDRecordsSeeds = []string{
 	"0xabc 10.0.0.5\n",
 }
 
-// FuzzParseDHCPRecordsClientID mirrors FuzzParseDHCPRecordsDUID for
-// key:client-id.
 func FuzzParseDHCPRecordsClientID(f *testing.F) {
 	for _, s := range clientIDRecordsSeeds {
 		f.Add([]byte(s))
@@ -160,8 +144,7 @@ func FuzzParseDHCPRecordsClientID(f *testing.F) {
 	})
 }
 
-// assertValidHexKey checks the invariant every key-mode parser promises for
-// a canonical map key: lowercase hex, so it decodes and round-trips cleanly.
+// Every key-mode parser promises lowercase, round-trippable hex as its canonical map key.
 func assertValidHexKey(t *testing.T, key string) {
 	t.Helper()
 	if len(key)%2 != 0 {
