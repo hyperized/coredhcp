@@ -84,17 +84,24 @@ jobs:
         env:
           GOCOVERDIR: ${{ github.workspace }}/.cover
         run: |
+          # A failed build or a failed run has to fail the job. The previous
+          # version of this loop only emitted an ::error annotation, which
+          # GitHub shows but does not act on, so a broken integration test
+          # went green.
+          set -eu
           mkdir -p "$GOCOVERDIR"
           for d in test/integration/*/; do
               pushd "$d"
+              # A directory with no integration-tagged package is not an
+              # error; one that has a package must build and pass.
+              if ! go list -tags=integration . >/dev/null 2>&1; then
+                  echo "::notice file=${d}::no integration tests in ${d}"
+                  popd
+                  continue
+              fi
               go build -tags=integration -race -cover -coverpkg=github.com/coredhcp/coredhcp/... .
               testbin=$(basename "$d")
-              test -x "${testbin}" || echo "::error file=${d}::missing binary for integration test ${d}"
-              # only run it if it was built - i.e. if there are integ tests
-              test -x "${testbin}" && sudo --preserve-env=GOCOVERDIR "./${testbin}"
-              if [ $? -ne 0 ]; then
-                echo "::error file=${d}::Execution of integration tests for ${d} failed"
-              fi
+              sudo --preserve-env=GOCOVERDIR "./${testbin}"
               popd
           done
           go tool covdata textfmt -i="$GOCOVERDIR" -o=coverage.txt

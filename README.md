@@ -207,6 +207,12 @@ volumes:
   coredhcp-leasedb:
 ```
 
+One hardening setting conflicts with this: file capabilities are ignored when
+the process may not gain privileges, so `security_opt: [no-new-privileges:true]`
+in compose, or `allowPrivilegeEscalation: false` in a Kubernetes security
+context, makes the bind of udp/67 fail. Leave that setting off for this
+container; the capability set above is already the minimum.
+
 The `range` plugin creates its lease database at the path the config gives it,
 and uid 65532 has to be able to write there. `/var/lib/coredhcp` in the image
 belongs to that user, and a named volume mounted over it inherits that owner. A

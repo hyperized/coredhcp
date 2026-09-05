@@ -12,3 +12,6 @@ coverage.txt
 bin/
 coverage.out
 server6
+
+# docker compose reads variables from a .env beside each compose file; never commit one
+.env

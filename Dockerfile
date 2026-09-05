@@ -1,6 +1,6 @@
 # The build stage runs on the build host's architecture and cross-compiles,
 # so multi-arch image builds don't emulate the Go compiler.
-FROM --platform=$BUILDPLATFORM golang:1.26 AS build
+FROM --platform=$BUILDPLATFORM golang:1.26@sha256:9d2f36f06329b2a141b9db99ffa32765cf695ee57b813ca29e245e8670bcbfff AS build
 ARG TARGETOS TARGETARCH
 
 # setcap, from libcap2-bin, only writes an extended attribute on the file, so
