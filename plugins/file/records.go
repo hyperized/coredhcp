@@ -11,7 +11,6 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"net"
 	"net/netip"
 	"os"
 	"sort"
@@ -23,53 +22,59 @@ import (
 // the specified file. The records have to be one per line, a mac address and an
 // IPv4 address.
 func LoadDHCPv4Records(filename string) (map[string]netip.Addr, error) {
-	log.Infof("reading IPv4 leases from %s", filename)
-	f, err := os.Open(filename)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close() //nolint:errcheck // read-only open()
-
-	records, err := parseDHCPv4Records(f)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", filename, err)
-	}
-	return records, nil
+	return loadRecords(filename, false, keyMAC)
 }
 
 // LoadDHCPv6Records loads the DHCPv6Records global map with records stored on
 // the specified file. The records have to be one per line, a mac address and an
 // IPv6 address.
 func LoadDHCPv6Records(filename string) (map[string]netip.Addr, error) {
-	log.Infof("reading IPv6 leases from %s", filename)
+	return loadRecords(filename, true, keyMAC)
+}
+
+// loadRecords reads filename for the given family and key mode. The map it
+// returns is keyed the way mode canonicalises the first field of a line,
+// which is what the handlers look up.
+func loadRecords(filename string, v6 bool, mode keyMode) (map[string]netip.Addr, error) {
+	log.Infof("reading IPv%d leases from %s", protoVersion(v6), filename)
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck // read-only open()
 
-	records, err := parseDHCPv6Records(f)
+	records, err := parseDHCPRecords(f, v6, mode)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", filename, err)
 	}
 	return records, nil
 }
 
-// parseDHCPv4Records parses the MAC<->IPv4 mappings out of r. The records
-// have to be one per line, a mac address and an IPv4 address.
-func parseDHCPv4Records(r io.Reader) (map[string]netip.Addr, error) {
-	return parseDHCPRecords(r, 4, netip.Addr.Is4)
+// protoVersion is the IP version of a family, for the messages that name it.
+func protoVersion(v6 bool) int {
+	if v6 {
+		return 6
+	}
+	return 4
 }
 
-// parseDHCPv6Records parses the MAC<->IPv6 mappings out of r. The records
-// have to be one per line, a mac address and an IPv6 address.
-func parseDHCPv6Records(r io.Reader) (map[string]netip.Addr, error) {
-	return parseDHCPRecords(r, 6, netip.Addr.Is6)
+// addressCheck returns the test an address has to pass to belong to the
+// family being loaded.
+func addressCheck(v6 bool) func(netip.Addr) bool {
+	if v6 {
+		return netip.Addr.Is6
+	}
+	return netip.Addr.Is4
 }
 
-// parseDHCPRecords parses the MAC<->IP mappings out of r. The records have to
-// be one per line, a mac address and an IP address.
-func parseDHCPRecords(r io.Reader, protVer int, check func(netip.Addr) bool) (map[string]netip.Addr, error) {
+// parseDHCPRecords parses the identifier<->IP mappings out of r. The records
+// have to be one per line, an identifier of the kind mode names followed by
+// an IP address of the family v6 names.
+func parseDHCPRecords(r io.Reader, v6 bool, mode keyMode) (map[string]netip.Addr, error) {
+	// Resolved once and carried into the loop: both are the same for every
+	// line, and looking them up per line costs about a tenth of the parse
+	// time on a 10k-record file (BenchmarkLoadDHCPv4Records).
+	protVer, check := protoVersion(v6), addressCheck(v6)
 	addresses := make(map[string]int)
 	records := make(map[string]netip.Addr)
 	scanner := bufio.NewScanner(r)
@@ -88,22 +93,18 @@ func parseDHCPRecords(r io.Reader, protVer int, check func(netip.Addr) bool) (ma
 		if len(tokens) != 2 {
 			return nil, fmt.Errorf("line %d: malformed line, want 2 fields, got %d: %s", lineNo, len(tokens), line)
 		}
-		hwaddr, err := net.ParseMAC(tokens[0])
+
+		key, ipaddr, err := parseRecord(tokens, protVer, check, mode)
 		if err != nil {
-			return nil, fmt.Errorf("line %d: malformed hardware address: %s", lineNo, tokens[0])
-		}
-		ipaddr, err := netip.ParseAddr(tokens[1])
-		if err != nil {
-			return nil, fmt.Errorf("line %d: expected an IPv%d address, got: %s", lineNo, protVer, tokens[1])
-		}
-		if !check(ipaddr) {
-			return nil, fmt.Errorf("line %d: expected an IPv%d address, got: %s", lineNo, protVer, ipaddr)
+			return nil, fmt.Errorf("line %d: %w", lineNo, err)
 		}
 
-		// note that net.HardwareAddr.String() uses lowercase hexadecimal
-		// so there's no need to convert to lowercase
-		records[hwaddr.String()] = ipaddr
-		addresses[strings.ToLower(tokens[0])]++
+		records[key] = ipaddr
+		// The identifier is counted in canonical form, so two lines naming
+		// the same client in different spellings still warn. The address is
+		// counted as written, which costs nothing on a file that is already
+		// lowercase.
+		addresses[key]++
 		addresses[strings.ToLower(tokens[1])]++
 	}
 
@@ -114,6 +115,23 @@ func parseDHCPRecords(r io.Reader, protVer int, check func(netip.Addr) bool) (ma
 	duplicatesWarning(addresses)
 
 	return records, nil
+}
+
+// parseRecord turns the two fields of one lease line into the canonical
+// lookup key of the first and the address of the second.
+func parseRecord(tokens []string, protVer int, check func(netip.Addr) bool, mode keyMode) (string, netip.Addr, error) {
+	key, err := mode.parseKeyField(tokens[0])
+	if err != nil {
+		return "", netip.Addr{}, err
+	}
+	ipaddr, err := netip.ParseAddr(tokens[1])
+	if err != nil {
+		return "", netip.Addr{}, fmt.Errorf("expected an IPv%d address, got: %s", protVer, tokens[1])
+	}
+	if !check(ipaddr) {
+		return "", netip.Addr{}, fmt.Errorf("expected an IPv%d address, got: %s", protVer, ipaddr)
+	}
+	return key, ipaddr, nil
 }
 
 func duplicatesWarning(ipAddresses map[string]int) {

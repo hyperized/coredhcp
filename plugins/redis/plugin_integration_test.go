@@ -25,22 +25,26 @@ import (
 )
 
 // integrationPlugin builds an instance against REDIS_ADDR under a key prefix
-// nothing else is using.
-func integrationPlugin(t *testing.T) *pluginState {
+// nothing else is using. extra carries any config arguments beyond the
+// address, credentials and per-run prefix, such as key:duid.
+func integrationPlugin(t *testing.T, v6 bool, extra ...string) *pluginState {
 	t.Helper()
 	addr := os.Getenv("REDIS_ADDR")
 	if addr == "" {
 		t.Skip("REDIS_ADDR is not set, skipping: this test needs a real redis server")
 	}
 	// Keys are namespaced per run, so a shared server or a run that left
-	// something behind cannot decide the outcome of this one.
+	// something behind cannot decide the outcome of this one. The prefix is
+	// explicit, so it wins over whatever default the key mode in extra would
+	// otherwise pick.
 	prefix := fmt.Sprintf("coredhcp-itest:%d:%d:", os.Getpid(), time.Now().UnixNano())
 	args := []string{addr, "prefix:" + prefix, "timeout:5s"}
 	if os.Getenv("REDIS_PASSWORD") != "" {
 		args = append(args, "password:env:REDIS_PASSWORD")
 	}
+	args = append(args, extra...)
 
-	p, err := setupState(args...)
+	p, err := setupState(v6, args...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = p.client.Close() })
 
@@ -50,18 +54,18 @@ func integrationPlugin(t *testing.T) *pluginState {
 	return p
 }
 
-// writeFixture stores one client's hash through the plugin's own client and
-// removes it again afterwards.
-func writeFixture(t *testing.T, p *pluginState, fields map[string]string) {
+// writeFixture stores one client's hash, keyed by ident under p's prefix,
+// through the plugin's own client, and removes it again afterwards.
+func writeFixture(t *testing.T, p *pluginState, ident string, fields map[string]string) {
 	t.Helper()
-	key := p.prefix + testMAC.String()
+	key := p.prefix + ident
 	require.NoError(t, p.client.hset(key, fields))
 	t.Cleanup(func() { assert.NoError(t, p.client.del(key)) })
 }
 
 func TestIntegrationHandler4(t *testing.T) {
-	p := integrationPlugin(t)
-	writeFixture(t, p, map[string]string{
+	p := integrationPlugin(t, false)
+	writeFixture(t, p, testMAC.String(), map[string]string{
 		fieldIPv4:      "10.0.0.5/24",
 		fieldRouter:    "10.0.0.1",
 		fieldDNS:       "10.0.0.2,2001:db8::2",
@@ -82,8 +86,8 @@ func TestIntegrationHandler4(t *testing.T) {
 }
 
 func TestIntegrationHandler6(t *testing.T) {
-	p := integrationPlugin(t)
-	writeFixture(t, p, map[string]string{
+	p := integrationPlugin(t, true)
+	writeFixture(t, p, testMAC.String(), map[string]string{
 		fieldIPv6:      "2001:db8::10:1",
 		fieldDNS:       "10.0.0.2,2001:db8::2",
 		fieldLeaseTime: "6h",
@@ -110,7 +114,7 @@ func TestIntegrationHandler6(t *testing.T) {
 // TestIntegrationUnknownMAC checks the pass-through against a real server:
 // an empty hash has to look different from a failed lookup.
 func TestIntegrationUnknownMAC(t *testing.T) {
-	p := integrationPlugin(t)
+	p := integrationPlugin(t, false)
 
 	req, resp := v4Exchange(t, dhcpv4.MessageTypeDiscover)
 	got, stop := p.Handler4(req, resp)
@@ -123,8 +127,8 @@ func TestIntegrationUnknownMAC(t *testing.T) {
 // connection survives being handed back and picked up again, which the unit
 // tests only prove against a server of our own making.
 func TestIntegrationPoolReuse(t *testing.T) {
-	p := integrationPlugin(t)
-	writeFixture(t, p, map[string]string{fieldIPv4: "10.0.0.5"})
+	p := integrationPlugin(t, false)
+	writeFixture(t, p, testMAC.String(), map[string]string{fieldIPv4: "10.0.0.5"})
 
 	for i := range 5 {
 		req, resp := v4Exchange(t, dhcpv4.MessageTypeDiscover)
@@ -134,4 +138,39 @@ func TestIntegrationPoolReuse(t *testing.T) {
 		assert.Equal(t, "10.0.0.5", got.YourIPAddr.String())
 	}
 	assert.Equal(t, 1, p.client.idleCount(), "one connection should serve them all")
+}
+
+// TestIntegrationHandler6DUIDKey covers key:duid against a real server. The
+// fixture ident matches v6Exchange's default client ID, a DUID-LL over
+// testMAC, hex encoded the way the package doc's key:duid example shows it.
+func TestIntegrationHandler6DUIDKey(t *testing.T) {
+	p := integrationPlugin(t, true, "key:duid")
+	writeFixture(t, p, "00030001aabbccddeeff", map[string]string{fieldIPv6: "2001:db8::10:1"})
+
+	req, resp := v6Exchange(t)
+	got, stop := p.Handler6(req, resp)
+
+	require.NotNil(t, got)
+	assert.False(t, stop)
+	iana, ok := got.GetOneOption(dhcpv6.OptionIANA).(*dhcpv6.OptIANA)
+	require.True(t, ok, "want an IA_NA in the response")
+	addr := iana.Options.OneAddress()
+	require.NotNil(t, addr)
+	assert.Equal(t, "2001:db8::10:1", addr.IPv6Addr.String())
+}
+
+// TestIntegrationHandler4ClientIDKey covers key:client-id against a real
+// server. The fixture ident is the package doc's own example: an RFC 2132
+// type 1 (hardware address) client identifier carrying testMAC.
+func TestIntegrationHandler4ClientIDKey(t *testing.T) {
+	p := integrationPlugin(t, false, "key:client-id")
+	writeFixture(t, p, "01aabbccddeeff", map[string]string{fieldIPv4: "10.0.0.5"})
+
+	req, resp := v4Exchange(t, dhcpv4.MessageTypeDiscover,
+		dhcpv4.WithOption(dhcpv4.OptClientIdentifier([]byte{0x01, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff})))
+	got, stop := p.Handler4(req, resp)
+
+	require.NotNil(t, got)
+	assert.True(t, stop)
+	assert.Equal(t, "10.0.0.5", got.YourIPAddr.String())
 }

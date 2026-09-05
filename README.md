@@ -250,9 +250,9 @@ This fork adds six plugins upstream does not have built in:
   NetBox on the interface that carries its MAC, devices and virtual machines
   alike, with a bounded cache in front of the API (NetBox 4.2 or newer)
 * [redis](plugins/redis/) serves static leases, router, DNS and lease time
-  from Redis hashes keyed by MAC, over a small RESP client of its own rather
-  than a client library; `redis://` and `rediss://` URLs, AUTH and database
-  selection are supported
+  from Redis hashes keyed by MAC, DUID or client identifier, over a small RESP
+  client of its own rather than a client library; `redis://` and `rediss://`
+  URLs, AUTH and database selection are supported
 
 The last two started as the `netbox` and `redis` plugins in the
 [coredhcp/plugins](https://github.com/coredhcp/plugins) repository, which has
@@ -289,6 +289,17 @@ this server by option 54 rather than by `siaddr`, so two servers on one
 segment stop both answering the same REQUEST. It also drops a RELEASE or
 DECLINE that carries no option 54 at all, which RFC 2131 Table 5 makes a MUST
 on both.
+
+Both `file` and `redis` take a `key:` argument, so a reservation can be keyed
+on the client's DUID or on its option 61 client identifier instead of its MAC.
+A MAC is the wrong key more often than it looks: a DUID-EN or a DUID-UUID
+carries no link-layer address at all, and behind a relay that sends no client
+link-layer address option there is nothing to extract either. `key:duid` is
+`server6` only and `key:client-id` is `server4` only; either one under the
+wrong family fails at startup instead of quietly matching nothing. A lease file
+carries the identifier as hex in its first field, upper or lower case, with an
+optional `0x` prefix and optional colons between the bytes. `redis` keys its
+hashes `duid:<hex>` or `client-id:<hex>` unless `prefix:` says otherwise.
 
 The `prefix` plugin got the same treatment for DHCPv6 delegations. Upstream
 wrote an expiry it never read and never called `Free`, so its pool drained
