@@ -50,6 +50,7 @@ import (
 	dhcpIana "github.com/insomniacslk/dhcp/iana"
 
 	"github.com/coredhcp/coredhcp/handler"
+	"github.com/coredhcp/coredhcp/leases"
 	"github.com/coredhcp/coredhcp/logger"
 	"github.com/coredhcp/coredhcp/plugins"
 	"github.com/coredhcp/coredhcp/plugins/allocators"
@@ -142,6 +143,11 @@ type pluginState struct {
 	// Bounds of the pool, for the CONFIRM on-link test. Written during
 	// setup, read-only after, both in 16-byte form so they compare bytewise.
 	first, last net.IP
+
+	// name, poolRange and poolSize are set at setup for the lease reader; see leases.go.
+	name      string
+	poolRange string
+	poolSize  uint64
 
 	// Address to probation-end time. No binding or database row; the
 	// allocator bit staying set is what keeps it out of circulation. Guarded
@@ -824,6 +830,9 @@ func setup6(args ...string) (handler.Handler6, error) {
 	// Started only after setup succeeds, so a failed setup can't leave a
 	// goroutine sweeping a half-built plugin.
 	p.startSweeper(p.sweepInterval)
+	// Registered last, once everything that could fail has succeeded: a
+	// reader must never find a half-built instance in the registry.
+	leases.Register(p)
 	log.Printf("Reclaiming expired DHCPv6 bindings every %s, declined addresses after %s (at most %d held back)",
 		p.sweepInterval, p.declineProbation, p.declineMax)
 	return p.Handler6, nil
@@ -862,6 +871,9 @@ func newPluginState(args ...string) (*pluginState, error) {
 		allocator:        allocator,
 		first:            first,
 		last:             last,
+		name:             "range6 " + filename,
+		poolRange:        first.String() + "-" + last.String(),
+		poolSize:         allocator.Size(),
 		declined:         make(map[string]time.Time),
 		sweepInterval:    opts.sweepInterval,
 		declineProbation: opts.declineProbation,
