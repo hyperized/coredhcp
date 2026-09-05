@@ -10,11 +10,8 @@ import (
 	"testing"
 )
 
-// FuzzParseArgs feeds arbitrary argument pairs to parseArgs and to the two
-// encoders that consume its result. The invariants: never panic, and on
-// success every argument produced exactly one entry whose URL uses one of the
-// allowed schemes, since that is what the handlers rely on when they decide
-// whether to split a URL across DHCPv4 options 66 and 67.
+// Asserts what the handlers rely on: on success every argument yields exactly
+// one entry whose URL uses an allowed scheme.
 func FuzzParseArgs(f *testing.F) {
 	for _, seed := range [][2]string{
 		{"x86-bios=tftp://10.0.0.5/undionly.kpxe", "default=http://boot.example/ipxe.efi"},

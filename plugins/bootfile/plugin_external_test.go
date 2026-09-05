@@ -26,8 +26,6 @@ const (
 	httpClass = "HTTPClient"
 )
 
-// fullConfig covers a mixed network: BIOS, UEFI on two architectures, UEFI
-// HTTP boot, an iPXE script and a catch-all.
 var fullConfig = []string{
 	"x86-bios=" + biosFile,
 	"x86-64-uefi=" + uefiFile,
@@ -72,7 +70,6 @@ func TestSetupArgValidation(t *testing.T) {
 	}
 }
 
-// request4 describes the DHCPv4 request one table case sends.
 type request4 struct {
 	archs     []iana.Arch
 	prl       []dhcpv4.OptionCode
@@ -85,8 +82,7 @@ func (r request4) build(t *testing.T) *dhcpv4.DHCPv4 {
 	t.Helper()
 	mods := []dhcpv4.Modifier{}
 	if r.noPRL {
-		// RFC 2131 section 3.5: a client that sends no parameter request
-		// list is asking for everything the server has.
+		// RFC 2131 section 3.5: no parameter request list asks for everything.
 		mods = append(mods, dhcpv4.WithoutOption(dhcpv4.OptionParameterRequestList))
 	}
 	req, err := dhcpv4.NewDiscovery(testMAC, mods...)
@@ -214,9 +210,7 @@ func TestHandler4(t *testing.T) {
 			wantBootFile: "/undionly.kpxe",
 		},
 		{
-			// An http url is never split, and a client that boots over
-			// tftp gets no HTTPClient even when the file is fetched by
-			// http, because it is the architecture that decides.
+			// The architecture, not the URL scheme, decides HTTPClient.
 			name:         "http url on a tftp architecture",
 			args:         []string{"x86-64-uefi=" + httpFile},
 			req:          request4{archs: []iana.Arch{iana.EFI_X86_64}, prl: bootOptions},
@@ -294,7 +288,6 @@ var fullConfig6 = []string{
 	"default=" + defFile6,
 }
 
-// request6 describes the DHCPv6 request one table case sends.
 type request6 struct {
 	archs   []iana.Arch
 	oro     []dhcpv6.OptionCode
@@ -439,8 +432,7 @@ func TestHandler6(t *testing.T) {
 	}
 }
 
-// assertOption6 checks one option's value, where the empty string means the
-// option must be absent.
+// An empty want means the option must be absent.
 func assertOption6(t *testing.T, resp dhcpv6.DHCPv6, code dhcpv6.OptionCode, want string) {
 	t.Helper()
 	opt := resp.GetOneOption(code)
@@ -456,9 +448,8 @@ func TestHandler6DecapsulateError(t *testing.T) {
 	h, err := bootfile.Plugin.Setup6("default=" + defFile6)
 	require.NoError(t, err)
 
-	// A relay-forward message with no embedded relay-message option is
-	// malformed: GetInnerMessage cannot decapsulate it, and the plugin must
-	// drop the request rather than replying to a packet it cannot read.
+	// Relay-forward with no relay-message option: GetInnerMessage fails and
+	// the plugin must drop rather than reply.
 	req := &dhcpv6.RelayMessage{MessageType: dhcpv6.MessageTypeRelayForward}
 	stub, err := dhcpv6.NewMessage()
 	require.NoError(t, err)

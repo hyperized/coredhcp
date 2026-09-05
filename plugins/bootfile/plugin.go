@@ -2,9 +2,9 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// Package bootfile implements a plugin that picks the network boot program
-// from the client's architecture, so BIOS, UEFI and HTTP boot machines on the
-// same network each get a file they can run.
+// Package bootfile picks the network boot program from the client's
+// architecture, so BIOS, UEFI and HTTP boot machines on one network each get
+// a file they can run.
 //
 // # Configuration
 //
@@ -12,13 +12,11 @@
 //	  plugins:
 //	    - bootfile: x86-bios=tftp://10.0.0.5/undionly.kpxe x86-64-uefi=tftp://10.0.0.5/ipxe.efi arm64-uefi=tftp://10.0.0.5/ipxe-arm64.efi ipxe=http://boot.example/boot.ipxe default=tftp://10.0.0.5/undionly.kpxe
 //
-// Every argument is one <key>=<url> pair. The order does not matter and each
-// entry may be given once. Keys are:
+// Every argument is one <key>=<url> pair, each key given at most once:
 //
-//   - an architecture name from the table below, or arch:<n> for any code
-//     from 0 to 65535 that has no name here. arch:7 and x86-64-uefi address
-//     the same entry, so giving both is a duplicate and fails setup.
-//   - ipxe, for a client that is already running iPXE.
+//   - an architecture name from the table below, or arch:<n> for a code from
+//     0 to 65535. arch:7 and x86-64-uefi are the same entry.
+//   - ipxe, for a client already running iPXE.
 //   - default, for a client whose architecture matches nothing else.
 //
 // The named architectures and their RFC 4578 codes:
@@ -30,56 +28,41 @@
 //	arm64-uefi   11     riscv64-uefi  27
 //	                    riscv64-http  28
 //
-// Every URL has to parse and use the tftp, http, https or ftp scheme. A bad
-// key, a duplicate, a malformed URL or a scheme outside that list fails setup
-// naming the offending argument, so a typo stops the server at startup rather
-// than handing clients a file they cannot fetch.
+// URLs must use the tftp, http, https or ftp scheme. A bad key, a duplicate,
+// a malformed URL or another scheme fails setup naming the argument.
 //
 // # Selection
 //
-// A client that is already running iPXE gets the ipxe entry when one is
-// configured, because iPXE has loaded and should chain to a script instead of
-// fetching itself again. It is recognised by the string iPXE in the DHCPv4
-// user class (option 77) or at the start of the vendor class (option 60), and
-// in the DHCPv6 user class (option 15) or vendor class (option 16).
-//
-// Otherwise the client's architecture list is walked in the order the client
-// sent it and the first configured architecture wins. If none matches, the
-// default entry is used. With no default configured the plugin adds nothing
-// and the request continues down the chain untouched, which leaves an
-// existing nbp or options entry free to answer instead.
+// A client already running iPXE gets the ipxe entry, recognised by the string
+// iPXE in the DHCPv4 user class (option 77) or vendor class (option 60), or
+// the DHCPv6 user class (option 15) or vendor class (option 16). Otherwise
+// the architecture list is walked in the order the client sent it and the
+// first configured architecture wins, falling back to default. Without a
+// default the request passes through untouched, leaving an nbp or options
+// entry further down the chain free to answer instead.
 //
 // # Encoding
 //
-// The wire encoding is the one the nbp plugin uses, so a single-architecture
-// site can move between the two plugins without clients noticing.
+// The wire encoding is the nbp plugin's, so a single-architecture site can
+// move between the two without clients noticing.
 //
-// For DHCPv4 a tftp URL is split into the TFTP server name (option 66) and
-// the bootfile name (option 67), dropping the scheme, the port and anything
-// else that is not host and path. An http, https or ftp URL travels whole in
-// option 67. Either option is only written when the client listed it in its
-// parameter request list.
+// DHCPv4 splits a tftp URL into the TFTP server name (option 66) and bootfile
+// name (option 67), keeping only host and path; other schemes travel whole in
+// option 67. DHCPv6 passes the URL unmodified as OPT_BOOTFILE_URL (option
+// 59), with a params query repeated as OPT_BOOTFILE_PARAM (option 60). Each
+// option is written only when the client asked for it.
 //
-// For DHCPv6 the URL is passed unmodified as OPT_BOOTFILE_URL (option 59). A
-// params key in the query string is repeated as OPT_BOOTFILE_PARAM (option
-// 60). Both are only written when the client listed them in its ORO.
+// An HTTP boot architecture also gets the vendor class string HTTPClient,
+// without which UEFI HTTP Boot ignores the reply: option 60 for DHCPv4,
+// option 16 under enterprise number 343 for DHCPv6, the pair the UEFI
+// specification defines in section 24.3.5.1.
 //
-// A client whose architecture is one of the HTTP boot codes also gets the
-// vendor class string HTTPClient back: UEFI HTTP Boot ignores a reply that
-// does not carry it. For DHCPv4 that is the class identifier (option 60); for
-// DHCPv6 it is the vendor class (option 16) under enterprise number 343, the
-// pair the UEFI specification defines for HTTP Boot in section 24.3.5.1 and
-// that EDK2 looks for when it decides whether an offer is an HTTP offer.
-//
-// Options this plugin writes replace whatever an earlier plugin set, the same
-// last-writer-wins rule the options plugin documents. A request that selects
-// no bootfile leaves the response untouched.
+// Options written here replace whatever an earlier plugin set.
 //
 // # Placement
 //
-// The plugin does not end the handler chain, so list it wherever the boot
-// options belong relative to the rest: after a plugin whose bootfile it
-// should override, before one that should override it.
+// The plugin does not end the handler chain: list it after a plugin whose
+// bootfile it should override, before one that should override it.
 package bootfile
 
 import (
@@ -108,8 +91,6 @@ var Plugin = plugins.Plugin{
 	Setup4: setup4,
 }
 
-// Setup errors that callers and tests can match with errors.Is. Errors that
-// have to quote the offending input wrap one of these with fmt.Errorf.
 var (
 	errNoEntries      = errors.New("need at least one <key>=<url> entry")
 	errMalformedEntry = errors.New("expected <key>=<url>")
@@ -121,36 +102,26 @@ var (
 )
 
 const (
-	// keyIPXE and keyDefault are the two entries that are not tied to an
-	// architecture.
 	keyIPXE    = "ipxe"
 	keyDefault = "default"
-
-	// archPrefix introduces a numeric architecture code, for the codes the
-	// IANA registry has and archNames does not.
 	archPrefix = "arch:"
 
-	// ipxeTag is the marker iPXE puts in the class options it sends. iPXE
-	// writes it as the whole user class, but a substring match also catches
-	// the builds that decorate it, and no other client has a reason to name
-	// iPXE at all.
+	// Matched as a substring: iPXE builds decorate the class string, and no
+	// other client has a reason to name iPXE at all.
 	ipxeTag = "iPXE"
 
-	// httpClient is the vendor class string a UEFI HTTP Boot client expects
-	// to see echoed back before it will fetch the bootfile URL.
+	// Echoed back to a UEFI HTTP Boot client, which discards replies without it.
 	httpClient = "HTTPClient"
 
-	// uefiEnterpriseNumber is the IANA private enterprise number the UEFI
-	// specification pairs with httpClient in the DHCPv6 vendor class option.
+	// IANA private enterprise number the UEFI spec pairs with httpClient.
 	uefiEnterpriseNumber = 343
 
-	// schemeTFTP is the one scheme DHCPv4 splits over two options.
+	// The one scheme DHCPv4 splits over two options.
 	schemeTFTP = "tftp"
 )
 
-// archNames maps a configuration key to its RFC 4578 architecture code. It is
-// an allow-list: a key that is not here and does not start with archPrefix
-// fails setup rather than being silently ignored.
+// Allow-list: a key absent here and without the archPrefix fails setup rather
+// than being silently ignored.
 var archNames = map[string]iana.Arch{
 	"x86-bios":     iana.INTEL_X86PC,
 	"x86-uefi":     iana.EFI_IA32,
@@ -165,11 +136,8 @@ var archNames = map[string]iana.Arch{
 	"riscv64-http": iana.EFI_RISCV64_HTTP,
 }
 
-// httpArchs are the architecture codes whose IANA registry entry says "boot
-// from HTTP". A client that reports one of these is doing UEFI HTTP Boot and
-// needs the HTTPClient vendor class in the reply. The set is keyed on the
-// code, so it covers an entry configured as arch:16 as well as one configured
-// as x86-64-http.
+// Architectures needing the HTTPClient vendor class. Keyed on the code so
+// arch:16 is covered as well as x86-64-http.
 var httpArchs = map[iana.Arch]struct{}{
 	iana.EFI_X86_HTTP:      {},
 	iana.EFI_X86_64_HTTP:   {},
@@ -184,13 +152,10 @@ var httpArchs = map[iana.Arch]struct{}{
 	iana.EFI_RISCV128_HTTP: {},
 }
 
-// bootSchemes is the allow-list of URL schemes a bootfile may use.
 var bootSchemes = []string{schemeTFTP, "http", "https", "ftp"}
 
-// httpClientOption and httpClientVendorClass are the replies an HTTP Boot
-// client needs to see. Both are built once and shared by every request: the
-// handlers only ever read them, so this stays safe with several listeners
-// running at the same time.
+// Built once and shared by every request; handlers only read them, so this is
+// safe with several listeners running.
 var (
 	httpClientOption = dhcpv4.OptClassIdentifier(httpClient)
 
@@ -200,16 +165,14 @@ var (
 	}
 )
 
-// bootFiles is the parsed configuration, before either family compiles it
-// into the options it puts on the wire. A nil URL means the entry was not
-// configured.
+// Parsed configuration, before either family compiles it into wire options. A
+// nil URL means the entry was not configured.
 type bootFiles struct {
 	byArch map[iana.Arch]*url.URL
 	ipxe   *url.URL
 	def    *url.URL
 }
 
-// count reports how many entries were configured, for the setup log line.
 func (b *bootFiles) count() int {
 	n := len(b.byArch)
 	if b.ipxe != nil {
@@ -221,7 +184,6 @@ func (b *bootFiles) count() int {
 	return n
 }
 
-// parseArgs turns the configured arguments into a bootFiles.
 func parseArgs(args ...string) (*bootFiles, error) {
 	if len(args) == 0 {
 		return nil, errNoEntries
@@ -243,9 +205,8 @@ func parseArgs(args ...string) (*bootFiles, error) {
 	return b, nil
 }
 
-// assign files one parsed entry under its key, refusing a second entry for
-// the same target. Duplicates are caught on the resolved architecture rather
-// than on the key text, so arch:7 after x86-64-uefi is rejected too.
+// Duplicates are caught on the resolved architecture rather than the key text,
+// so arch:7 after x86-64-uefi is rejected too.
 func (b *bootFiles) assign(key string, u *url.URL) error {
 	switch key {
 	case keyIPXE:
@@ -264,7 +225,6 @@ func (b *bootFiles) assign(key string, u *url.URL) error {
 	return nil
 }
 
-// assignOnce writes u to dst unless dst already holds an entry.
 func assignOnce(dst **url.URL, u *url.URL, key string) error {
 	if *dst != nil {
 		return fmt.Errorf("%q: %w", key, errDuplicateKey)
@@ -273,8 +233,6 @@ func assignOnce(dst **url.URL, u *url.URL, key string) error {
 	return nil
 }
 
-// parseArch resolves a configuration key to an architecture code, by name or
-// through the arch:<n> escape hatch.
 func parseArch(key string) (iana.Arch, error) {
 	if arch, ok := archNames[key]; ok {
 		return arch, nil
@@ -290,8 +248,7 @@ func parseArch(key string) (iana.Arch, error) {
 	return iana.Arch(code), nil
 }
 
-// knownKeys lists the accepted keys for the error message, sorted so the text
-// is stable rather than following Go's randomised map iteration.
+// Sorted so the error text is stable rather than following map iteration order.
 func knownKeys() string {
 	names := make([]string, 0, len(archNames)+3)
 	for name := range archNames {
@@ -301,7 +258,6 @@ func knownKeys() string {
 	return strings.Join(append(names, keyIPXE, keyDefault, archPrefix+"<n>"), ", ")
 }
 
-// parseURL parses one bootfile URL and holds it to the scheme allow-list.
 func parseURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -314,9 +270,7 @@ func parseURL(raw string) (*url.URL, error) {
 	return u, nil
 }
 
-// selector holds one protocol family's compiled entries and answers which one
-// a request gets. It is read-only once setup returns, so the handlers may run
-// concurrently on it.
+// Read-only once setup returns, so handlers may run concurrently on it.
 type selector[T any] struct {
 	byArch     map[iana.Arch]T
 	ipxe       T
@@ -325,9 +279,7 @@ type selector[T any] struct {
 	hasDefault bool
 }
 
-// pick chooses the entry for one request. isIPXE reports whether the client
-// is already running iPXE, and archs is the architecture list it sent, in the
-// order it sent it.
+// archs is in the order the client sent it, which sets the match priority.
 func (s *selector[T]) pick(isIPXE bool, archs []iana.Arch) (T, bool) {
 	if isIPXE && s.hasIPXE {
 		return s.ipxe, true
@@ -344,8 +296,6 @@ func (s *selector[T]) pick(isIPXE bool, archs []iana.Arch) (T, bool) {
 	return none, false
 }
 
-// compile turns the parsed configuration into one family's selector, using
-// conv to encode a single URL as that family's options.
 func compile[T any](b *bootFiles, conv func(*url.URL) T) selector[T] {
 	s := selector[T]{byArch: make(map[iana.Arch]T, len(b.byArch))}
 	for arch, u := range b.byArch {
@@ -360,8 +310,6 @@ func compile[T any](b *bootFiles, conv func(*url.URL) T) selector[T] {
 	return s
 }
 
-// isHTTPBoot reports whether any architecture the client sent is an HTTP boot
-// architecture.
 func isHTTPBoot(archs []iana.Arch) bool {
 	return slices.ContainsFunc(archs, func(arch iana.Arch) bool {
 		_, ok := httpArchs[arch]
@@ -369,16 +317,12 @@ func isHTTPBoot(archs []iana.Arch) bool {
 	})
 }
 
-// entry4 is one configured bootfile compiled into the DHCPv4 options that
-// carry it. tftpServer is nil for a URL that travels whole in option 67.
+// tftpServer is nil for a URL that travels whole in option 67.
 type entry4 struct {
 	tftpServer *dhcpv4.Option
 	bootFile   dhcpv4.Option
 }
 
-// newEntry4 encodes one URL the way the nbp plugin encodes it: a tftp URL is
-// split over options 66 and 67 with the scheme stripped, everything else goes
-// into option 67 unchanged.
 func newEntry4(u *url.URL) *entry4 {
 	if u.Scheme != schemeTFTP {
 		return &entry4{bootFile: dhcpv4.OptBootFileName(u.String())}
@@ -387,9 +331,8 @@ func newEntry4(u *url.URL) *entry4 {
 	return &entry4{tftpServer: &server, bootFile: dhcpv4.OptBootFileName(u.Path)}
 }
 
-// apply writes this entry's options into resp, honouring the client's
-// parameter request list. archs is passed in rather than read from req again
-// because every ClientArch call re-parses the option.
+// archs is passed in rather than re-read from req, as ClientArch re-parses the
+// option on every call.
 func (e *entry4) apply(req, resp *dhcpv4.DHCPv4, archs []iana.Arch) {
 	if e.tftpServer != nil && req.IsOptionRequested(dhcpv4.OptionTFTPServerName) {
 		resp.Options.Update(*e.tftpServer)
@@ -399,14 +342,12 @@ func (e *entry4) apply(req, resp *dhcpv4.DHCPv4, archs []iana.Arch) {
 	}
 	resp.Options.Update(e.bootFile)
 	if isHTTPBoot(archs) {
-		// Sent alongside the bootfile rather than gated on the request list:
-		// without it an HTTP Boot client discards the reply it just asked
-		// for, and it has no meaning on its own.
+		// Not gated on the request list: without it an HTTP Boot client
+		// discards the reply it just asked for.
 		resp.Options.Update(httpClientOption)
 	}
 }
 
-// isIPXE4 reports whether a DHCPv4 client is already running iPXE.
 func isIPXE4(req *dhcpv4.DHCPv4) bool {
 	if strings.HasPrefix(req.ClassIdentifier(), ipxeTag) {
 		return true
@@ -416,7 +357,6 @@ func isIPXE4(req *dhcpv4.DHCPv4) bool {
 	})
 }
 
-// state4 is the DHCPv4 handler's configuration.
 type state4 struct {
 	sel selector[*entry4]
 }
@@ -433,15 +373,12 @@ func (s *state4) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	return resp, false
 }
 
-// entry6 is one configured bootfile compiled into the DHCPv6 options that
-// carry it. param is nil unless the URL carries a params query.
+// param is nil unless the URL carries a params query.
 type entry6 struct {
 	bootFileURL dhcpv6.Option
 	param       dhcpv6.Option
 }
 
-// newEntry6 encodes one URL the way the nbp plugin encodes it: whole into
-// option 59, with a params query repeated into option 60.
 func newEntry6(u *url.URL) *entry6 {
 	e := &entry6{bootFileURL: dhcpv6.OptBootFileURL(u.String())}
 	if params := u.Query().Get("params"); params != "" {
@@ -453,7 +390,6 @@ func newEntry6(u *url.URL) *entry6 {
 	return e
 }
 
-// apply writes this entry's options into resp, honouring the client's ORO.
 func (e *entry6) apply(requested dhcpv6.OptionCodes, resp dhcpv6.DHCPv6, archs []iana.Arch) {
 	if e.param != nil && requested.Contains(dhcpv6.OptionBootfileParam) {
 		resp.UpdateOption(e.param)
@@ -467,7 +403,6 @@ func (e *entry6) apply(requested dhcpv6.OptionCodes, resp dhcpv6.DHCPv6, archs [
 	}
 }
 
-// isIPXE6 reports whether a DHCPv6 client is already running iPXE.
 func isIPXE6(msg *dhcpv6.Message) bool {
 	if slices.ContainsFunc(msg.Options.UserClasses(), containsIPXE) {
 		return true
@@ -478,12 +413,10 @@ func isIPXE6(msg *dhcpv6.Message) bool {
 		})
 }
 
-// containsIPXE reports whether one class option value names iPXE.
 func containsIPXE(class []byte) bool {
 	return strings.Contains(string(class), ipxeTag)
 }
 
-// state6 is the DHCPv6 handler's configuration.
 type state6 struct {
 	sel selector[*entry6]
 }
@@ -493,7 +426,6 @@ func (s *state6) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	msg, err := req.GetInnerMessage()
 	if err != nil {
 		log.Errorf("could not decapsulate request: %v", err)
-		// Drop the request, this is probably a critical error in the packet.
 		return nil, true
 	}
 	archs := msg.Options.ArchTypes()
@@ -506,7 +438,6 @@ func (s *state6) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	return resp, false
 }
 
-// setup4 builds the DHCPv4 handler.
 func setup4(args ...string) (handler.Handler4, error) {
 	b, err := parseArgs(args...)
 	if err != nil {
@@ -517,7 +448,6 @@ func setup4(args ...string) (handler.Handler4, error) {
 	return s.Handler4, nil
 }
 
-// setup6 builds the DHCPv6 handler.
 func setup6(args ...string) (handler.Handler6, error) {
 	b, err := parseArgs(args...)
 	if err != nil {
