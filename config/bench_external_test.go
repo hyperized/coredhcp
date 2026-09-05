@@ -11,8 +11,7 @@ import (
 	"github.com/coredhcp/coredhcp/logger"
 )
 
-// BenchmarkLoad parses testdata/valid_both.yml, a small config with both
-// server6 and server4 sections, representative of a typical deployment.
+// Both server6 and server4 sections, as a typical deployment has.
 func BenchmarkLoad(b *testing.B) {
 	b.ReportAllocs()
 	// Load logs a line per discovered plugin at the default Info level;

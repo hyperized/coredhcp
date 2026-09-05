@@ -93,22 +93,16 @@ func TestParsePlugins(t *testing.T) {
 	})
 
 	t.Run("item that fails to cast at all still yields a non-nil empty map, rejected on count", func(t *testing.T) {
-		// cast.ToStringMap never returns a nil map for a plain scalar
-		// (string/int/bool): it falls back to an empty, non-nil map, so
-		// this hits the "exactly one plugin" branch rather than "not a
-		// string map".
+		// cast.ToStringMap falls back to an empty, non-nil map for a scalar
+		// input, so this hits "exactly one plugin" rather than "not a string map".
 		_, err := parsePlugins([]any{42})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "exactly one plugin")
 	})
 
 	t.Run("item is a typed-nil map hits the not-a-string-map branch", func(t *testing.T) {
-		// cast.ToStringMap(v) only returns a genuinely nil map when v's
-		// dynamic type is exactly map[string]any with a nil
-		// value; this is not something a YAML config can produce (a
-		// YAML null list entry decodes to an untyped nil, which cast
-		// turns into an empty non-nil map instead), so this path is
-		// only reachable via a direct call like this one.
+		// cast.ToStringMap only returns nil for a typed map[string]any(nil);
+		// YAML can't produce that, so this branch needs a direct call rather than a real config.
 		_, err := parsePlugins([]any{map[string]any(nil)})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "is not a string map")
@@ -322,11 +316,8 @@ func TestConfigParseConfig(t *testing.T) {
 
 	t.Run("listen error propagates", func(t *testing.T) {
 		c := New()
-		// A non-empty plugin list, since an explicitly empty
-		// []any{} collapses to a nil slice under
-		// cast.ToSliceE (append to nil with nothing to add stays nil),
-		// which getPlugins would otherwise reject before parseListen
-		// is ever reached.
+		// Must be non-empty: an explicitly empty []any{} collapses to a nil
+		// slice under cast.ToSliceE, which getPlugins would reject first.
 		c.v.Set("server6.plugins", []any{
 			map[string]any{"dns": "8.8.8.8"},
 		})
@@ -362,13 +353,8 @@ func TestConfigParseConfig(t *testing.T) {
 	})
 }
 
-// qualifyingInterfaces returns the names of the interfaces on the machine
-// running the test that carry every flag in want, independently
-// re-implementing expandLLMulticast's own filter. Since net.Interfaces()
-// cannot be mocked without changing config.go, tests that exercise
-// expandLLMulticast use this to compute their expectation from the actual
-// host state instead of hard-coding an outcome, keeping them deterministic
-// (given that state) across machines and CI.
+// Exists because net.Interfaces can't be mocked without changing config.go; tests
+// compute their expectation from actual host state instead of hard-coding an outcome.
 func qualifyingInterfaces(t *testing.T, want net.Flags) []string {
 	t.Helper()
 	ifs, err := net.Interfaces()
@@ -403,9 +389,8 @@ func TestExpandLLMulticast(t *testing.T) {
 		want := qualifyingInterfaces(t, net.FlagMulticast)
 		got, err := expandLLMulticast(&net.UDPAddr{IP: net.ParseIP("ff02::1:2"), Port: 547})
 		if len(want) == 0 {
-			// No interface on this host carries FlagMulticast (not even
-			// loopback) - the "no suitable interface" branch, otherwise
-			// unreachable without controlling the host's interfaces.
+			// No interface here carries FlagMulticast (not even loopback): the
+			// "no suitable interface" branch, otherwise unreachable without controlling the host.
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "no suitable interface")
 			return
@@ -451,8 +436,7 @@ func TestDefaultListen(t *testing.T) {
 
 	t.Run("v6", func(t *testing.T) {
 		// Depends on at least one interface carrying FlagMulticast so
-		// that the internal expandLLMulticast call succeeds; loopback
-		// carries it on every environment this has been run on.
+		// expandLLMulticast succeeds; loopback has, on every environment this has run on.
 		got, err := defaultListen(protocolV6)
 		require.NoError(t, err)
 		require.NotEmpty(t, got)
@@ -514,10 +498,8 @@ func TestConfigParseListen(t *testing.T) {
 
 	t.Run("listen value that ToStringSliceE cannot cast falls back to cast.ToString", func(t *testing.T) {
 		c := New()
-		// A map is not a slice and cast.ToStringE has no case for it, so
-		// cast.ToStringSliceE(listen) errors and parseListen falls back
-		// to cast.ToString(listen), which also fails and yields "" -
-		// which splitHostPort accepts as the trivial empty address.
+		// A map has no ToStringSliceE or ToStringE case, so parseListen falls
+		// through to cast.ToString, which yields "" - the trivial empty address.
 		c.v.Set("server4.listen", map[string]any{"a": "b"})
 		got, err := c.parseListen(protocolV4)
 		require.NoError(t, err)
@@ -567,7 +549,6 @@ func TestDefaultPortUnknownVersionPanics(t *testing.T) {
 	})
 }
 
-// withNetInterfaces swaps the interface source for the duration of a test.
 func withNetInterfaces(t *testing.T, fn func() ([]net.Interface, error)) {
 	t.Helper()
 	orig := netInterfaces

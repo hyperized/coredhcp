@@ -2,10 +2,6 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// Parsing of the `listen` directive: address splitting, defaulting per
-// protocol family, and expansion of link-local multicast listeners across
-// qualifying interfaces.
-
 package config
 
 import (
@@ -20,12 +16,8 @@ import (
 	"github.com/spf13/cast"
 )
 
-// splitHostPort splits an address of the form ip%zone:port into ip,zone and port.
-// It still returns if any of these are unset (unlike net.SplitHostPort which
-// returns an error if there is no port).
-// Both zone placements are accepted: `[ip6%iface]:port` (the net package's
-// form) and `[ip6]%iface:port` or `[ip6]%iface` (the form the ss utility
-// prints), the latter by moving the zone inside the brackets first.
+// splitHostPort splits ip%zone:port, tolerating what net.SplitHostPort
+// rejects: a missing port, and the `[ip6]%iface:port` form ss prints.
 func splitHostPort(hostport string) (ip string, zone string, port string, err error) {
 	if i := strings.Index(hostport, "]%"); i >= 0 {
 		rest := hostport[i+2:]
@@ -37,8 +29,7 @@ func splitHostPort(hostport string) (ip string, zone string, port string, err er
 	}
 	ip, port, err = net.SplitHostPort(hostport)
 	if err != nil {
-		// Either there is no port, or a more serious error.
-		// Supply a synthetic port to differentiate cases
+		// Retry with a synthetic port to tell "no port" from a syntax error.
 		var altErr error
 		if ip, _, altErr = net.SplitHostPort(hostport + ":0"); altErr != nil {
 			// Invalid even with a fake port. Return the original error
@@ -136,10 +127,8 @@ func defaultListen(ver protocolVersion) ([]net.UDPAddr, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Deliberately no wildcard [::] listener here: the multicast
-		// groups cover standard clients and relays, and a DHCP server
-		// should not accept unicast on every address unless the operator
-		// asked for exactly that in `listen`.
+		// No wildcard [::] listener on purpose: the multicast groups cover
+		// clients and relays, and unicast everywhere has to be asked for.
 		l = append(l,
 			net.UDPAddr{IP: dhcpv6.AllDHCPServers, Port: dhcpv6.DefaultServerPort},
 		)
@@ -155,7 +144,7 @@ func (c *Config) parseListen(ver protocolVersion) ([]net.UDPAddr, error) {
 
 	listen := c.v.Get(fmt.Sprintf("server%d.listen", ver))
 
-	// Provide an emulation of the old keyword "interface" to avoid breaking config files
+	// "interface" is a deprecated alias for "listen", kept for old config files.
 	if iface := c.v.Get(fmt.Sprintf("server%d.interface", ver)); iface != nil && listen != nil {
 		return nil, ErrorFromString("interface is a deprecated alias for listen, " +
 			"both cannot be used at the same time. Choose one and remove the other.")
@@ -180,7 +169,6 @@ func (c *Config) parseListen(ver protocolVersion) ([]net.UDPAddr, error) {
 		}
 
 		if l.Zone == "" && (l.IP.IsLinkLocalMulticast() || l.IP.IsInterfaceLocalMulticast()) {
-			// link-local multicast specified without interface gets expanded to listen on all interfaces
 			expanded, err := expandLLMulticast(l)
 			if err != nil {
 				return nil, err
@@ -198,9 +186,6 @@ func (c *Config) parseListen(ver protocolVersion) ([]net.UDPAddr, error) {
 // tested deterministically.
 var netInterfaces = net.Interfaces
 
-// defaultIP returns the unspecified address for the protocol version. The
-// version has been validated by the caller; anything else is a programming
-// error.
 func defaultIP(ver protocolVersion) net.IP {
 	switch ver {
 	case protocolV4:
@@ -212,9 +197,6 @@ func defaultIP(ver protocolVersion) net.IP {
 	}
 }
 
-// defaultPort returns the standard server port for the protocol version. The
-// version has been validated by the caller; anything else is a programming
-// error.
 func defaultPort(ver protocolVersion) int {
 	switch ver {
 	case protocolV4:

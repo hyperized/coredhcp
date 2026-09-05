@@ -2,15 +2,10 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// Redaction of plugin arguments for the startup log and for observers. A
-// plugin takes its configuration as bare strings, and some of those strings
-// are secrets: written inline as `password:hunter2`, buried in the userinfo
-// of a connection URL, or, in the netbox plugin's original argument order, a
-// bare positional API token with nothing around it to say what it is.
-//
-// What this file does is recognise the known shapes. It is a heuristic and
-// cannot be anything else, so a secret in a shape nobody anticipated still
-// reaches the log. env:NAME remains the form to reach for.
+// Redaction of plugin arguments for the startup log and for observers. It
+// recognises the known secret shapes and can never be more than a heuristic,
+// so a secret written in an unanticipated shape still reaches the log:
+// env:NAME remains the form to reach for.
 
 package config
 
@@ -20,29 +15,21 @@ import (
 	"strings"
 )
 
-// secretPrefixes are argument prefixes whose value is a secret to redact,
-// matched case-insensitively. "key:" is deliberately absent: it names a
+// Matched case-insensitively. "key:" is deliberately absent: it names a
 // non-secret key rather than carrying one.
 var secretPrefixes = []string{"password:", "token:", "secret:"}
 
-// redacted is what replaces a secret. Short enough not to disturb a log line,
-// and obviously not a value anyone configured.
 const redacted = "***"
 
-// NetBox tokens are matched by shape because the netbox plugin takes its
-// token as a bare positional argument, so there is no prefix to key on. A v2
-// token (NetBox 4.5 and later) starts with "nbt_"; a legacy one is 40
-// hexadecimal characters, which is specific enough that no plugin argument in
-// this tree collides with it.
+// The netbox plugin takes its token positionally, so there is no prefix to
+// key on: v2 tokens start with "nbt_", legacy ones are 40 hex characters.
 const (
 	netboxTokenPrefix = "nbt_"
 	netboxTokenLen    = 40
 )
 
-// RedactArgs returns a copy of args with secret values replaced by ***. The
-// input is never mutated: a nil slice stays nil, and every other case
-// returns a freshly allocated slice and strings, even when nothing needed
-// to change.
+// RedactArgs returns a copy of args with secret values replaced by ***.
+// args is never mutated, and a nil slice stays nil.
 func RedactArgs(args []string) []string {
 	if args == nil {
 		return nil
@@ -54,9 +41,8 @@ func RedactArgs(args []string) []string {
 	return out
 }
 
-// redactArg applies the prefix rule first because it matches on the
-// argument's own syntax, then the NetBox token shapes, and only then tries
-// reading the argument as a URL with a password in its userinfo.
+// Order matters: the prefix rule reads the argument's own syntax, so it runs
+// ahead of the shape guess and the URL parse, which both guess.
 func redactArg(arg string) string {
 	if r, ok := redactPrefixed(arg); ok {
 		return r
@@ -67,9 +53,6 @@ func redactArg(arg string) string {
 	return redactURL(arg)
 }
 
-// looksLikeNetboxToken reports whether arg has the shape of a NetBox API
-// token. Nothing else in the argument carries that meaning: netbox reads the
-// token from a fixed position, so redaction has to guess from the value.
 func looksLikeNetboxToken(arg string) bool {
 	if strings.HasPrefix(arg, netboxTokenPrefix) {
 		return true
@@ -81,12 +64,8 @@ func looksLikeNetboxToken(arg string) bool {
 	return err == nil
 }
 
-// redactPrefixed handles the "password:", "token:" and "secret:" forms. A
-// value written as "env:SOME_VAR" is left alone on purpose: it names an
-// environment variable for the operator to read, not the secret itself. That
-// marker is matched case-sensitively, the way the plugins parse it, so
-// "password:ENV:FOO" is redacted here and treated as a literal password
-// there.
+// "env:NAME" is left alone: it names a variable, not the secret. Matched
+// case-sensitively as the plugins do, so "password:ENV:FOO" is redacted.
 func redactPrefixed(arg string) (string, bool) {
 	lower := strings.ToLower(arg)
 	for _, prefix := range secretPrefixes {
@@ -102,10 +81,8 @@ func redactPrefixed(arg string) (string, bool) {
 	return "", false
 }
 
-// redactURL rewrites the password in a URL's userinfo, if it has one. An
-// argument that does not parse as a URL is passed through rather than
-// guessed at: most plugin arguments are addresses, prefixes or file paths
-// and were never URLs to begin with.
+// An argument that does not parse as a URL is passed through: most plugin
+// arguments are addresses, prefixes or file paths and never were URLs.
 func redactURL(arg string) string {
 	u, err := url.Parse(arg)
 	if err != nil || u.User == nil {
@@ -115,9 +92,7 @@ func redactURL(arg string) string {
 		return arg
 	}
 	u.User = url.UserPassword(u.User.Username(), redacted)
-	// url.URL.String percent-encodes '*' in userinfo even though RFC 3986
-	// section 3.2.1 allows it there unescaped, so the placeholder comes back
-	// as %2A%2A%2A. Undo that one occurrence: the userinfo precedes the path
-	// and the query, so the first match in the string is always ours.
+	// url.URL.String escapes '*' in userinfo though RFC 3986 section 3.2.1
+	// allows it. Userinfo precedes path and query, so the first match is ours.
 	return strings.Replace(u.String(), "%2A%2A%2A", redacted, 1)
 }
