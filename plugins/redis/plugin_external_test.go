@@ -273,6 +273,7 @@ func TestSetupErrors(t *testing.T) {
 		{"password with no value", []string{"127.0.0.1:6379", "password:"}},
 		{"password env unset", []string{"127.0.0.1:6379", "password:env:COREDHCP_TEST_REDIS_UNSET_VAR"}},
 		{"unknown trailing argument", []string{"127.0.0.1:6379", "bogus:1"}},
+		{"unknown key mode", []string{"127.0.0.1:6379", "key:bogus"}},
 	}
 
 	for _, tc := range cases {
@@ -290,6 +291,46 @@ func TestSetupErrors(t *testing.T) {
 		_, err := redis.Plugin.Setup4("127.0.0.1:6379", "password:env:COREDHCP_TEST_REDIS_EMPTY_VAR")
 		assert.Error(t, err)
 	})
+}
+
+// TestSetupKeyModeFamilies pins the family rule down through the public
+// surface, because it is a config-file contract and not an implementation
+// detail: a DHCPv4 client has no DUID and DHCPv6 has no option 61, so asking
+// for either under the wrong server section has to fail at startup instead of
+// silently matching no client at all.
+func TestSetupKeyModeFamilies(t *testing.T) {
+	addr := unreachableAddr(t)
+
+	cases := []struct {
+		name    string
+		key     string
+		wantErr bool
+		v6      bool
+	}{
+		{name: "mac under server4", key: "key:mac"},
+		{name: "mac under server6", key: "key:mac", v6: true},
+		{name: "client-id under server4", key: "key:client-id"},
+		{name: "duid under server6", key: "key:duid", v6: true},
+		{name: "duid under server4 is refused", key: "key:duid", wantErr: true},
+		{name: "client-id under server6 is refused", key: "key:client-id", v6: true, wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var err error
+			if tc.v6 {
+				_, err = redis.Plugin.Setup6(addr, tc.key)
+			} else {
+				_, err = redis.Plugin.Setup4(addr, tc.key)
+			}
+			if !tc.wantErr {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.key)
+		})
+	}
 }
 
 func TestSetup4PingFailureIsOnlyAWarning(t *testing.T) {
