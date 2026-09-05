@@ -7,6 +7,7 @@ package server
 import (
 	"errors"
 	"net"
+	"runtime"
 	"testing"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -176,7 +177,7 @@ func loopbackInterfaceName(t *testing.T) string {
 }
 
 // withNewUDP4 swaps the newUDP4 package var for the duration of the test.
-func withNewUDP4(t *testing.T, fn func(string, *net.UDPAddr) (*net.UDPConn, error)) {
+func withNewUDP4(t *testing.T, fn func(string, *net.UDPAddr) (net.PacketConn, error)) {
 	t.Helper()
 	orig := newUDP4
 	newUDP4 = fn
@@ -184,14 +185,23 @@ func withNewUDP4(t *testing.T, fn func(string, *net.UDPAddr) (*net.UDPConn, erro
 }
 
 // withNewUDP6 swaps the newUDP6 package var for the duration of the test.
-func withNewUDP6(t *testing.T, fn func(string, *net.UDPAddr) (*net.UDPConn, error)) {
+func withNewUDP6(t *testing.T, fn func(string, *net.UDPAddr) (net.PacketConn, error)) {
 	t.Helper()
 	orig := newUDP6
 	newUDP6 = fn
 	t.Cleanup(func() { newUDP6 = orig })
 }
 
-// closedUDP4Conn returns an already-closed *net.UDPConn suitable as a
+// openUDPConn binds a socket and closes it when the test ends.
+func openUDPConn(t *testing.T, network string, addr *net.UDPAddr) *net.UDPConn {
+	t.Helper()
+	c, err := net.ListenUDP(network, addr)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+// closedUDPConn returns an already-closed *net.UDPConn suitable as a
 // newUDP4/newUDP6 stand-in to drive SetControlMessage/JoinGroup failures.
 func closedUDPConn(t *testing.T, network string, addr *net.UDPAddr) *net.UDPConn {
 	t.Helper()
@@ -199,6 +209,46 @@ func closedUDPConn(t *testing.T, network string, addr *net.UDPAddr) *net.UDPConn
 	require.NoError(t, err)
 	require.NoError(t, c.Close())
 	return c
+}
+
+// countingConn is a socket that counts how often it was closed, so a test can
+// tell a leak from a close and a close from a double close. It embeds the
+// real *net.UDPConn because golang.org/x/net/ipv4.NewPacketConn asserts its
+// argument to net.Conn, and because the setup calls listen4 makes have to
+// reach a genuine socket to succeed or fail for the right reason.
+//
+// listen4 and listen6 are synchronous, so the counter needs no lock.
+type countingConn struct {
+	*net.UDPConn
+	closes int
+}
+
+func (c *countingConn) Close() error {
+	c.closes++
+	// The underlying socket is deliberately already closed in most of these
+	// tests, so this error is expected and not the counter's business.
+	_ = c.UDPConn.Close()
+	return nil
+}
+
+// The wrappers around the dhcp library's constructors exist to keep a failed
+// bind from arriving as a typed nil pointer inside a non-nil net.PacketConn,
+// which every later nil check would wave through. A zone naming an interface
+// that does not exist fails the same way on every platform.
+func TestNewUDPConnWrappersReturnANilInterfaceOnFailure(t *testing.T) {
+	const zone = "nonexistent-zzz-iface"
+
+	t.Run("v4", func(t *testing.T) {
+		c, err := newIPv4UDPConn(zone, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0, Zone: zone})
+		require.Error(t, err)
+		assert.True(t, c == nil, "want a nil interface, got %#v", c)
+	})
+
+	t.Run("v6", func(t *testing.T) {
+		c, err := newIPv6UDPConn(zone, &net.UDPAddr{IP: net.ParseIP("::1"), Port: 0, Zone: zone})
+		require.Error(t, err)
+		assert.True(t, c == nil, "want a nil interface, got %#v", c)
+	})
 }
 
 func TestListen4HappyPath(t *testing.T) {
@@ -210,7 +260,7 @@ func TestListen4HappyPath(t *testing.T) {
 }
 
 func TestListen4ConstructorError(t *testing.T) {
-	withNewUDP4(t, func(string, *net.UDPAddr) (*net.UDPConn, error) {
+	withNewUDP4(t, func(string, *net.UDPAddr) (net.PacketConn, error) {
 		return nil, errors.New("constructor boom")
 	})
 	l4, err := listen4(&net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
@@ -220,7 +270,7 @@ func TestListen4ConstructorError(t *testing.T) {
 }
 
 func TestListen4SetControlMessageError(t *testing.T) {
-	withNewUDP4(t, func(string, *net.UDPAddr) (*net.UDPConn, error) {
+	withNewUDP4(t, func(string, *net.UDPAddr) (net.PacketConn, error) {
 		return closedUDPConn(t, "udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0}), nil
 	})
 	// Zone empty so listen4 takes the SetControlMessage branch.
@@ -230,8 +280,8 @@ func TestListen4SetControlMessageError(t *testing.T) {
 }
 
 func TestListen4ZoneLookupError(t *testing.T) {
-	withNewUDP4(t, func(string, *net.UDPAddr) (*net.UDPConn, error) {
-		return net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	withNewUDP4(t, func(string, *net.UDPAddr) (net.PacketConn, error) {
+		return openUDPConn(t, "udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0}), nil
 	})
 	l4, err := listen4(&net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0, Zone: "nonexistent-zzz-iface"})
 	require.Error(t, err)
@@ -241,7 +291,7 @@ func TestListen4ZoneLookupError(t *testing.T) {
 
 func TestListen4JoinGroupError(t *testing.T) {
 	iface := loopbackInterfaceName(t)
-	withNewUDP4(t, func(string, *net.UDPAddr) (*net.UDPConn, error) {
+	withNewUDP4(t, func(string, *net.UDPAddr) (net.PacketConn, error) {
 		return closedUDPConn(t, "udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0}), nil
 	})
 	l4, err := listen4(&net.UDPAddr{IP: net.ParseIP("224.0.0.1"), Port: 0, Zone: iface})
@@ -260,6 +310,78 @@ func TestListen4MulticastJoinGroup(t *testing.T) {
 	assert.Equal(t, iface, l4.Name)
 }
 
+// Every listen4 error path after the bind owns the socket: nothing else holds
+// a reference to it, so it has to be closed exactly once before the error goes
+// back to the caller. The success path must leave it open, because the
+// listener it returns is what closes it later.
+func TestListen4ClosesSocketOnlyOnFailure(t *testing.T) {
+	iface := loopbackInterfaceName(t)
+	local := net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0}
+	openConn := func(t *testing.T) *countingConn {
+		t.Helper()
+		return &countingConn{UDPConn: openUDPConn(t, "udp4", &local)}
+	}
+	// A socket that is already closed makes the setup calls below fail
+	// without needing privileges or an unusual host.
+	deadConn := func(t *testing.T) *countingConn {
+		t.Helper()
+		return &countingConn{UDPConn: closedUDPConn(t, "udp4", &local)}
+	}
+
+	for _, tc := range []struct {
+		name       string
+		conn       func(*testing.T) *countingConn
+		addr       net.UDPAddr
+		wantErr    bool
+		wantCloses int
+	}{
+		{
+			name:       "interface lookup fails",
+			conn:       openConn,
+			addr:       net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0, Zone: "nonexistent-zzz-iface"},
+			wantErr:    true,
+			wantCloses: 1,
+		},
+		{
+			name:       "SetControlMessage fails",
+			conn:       deadConn,
+			addr:       local,
+			wantErr:    true,
+			wantCloses: 1,
+		},
+		{
+			name:       "JoinGroup fails",
+			conn:       deadConn,
+			addr:       net.UDPAddr{IP: net.ParseIP("224.0.0.1"), Port: 0, Zone: iface},
+			wantErr:    true,
+			wantCloses: 1,
+		},
+		{
+			name:       "success keeps the socket for the listener",
+			conn:       openConn,
+			addr:       local,
+			wantErr:    false,
+			wantCloses: 0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := tc.conn(t)
+			withNewUDP4(t, func(string, *net.UDPAddr) (net.PacketConn, error) { return conn, nil })
+
+			l4, err := listen4(&tc.addr)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Nil(t, l4)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, l4)
+				defer func() { _ = l4.Close() }()
+			}
+			assert.Equal(t, tc.wantCloses, conn.closes)
+		})
+	}
+}
+
 func TestListen6HappyPath(t *testing.T) {
 	l6, err := listen6(&net.UDPAddr{IP: net.ParseIP("::1"), Port: 0})
 	require.NoError(t, err)
@@ -269,7 +391,7 @@ func TestListen6HappyPath(t *testing.T) {
 }
 
 func TestListen6ConstructorError(t *testing.T) {
-	withNewUDP6(t, func(string, *net.UDPAddr) (*net.UDPConn, error) {
+	withNewUDP6(t, func(string, *net.UDPAddr) (net.PacketConn, error) {
 		return nil, errors.New("constructor boom")
 	})
 	l6, err := listen6(&net.UDPAddr{IP: net.ParseIP("::1"), Port: 0})
@@ -279,7 +401,7 @@ func TestListen6ConstructorError(t *testing.T) {
 }
 
 func TestListen6SetControlMessageError(t *testing.T) {
-	withNewUDP6(t, func(string, *net.UDPAddr) (*net.UDPConn, error) {
+	withNewUDP6(t, func(string, *net.UDPAddr) (net.PacketConn, error) {
 		return closedUDPConn(t, "udp6", &net.UDPAddr{IP: net.ParseIP("::1"), Port: 0}), nil
 	})
 	l6, err := listen6(&net.UDPAddr{IP: net.ParseIP("::1"), Port: 0})
@@ -288,8 +410,8 @@ func TestListen6SetControlMessageError(t *testing.T) {
 }
 
 func TestListen6ZoneLookupError(t *testing.T) {
-	withNewUDP6(t, func(string, *net.UDPAddr) (*net.UDPConn, error) {
-		return net.ListenUDP("udp6", &net.UDPAddr{IP: net.ParseIP("::1"), Port: 0})
+	withNewUDP6(t, func(string, *net.UDPAddr) (net.PacketConn, error) {
+		return openUDPConn(t, "udp6", &net.UDPAddr{IP: net.ParseIP("::1"), Port: 0}), nil
 	})
 	l6, err := listen6(&net.UDPAddr{IP: net.ParseIP("::1"), Port: 0, Zone: "nonexistent-zzz-iface"})
 	require.Error(t, err)
@@ -299,7 +421,7 @@ func TestListen6ZoneLookupError(t *testing.T) {
 
 func TestListen6JoinGroupError(t *testing.T) {
 	iface := loopbackInterfaceName(t)
-	withNewUDP6(t, func(string, *net.UDPAddr) (*net.UDPConn, error) {
+	withNewUDP6(t, func(string, *net.UDPAddr) (net.PacketConn, error) {
 		return closedUDPConn(t, "udp6", &net.UDPAddr{IP: net.ParseIP("::1"), Port: 0}), nil
 	})
 	l6, err := listen6(&net.UDPAddr{IP: net.ParseIP("ff02::1"), Port: 0, Zone: iface})
@@ -318,10 +440,130 @@ func TestListen6MulticastJoinGroup(t *testing.T) {
 	assert.Equal(t, iface, l6.Name)
 }
 
-// TestStartCleanupOnV6ListenFailure drives Start's "goto cleanup" path via
+// The DHCPv6 half of TestListen4ClosesSocketOnlyOnFailure.
+func TestListen6ClosesSocketOnlyOnFailure(t *testing.T) {
+	iface := loopbackInterfaceName(t)
+	local := net.UDPAddr{IP: net.ParseIP("::1"), Port: 0}
+	openConn := func(t *testing.T) *countingConn {
+		t.Helper()
+		return &countingConn{UDPConn: openUDPConn(t, "udp6", &local)}
+	}
+	deadConn := func(t *testing.T) *countingConn {
+		t.Helper()
+		return &countingConn{UDPConn: closedUDPConn(t, "udp6", &local)}
+	}
+
+	for _, tc := range []struct {
+		name       string
+		conn       func(*testing.T) *countingConn
+		addr       net.UDPAddr
+		wantErr    bool
+		wantCloses int
+	}{
+		{
+			name:       "interface lookup fails",
+			conn:       openConn,
+			addr:       net.UDPAddr{IP: net.ParseIP("::1"), Port: 0, Zone: "nonexistent-zzz-iface"},
+			wantErr:    true,
+			wantCloses: 1,
+		},
+		{
+			name:       "SetControlMessage fails",
+			conn:       deadConn,
+			addr:       local,
+			wantErr:    true,
+			wantCloses: 1,
+		},
+		{
+			name:       "JoinGroup fails",
+			conn:       deadConn,
+			addr:       net.UDPAddr{IP: net.ParseIP("ff02::1"), Port: 0, Zone: iface},
+			wantErr:    true,
+			wantCloses: 1,
+		},
+		{
+			name:       "success keeps the socket for the listener",
+			conn:       openConn,
+			addr:       local,
+			wantErr:    false,
+			wantCloses: 0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := tc.conn(t)
+			withNewUDP6(t, func(string, *net.UDPAddr) (net.PacketConn, error) { return conn, nil })
+
+			l6, err := listen6(&tc.addr)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Nil(t, l6)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, l6)
+				defer func() { _ = l6.Close() }()
+			}
+			assert.Equal(t, tc.wantCloses, conn.closes)
+		})
+	}
+}
+
+// A configuration naming no address at all, which `listen: []` produces, is
+// refused rather than quietly starting a server with no sockets. Wait on such
+// a Servers used to panic in make([]error, 1, 0).
+func TestStartWithoutAddresses(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  *config.Config
+	}{
+		{name: "empty v4 list", cfg: testConfig(t, nil, []net.UDPAddr{})},
+		{name: "empty v6 list", cfg: testConfig(t, []net.UDPAddr{}, nil)},
+		{name: "both empty", cfg: testConfig(t, []net.UDPAddr{}, []net.UDPAddr{})},
+		// A config with neither family never gets this far: LoadChains
+		// rejects it first, with its own error.
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, err := Start(tc.cfg)
+			require.ErrorIs(t, err, errNoListeners)
+			assert.Nil(t, srv)
+		})
+	}
+}
+
+// Wait has nothing to wait for when no listener was bound, and must neither
+// block nor panic. Start does not produce such a Servers any more, but Wait is
+// exported and callers can build one.
+func TestWaitWithoutListeners(t *testing.T) {
+	s := &Servers{}
+	assert.NoError(t, s.Wait())
+}
+
+// TestStartCleanupJoinsServeGoroutines opens a real DHCPv6 socket and then
+// fails the DHCPv4 bind. The v6 read loop has to be finished by the time Start
+// returns: with an unbuffered errors channel and no join, cleanup closed the
+// socket, Serve returned nil, and the send had nobody to hand it to, leaking
+// one goroutine per socket that had already come up.
+func TestStartCleanupJoinsServeGoroutines(t *testing.T) {
+	withNewUDP4(t, func(string, *net.UDPAddr) (net.PacketConn, error) {
+		return nil, errors.New("v4 listen boom")
+	})
+	cfg := testConfig(t,
+		[]net.UDPAddr{{IP: net.ParseIP("::1"), Port: 0}},
+		[]net.UDPAddr{{IP: net.ParseIP("127.0.0.1"), Port: 0}},
+	)
+
+	before := runtime.NumGoroutine()
+	srv, err := Start(cfg)
+	require.Error(t, err)
+	require.Nil(t, srv)
+	// shutdown joins the read loops before returning, so this needs no
+	// polling: anything still running here is a leak.
+	assert.LessOrEqual(t, runtime.NumGoroutine(), before)
+}
+
+// TestStartCleanupOnV6ListenFailure drives Start's cleanup path via
 // the DHCPv6 listen loop, with no listeners ever successfully opened.
 func TestStartCleanupOnV6ListenFailure(t *testing.T) {
-	withNewUDP6(t, func(string, *net.UDPAddr) (*net.UDPConn, error) {
+	withNewUDP6(t, func(string, *net.UDPAddr) (net.PacketConn, error) {
 		return nil, errors.New("v6 listen boom")
 	})
 	cfg := testConfig(t, []net.UDPAddr{{IP: net.ParseIP("::1"), Port: 0}}, nil)
@@ -335,7 +577,7 @@ func TestStartCleanupOnV6ListenFailure(t *testing.T) {
 // failure branch after a real DHCPv6 listener has already been opened, to
 // exercise the cleanup path closing a non-empty listeners slice.
 func TestStartCleanupOnV4ListenFailureClosesV6(t *testing.T) {
-	withNewUDP4(t, func(string, *net.UDPAddr) (*net.UDPConn, error) {
+	withNewUDP4(t, func(string, *net.UDPAddr) (net.PacketConn, error) {
 		return nil, errors.New("v4 listen boom")
 	})
 	cfg := testConfig(t,
@@ -460,6 +702,25 @@ func TestReportWithoutObserver(t *testing.T) {
 	})
 	s.reportListener(events.FamilyV4, &net.UDPAddr{IP: net.IPv4zero, Port: 67}, "eth0")
 	assert.Nil(t, s.observer)
+}
+
+// The observer gets the plugin arguments with the credential forms replaced:
+// the terminal UI puts them on screen, and a plugin argument list is where a
+// Redis password or a NetBox token is written. See config.RedactArgs.
+func TestReportPluginsRedactsArgs(t *testing.T) {
+	obs := &recordObserver{}
+	s := &Servers{observer: obs}
+	s.reportPlugins(&plugins.Chains{
+		V6: []plugins.Link6{{Name: "six", Args: []string{"token:s3cret"}}},
+		V4: []plugins.Link4{{Name: "four", Args: []string{"redis://user:hunter2@localhost:6379/0", "255.255.255.0"}}},
+	})
+
+	obs.mu.Lock()
+	defer obs.mu.Unlock()
+	assert.Equal(t, []events.Plugin{
+		{Family: events.FamilyV6, Name: "six", Args: []string{"token:***"}},
+		{Family: events.FamilyV4, Name: "four", Args: []string{"redis://user:***@localhost:6379/0", "255.255.255.0"}},
+	}, obs.plugins)
 }
 
 // A listener bound to an interface reports it, taken from the zone of the

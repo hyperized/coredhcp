@@ -251,7 +251,9 @@ func (c *familyCounters) add(r events.Request) {
 		c.unsupported++
 	case events.OutcomeSendError:
 		c.sendErrs++
-	case events.OutcomeReplied:
+	case events.OutcomeReplied, events.OutcomeNoReply:
+		// Neither is a problem: the message type is already visible in
+		// the in map and total, and nothing went wrong.
 	}
 }
 
@@ -478,7 +480,9 @@ func (m *model) recordOutcome(r events.Request) {
 		m.tot.errors++
 		m.tot.lastSendErr = r.Time
 		m.errRate.add(r.Time)
-	case events.OutcomeReplied:
+	case events.OutcomeReplied, events.OutcomeNoReply:
+		// Neither dropped anything nor errored, so neither counter nor
+		// error timestamp moves.
 	}
 }
 
@@ -515,6 +519,9 @@ func (m *model) recordChain(r events.Request) {
 		links[stop-1].replied++
 	case events.OutcomeDropped:
 		links[stop-1].dropped++
+	case events.OutcomeNoReply:
+		// The chain ran and stopped here, but nothing was sent and
+		// nothing was dropped, so the stopping link gets neither tally.
 	case events.OutcomeParseError, events.OutcomeUnsupported:
 	}
 }

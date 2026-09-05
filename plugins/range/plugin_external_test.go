@@ -183,3 +183,80 @@ func TestPluginSetupSweepArgument(t *testing.T) {
 		})
 	}
 }
+
+// TestPluginSetupRejectsURIInDatabasePath covers the lease path check end to
+// end: the sqlite driver parses the DSN as a URI, so a '?' in a configured
+// path sets connection options rather than naming a file. Setup must refuse it
+// instead of quietly running on a store that is not the one configured.
+func TestPluginSetupRejectsURIInDatabasePath(t *testing.T) {
+	for _, tc := range []struct{ name, file string }{
+		{"a query string turns the store in-memory", "leases.db?mode=memory"},
+		{"a fragment truncates the file name", "leases.db#tail"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := rangeplugin.Plugin.Setup4(
+				filepath.Join(t.TempDir(), tc.file), "10.0.0.1", "10.0.0.10", "1h",
+			)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "may not contain")
+		})
+	}
+}
+
+// TestPluginSetupDeclineProbationArgument covers the second optional argument
+// end to end, in both orders and with the sweep argument alongside it.
+func TestPluginSetupDeclineProbationArgument(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		extra   []string
+		wantErr bool
+	}{
+		{name: "on its own", extra: []string{"decline-probation:1h"}},
+		{name: "disabled", extra: []string{"decline-probation:0"}},
+		{name: "after the sweep argument", extra: []string{"sweep:90s", "decline-probation:1h"}},
+		{name: "before the sweep argument", extra: []string{"decline-probation:1h", "sweep:90s"}},
+		{name: "malformed duration", extra: []string{"decline-probation:never"}, wantErr: true},
+		{name: "negative duration", extra: []string{"decline-probation:-1h"}, wantErr: true},
+		{name: "given twice", extra: []string{"decline-probation:1h", "decline-probation:2h"}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{filepath.Join(t.TempDir(), "leases.db"), "10.0.0.1", "10.0.0.5", "1h"}, tc.extra...)
+			h4, err := rangeplugin.Plugin.Setup4(args...)
+			if tc.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.NotNil(t, h4)
+		})
+	}
+}
+
+// TestPluginSetupDeclineMaxArgument covers the third optional argument end to
+// end, alongside the other two and in the wrong shapes.
+func TestPluginSetupDeclineMaxArgument(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		extra   []string
+		wantErr bool
+	}{
+		{name: "on its own", extra: []string{"decline-max:3"}},
+		{name: "disabled", extra: []string{"decline-max:0"}},
+		{name: "alongside the other two", extra: []string{"sweep:90s", "decline-probation:1h", "decline-max:3"}},
+		{name: "in front of the other two", extra: []string{"decline-max:3", "decline-probation:1h", "sweep:90s"}},
+		{name: "not a number", extra: []string{"decline-max:lots"}, wantErr: true},
+		{name: "negative", extra: []string{"decline-max:-1"}, wantErr: true},
+		{name: "given twice", extra: []string{"decline-max:2", "decline-max:3"}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{filepath.Join(t.TempDir(), "leases.db"), "10.0.0.1", "10.0.0.5", "1h"}, tc.extra...)
+			h4, err := rangeplugin.Plugin.Setup4(args...)
+			if tc.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.NotNil(t, h4)
+		})
+	}
+}

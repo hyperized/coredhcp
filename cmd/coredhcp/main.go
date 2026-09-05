@@ -41,7 +41,6 @@ import (
 	pl_router "github.com/coredhcp/coredhcp/plugins/router"
 	pl_searchdomains "github.com/coredhcp/coredhcp/plugins/searchdomains"
 	pl_serverid "github.com/coredhcp/coredhcp/plugins/serverid"
-	pl_sleep "github.com/coredhcp/coredhcp/plugins/sleep"
 	pl_staticroute "github.com/coredhcp/coredhcp/plugins/staticroute"
 )
 
@@ -73,7 +72,6 @@ var desiredPlugins = []*plugins.Plugin{
 	&pl_router.Plugin,
 	&pl_searchdomains.Plugin,
 	&pl_serverid.Plugin,
-	&pl_sleep.Plugin,
 	&pl_staticroute.Plugin,
 }
 
@@ -138,8 +136,10 @@ func run(w io.Writer) error {
 		srv.Close()
 	}()
 
-	if err := srv.Wait(); err != nil {
-		log.Error(err)
-	}
-	return nil
+	// Wait reports nil once every listener has been closed on purpose, so
+	// anything non-nil here means a listener died under us. That has to
+	// reach the exit status: logging it and returning nil made the process
+	// exit 0 while no longer serving anything, which no service manager
+	// will restart.
+	return srv.Wait()
 }

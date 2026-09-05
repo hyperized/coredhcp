@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/coredhcp/coredhcp/logger"
+	"github.com/coredhcp/coredhcp/plugins"
 )
 
 // withFlags sets the package-level pflag values for the duration of the
@@ -83,16 +84,31 @@ func TestRunConfigLoadFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to load configuration")
 }
 
-// TestRunFullHappyPath is the only test in this package that lets run()
-// reach plugins.RegisterPlugin: RegisterPlugin panics on a duplicate name,
-// and desiredPlugins is registered unconditionally on every run() call that
-// gets that far, so this path must execute at most once per process. Every
-// other test in this file returns before reaching registration.
+// unregisterPlugins hands the package-global plugin registry back the way it
+// was found. run() registers desiredPlugins unconditionally on every call
+// that gets past config loading, and plugins.RegisterPlugin panics on a
+// duplicate name, so every test that lets run() get that far has to clean up
+// after itself or the next one dies on the panic.
+func unregisterPlugins(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		for _, p := range desiredPlugins {
+			delete(plugins.RegisteredPlugins, p.Name)
+		}
+	})
+}
+
+// TestRunFullHappyPath is the exit-status contract for a clean shutdown: a
+// listener closed on purpose is not a failure, so SIGTERM has to leave run()
+// returning nil and the process exiting 0. Since run() now hands the error
+// from srv.Wait() straight to main, a regression here would turn every
+// ordinary `systemctl stop` into a failed unit.
 //
 // There is no hook to observe "the server is now listening and signal
 // handling is armed" from outside run(), so the delay before sending
 // SIGTERM is a real sleep rather than a channel sync.
 func TestRunFullHappyPath(t *testing.T) {
+	unregisterPlugins(t)
 	dir := t.TempDir()
 	confPath := filepath.Join(dir, "config.yml")
 	// The plugins section is mandatory and must be a non-empty list: an
@@ -115,4 +131,21 @@ func TestRunFullHappyPath(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("run() did not return after SIGTERM")
 	}
+}
+
+// A configuration that binds nothing, which `listen: []` produces, has to
+// come back as an error so main exits non-zero. It used to bind no socket,
+// report success, and then panic inside Wait.
+func TestRunEmptyListenFails(t *testing.T) {
+	unregisterPlugins(t)
+	dir := t.TempDir()
+	confPath := filepath.Join(dir, "config.yml")
+	conf := "server4:\n  listen: []\n  plugins:\n    - netmask: 255.255.255.0\n"
+	require.NoError(t, os.WriteFile(confPath, []byte(conf), 0o600))
+
+	withFlags(t, "", "none", confPath, true, false)
+
+	err := run(io.Discard)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no listen addresses configured")
 }

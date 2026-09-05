@@ -40,6 +40,7 @@ type fakeRedis struct {
 	hashes map[string]map[string]string
 	raw    string // when set, HGETALL replies with this instead of a hash
 	conns  []net.Conn
+	calls  int // every command received, PING included
 }
 
 // newFakeRedis starts the server and ties its shutdown, connections and
@@ -148,9 +149,21 @@ func readRESPCount(r *bufio.Reader, want byte) (int, error) {
 	return strconv.Atoi(line[1:])
 }
 
+// callCount returns the number of commands the server has received, so a
+// test can assert that a message the plugin is meant to pass on never reached
+// the backend at all.
+func (f *fakeRedis) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
 // reply builds the RESP2 reply for one command. Redis command names are
 // case insensitive, so args[0] is upper-cased before matching.
 func (f *fakeRedis) reply(args []string) []byte {
+	f.mu.Lock()
+	f.calls++
+	f.mu.Unlock()
 	if len(args) == 0 {
 		return []byte("-ERR unknown command\r\n")
 	}
@@ -319,6 +332,30 @@ func TestHandler4Inform(t *testing.T) {
 	gotResp, stop := h4(req, resp)
 	assert.Same(t, resp, gotResp)
 	assert.False(t, stop)
+}
+
+// TestHandler4SkipsLookupForReleaseAndDecline covers the messages coredhcp
+// never answers: the plugin has to pass them on without spending a Redis
+// round trip that an unauthenticated sender could otherwise trigger at will.
+func TestHandler4SkipsLookupForReleaseAndDecline(t *testing.T) {
+	for _, mtype := range []dhcpv4.MessageType{dhcpv4.MessageTypeRelease, dhcpv4.MessageTypeDecline} {
+		t.Run(mtype.String(), func(t *testing.T) {
+			f := newFakeRedis(t)
+			h4, err := redis.Plugin.Setup4(f.addr)
+			require.NoError(t, err)
+			before := f.callCount() // Setup4 already sent one PING.
+
+			req, err := dhcpv4.New(dhcpv4.WithHwAddr(testMAC), dhcpv4.WithMessageType(mtype))
+			require.NoError(t, err)
+			resp, err := dhcpv4.NewReplyFromRequest(req)
+			require.NoError(t, err)
+
+			gotResp, stop := h4(req, resp)
+			assert.Same(t, resp, gotResp)
+			assert.False(t, stop)
+			assert.Equal(t, before, f.callCount(), "the lookup must not run for a message coredhcp never replies to")
+		})
+	}
 }
 
 func TestHandler4UnknownOrIncompleteMAC(t *testing.T) {
@@ -509,6 +546,59 @@ func TestHandler6RelayCannotDecapsulate(t *testing.T) {
 	gotResp, stop := h6(req, resp)
 	assert.Nil(t, gotResp)
 	assert.True(t, stop)
+}
+
+// TestHandler6SkipsLookupForReleaseAndDecline covers the messages coredhcp
+// never answers, both sent directly and behind a relay: the plugin has to
+// read the inner message's type, since a relayed message carries the
+// client's real type inside the RELAY-FORW envelope, not the outer one.
+func TestHandler6SkipsLookupForReleaseAndDecline(t *testing.T) {
+	for _, mtype := range []dhcpv6.MessageType{dhcpv6.MessageTypeRelease, dhcpv6.MessageTypeDecline} {
+		t.Run(mtype.String(), func(t *testing.T) {
+			f := newFakeRedis(t)
+			f.setHash(macKey(testMAC), map[string]string{"ipv6": "2001:db8::10:1"})
+			h6, err := redis.Plugin.Setup6(f.addr)
+			require.NoError(t, err)
+			before := f.callCount() // Setup6 already sent one PING.
+
+			duid := &dhcpv6.DUIDLL{HWType: dhcpiana.HWTypeEthernet, LinkLayerAddr: testMAC}
+			req, err := dhcpv6.NewMessage(dhcpv6.WithClientID(duid), dhcpv6.WithIANA())
+			require.NoError(t, err)
+			req.MessageType = mtype
+			resp, err := dhcpv6.NewMessage()
+			require.NoError(t, err)
+			resp.MessageType = dhcpv6.MessageTypeReply
+
+			gotResp, stop := h6(req, resp)
+			assert.Same(t, resp, gotResp)
+			assert.False(t, stop)
+			assert.Equal(t, before, f.callCount(), "the lookup must not run for a message coredhcp never replies to")
+		})
+
+		t.Run(mtype.String()+" relayed", func(t *testing.T) {
+			f := newFakeRedis(t)
+			f.setHash(macKey(testMAC), map[string]string{"ipv6": "2001:db8::10:1"})
+			h6, err := redis.Plugin.Setup6(f.addr)
+			require.NoError(t, err)
+			before := f.callCount() // Setup6 already sent one PING.
+
+			duid := &dhcpv6.DUIDLL{HWType: dhcpiana.HWTypeEthernet, LinkLayerAddr: testMAC}
+			inner, err := dhcpv6.NewMessage(dhcpv6.WithClientID(duid), dhcpv6.WithIANA())
+			require.NoError(t, err)
+			inner.MessageType = mtype
+			relayed, err := dhcpv6.EncapsulateRelay(inner, dhcpv6.MessageTypeRelayForward,
+				net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"))
+			require.NoError(t, err)
+			resp, err := dhcpv6.NewMessage()
+			require.NoError(t, err)
+			resp.MessageType = dhcpv6.MessageTypeReply
+
+			gotResp, stop := h6(relayed, resp)
+			assert.Same(t, resp, gotResp)
+			assert.False(t, stop)
+			assert.Equal(t, before, f.callCount(), "a relayed message must be read for its inner type, not the outer RELAY-FORW")
+		})
+	}
 }
 
 func TestHandler6NoIANA(t *testing.T) {

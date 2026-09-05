@@ -75,6 +75,13 @@
 // address must not silently fall through to a dynamic pool because the
 // backend hiccuped, and a dropped DHCP request is retried moments later.
 //
+// A DHCPv4 RELEASE or DECLINE, and their DHCPv6 equivalents, skip the lookup
+// entirely and are passed straight to the next plugin: coredhcp never sends a
+// reply to either message, and this plugin keeps no lease state that one
+// could act on, so looking one up would only spend a Redis round trip that an
+// unauthenticated sender on the segment can trigger at will with a new MAC
+// address each time.
+//
 // # Placement
 //
 // For DHCPv4 the plugin answers the request, so list it after the plugins
@@ -531,7 +538,7 @@ func leaseTime(fields map[string]string) (time.Duration, bool) {
 
 // Handler4 handles DHCPv4 packets for the redis plugin.
 func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
-	if req.MessageType() == dhcpv4.MessageTypeInform {
+	if skipsLookup4(req.MessageType()) {
 		return resp, false
 	}
 	mac := req.ClientHWAddr
@@ -556,6 +563,21 @@ func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 	addOptions4(req, resp, fields)
 	log.Infof("MAC address %s given IP address %s", mac, addr)
 	return resp, true
+}
+
+// skipsLookup4 reports whether mtype is a DHCPv4 message the plugin passes on
+// without consulting Redis. An INFORM asks for options rather than a lease.
+// A RELEASE or DECLINE gets no reply from coredhcp whatever the chain returns
+// and frees no state this plugin holds, so the lookup buys nothing, while
+// doing it would let anyone on the segment turn one unauthenticated packet
+// into a Redis round trip, with a fresh MAC address every time.
+func skipsLookup4(mtype dhcpv4.MessageType) bool {
+	switch mtype {
+	case dhcpv4.MessageTypeInform, dhcpv4.MessageTypeRelease, dhcpv4.MessageTypeDecline:
+		return true
+	default:
+		return false
+	}
 }
 
 // addOptions4 adds the router, DNS and lease time options a hash asks for.
@@ -595,6 +617,9 @@ func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 		log.Errorf("BUG: could not decapsulate: %v", err)
 		return nil, true
 	}
+	if skipsLookup6(decap.MessageType) {
+		return resp, false
+	}
 	iana := decap.Options.OneIANA()
 	if iana == nil {
 		log.Debug("No address requested")
@@ -606,6 +631,21 @@ func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 		return resp, false
 	}
 	return p.answer6(decap, resp, iana, mac)
+}
+
+// skipsLookup6 reports whether mtype is a DHCPv6 message the plugin passes on
+// without consulting Redis, for the same reason as skipsLookup4: coredhcp
+// never replies to a RELEASE or DECLINE, and this plugin has no lease state
+// either one could free. mtype has to be the inner message's type, not the
+// outer one, because a relayed message carries the client's real type inside
+// the RELAY-FORW envelope.
+func skipsLookup6(mtype dhcpv6.MessageType) bool {
+	switch mtype {
+	case dhcpv6.MessageTypeRelease, dhcpv6.MessageTypeDecline:
+		return true
+	default:
+		return false
+	}
 }
 
 // answer6 is the part of Handler6 that runs once the request is known to ask

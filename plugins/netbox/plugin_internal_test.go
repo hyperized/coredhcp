@@ -293,6 +293,32 @@ func TestHandler4(t *testing.T) {
 		assert.Equal(t, 0, stub.calls)
 	})
 
+	t.Run("DHCPRELEASE passes through untouched without a lookup", func(t *testing.T) {
+		stub := &pluginStubBackend{}
+		p := &pluginState{backend: stub, cache: newCache(16), opts: defaultOptions(), now: clock}
+
+		req, resp := pluginV4Exchange(t, mac)
+		req.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeRelease))
+
+		gotResp, stop := p.Handler4(req, resp)
+		assert.Same(t, resp, gotResp)
+		assert.False(t, stop)
+		assert.Equal(t, 0, stub.calls)
+	})
+
+	t.Run("DHCPDECLINE passes through untouched without a lookup", func(t *testing.T) {
+		stub := &pluginStubBackend{}
+		p := &pluginState{backend: stub, cache: newCache(16), opts: defaultOptions(), now: clock}
+
+		req, resp := pluginV4Exchange(t, mac)
+		req.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeDecline))
+
+		gotResp, stop := p.Handler4(req, resp)
+		assert.Same(t, resp, gotResp)
+		assert.False(t, stop)
+		assert.Equal(t, 0, stub.calls)
+	})
+
 	t.Run("backend error drops the request", func(t *testing.T) {
 		stub := &pluginStubBackend{err: errors.New("netbox is down")}
 		p := &pluginState{backend: stub, cache: newCache(16), opts: defaultOptions(), now: clock}
@@ -399,6 +425,63 @@ func TestHandler6(t *testing.T) {
 		require.NoError(t, err)
 
 		gotResp, stop := p.Handler6(req, resp)
+		assert.Same(t, resp, gotResp)
+		assert.False(t, stop)
+		assert.Equal(t, 0, stub.calls)
+	})
+
+	t.Run("Release passes through untouched without a lookup", func(t *testing.T) {
+		stub := &pluginStubBackend{}
+		p := &pluginState{backend: stub, cache: newCache(16), opts: defaultOptions(), now: clock}
+
+		// Built from NewSolicit so an IA_NA and an extractable MAC are both
+		// present; the type check must still short-circuit before either is
+		// consulted.
+		req, err := dhcpv6.NewSolicit(mac)
+		require.NoError(t, err)
+		req.MessageType = dhcpv6.MessageTypeRelease
+		resp, err := dhcpv6.NewMessage()
+		require.NoError(t, err)
+
+		gotResp, stop := p.Handler6(req, resp)
+		assert.Same(t, resp, gotResp)
+		assert.False(t, stop)
+		assert.Equal(t, 0, stub.calls)
+	})
+
+	t.Run("Decline passes through untouched without a lookup", func(t *testing.T) {
+		stub := &pluginStubBackend{}
+		p := &pluginState{backend: stub, cache: newCache(16), opts: defaultOptions(), now: clock}
+
+		req, err := dhcpv6.NewSolicit(mac)
+		require.NoError(t, err)
+		req.MessageType = dhcpv6.MessageTypeDecline
+		resp, err := dhcpv6.NewMessage()
+		require.NoError(t, err)
+
+		gotResp, stop := p.Handler6(req, resp)
+		assert.Same(t, resp, gotResp)
+		assert.False(t, stop)
+		assert.Equal(t, 0, stub.calls)
+	})
+
+	t.Run("a relayed Decline is skipped by the inner message type, not the outer one", func(t *testing.T) {
+		stub := &pluginStubBackend{}
+		p := &pluginState{backend: stub, cache: newCache(16), opts: defaultOptions(), now: clock}
+
+		inner, err := dhcpv6.NewSolicit(mac)
+		require.NoError(t, err)
+		inner.MessageType = dhcpv6.MessageTypeDecline
+
+		// The relay wrapper's own type is RELAY-FORW, never Decline; only the
+		// encapsulated message carries the client's real type.
+		relay, err := dhcpv6.EncapsulateRelay(inner, dhcpv6.MessageTypeRelayForward,
+			net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"))
+		require.NoError(t, err)
+		resp, err := dhcpv6.NewMessage()
+		require.NoError(t, err)
+
+		gotResp, stop := p.Handler6(relay, resp)
 		assert.Same(t, resp, gotResp)
 		assert.False(t, stop)
 		assert.Equal(t, 0, stub.calls)

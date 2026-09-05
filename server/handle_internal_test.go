@@ -114,9 +114,28 @@ func TestBuildReply6(t *testing.T) {
 			wantType: dhcpv6.MessageTypeReply,
 		},
 		{
+			// RFC 8415 section 18.3.8, unlike the DHCPv4 namesake which
+			// gets no answer at all.
+			name:     "decline becomes reply",
+			in:       mustMessage6(t, dhcpv6.MessageTypeDecline),
+			wantType: dhcpv6.MessageTypeReply,
+		},
+		{
 			name:     "information-request becomes reply",
 			in:       mustMessage6(t, dhcpv6.MessageTypeInformationRequest),
 			wantType: dhcpv6.MessageTypeReply,
+		},
+		{
+			// replyToDecline6 copies the client's DUID onto the reply, so
+			// a Decline that carries none has nothing to answer.
+			name: "decline without a client ID",
+			in: func() *dhcpv6.Message {
+				m, err := dhcpv6.NewMessage()
+				require.NoError(t, err)
+				m.MessageType = dhcpv6.MessageTypeDecline
+				return m
+			}(),
+			wantErr: "client ID cannot be nil",
 		},
 		{
 			name:    "unsupported message type",
@@ -181,8 +200,16 @@ func TestBuildReply4(t *testing.T) {
 			wantType: dhcpv4.MessageTypeAck,
 		},
 		{
+			// Accepted so the chain runs on it, with no type on the base
+			// reply. That nothing is ever sent back is HandleMsg4's job,
+			// not buildReply4's.
 			name:     "release gets no message type set",
 			in:       mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeRelease)),
+			wantType: dhcpv4.MessageTypeNone,
+		},
+		{
+			name:     "decline gets no message type set",
+			in:       mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDecline)),
 			wantType: dhcpv4.MessageTypeNone,
 		},
 		{
@@ -498,6 +525,86 @@ func TestHandleMsg4HandlerDropsRequest(t *testing.T) {
 	assert.Empty(t, conn.writes)
 }
 
+// TestHandleMsg4NoReplyMessageTypes covers RFC 2131 section 4.4: the server
+// answers neither a RELEASE nor a DECLINE, whatever the plugin chain hands
+// back. A spoofed RELEASE used to leave the server as a reply carrying no
+// option 53, one per packet.
+func TestHandleMsg4NoReplyMessageTypes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mt   dhcpv4.MessageType
+	}{
+		{name: "release", mt: dhcpv4.MessageTypeRelease},
+		{name: "decline", mt: dhcpv4.MessageTypeDecline},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := mustRequest4(t, dhcpv4.WithMessageType(tc.mt))
+			// A plugin that answers anyway. Its response is exactly what
+			// the old code put on the wire.
+			answer := func(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+				resp.YourIPAddr = net.IP{192, 0, 2, 10}
+				return resp, false
+			}
+
+			conn := &fakeConn4{}
+			l, obs := observedListener4([]handler.Handler4{answer}, conn)
+			l.HandleMsg4(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("192.0.2.1")})
+
+			assert.Empty(t, conn.writes)
+
+			ev := obs.only(t)
+			assert.Equal(t, events.OutcomeNoReply, ev.Outcome)
+			assert.Equal(t, events.PathNone, ev.Path)
+			assert.Equal(t, tc.mt.String(), ev.Type)
+			// Nothing left the server, so the event says nothing about a
+			// reply that never existed.
+			assert.Empty(t, ev.ReplyType)
+			assert.Empty(t, ev.Addresses)
+			assert.Empty(t, ev.Error)
+		})
+	}
+}
+
+// A plugin that stops the chain on a RELEASE has not dropped anything: the
+// packet was never going to be answered. The event still names the plugin, so
+// an operator can see which one freed the lease.
+func TestHandleMsg4NoReplyAfterChainStop(t *testing.T) {
+	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeRelease))
+	pass := func(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) { return resp, false }
+	free := func(_, _ *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) { return nil, true }
+
+	conn := &fakeConn4{}
+	l, obs := observedListener4([]handler.Handler4{pass, free, pass}, conn)
+	l.HandleMsg4(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("192.0.2.1")})
+
+	assert.Empty(t, conn.writes)
+
+	ev := obs.only(t)
+	assert.Equal(t, events.OutcomeNoReply, ev.Outcome)
+	assert.Equal(t, "plugin2", ev.Plugin)
+	assert.Equal(t, 2, ev.Position)
+}
+
+// A DECLINE has to reach the plugins so they can quarantine the address the
+// client says is already taken. buildReply4 used to reject it as an unhandled
+// message type, so no plugin ever saw one.
+func TestHandleMsg4DeclineReachesTheChain(t *testing.T) {
+	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDecline))
+
+	var seen []dhcpv4.MessageType
+	watch := func(r, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+		seen = append(seen, r.MessageType())
+		return resp, false
+	}
+
+	conn := &fakeConn4{}
+	l := newTestListener4([]handler.Handler4{watch}, conn)
+	l.HandleMsg4(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("192.0.2.1")})
+
+	assert.Equal(t, []dhcpv4.MessageType{dhcpv4.MessageTypeDecline}, seen)
+	assert.Empty(t, conn.writes)
+}
+
 func TestHandleMsg4WriteToError(t *testing.T) {
 	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
 	req.SetBroadcast() // avoid the ethernet path so WriteTo is reached
@@ -660,6 +767,21 @@ func TestHandleMsg6EncapsulateRelayError(t *testing.T) {
 	l := newTestListener6(nil, conn)
 	l.HandleMsg6(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{})
 	assert.Empty(t, conn.writes)
+}
+
+// A DHCPv6 Decline is answered with a Reply (RFC 8415 section 18.3.8).
+// buildReply6 used to reject it, so the client never heard back and no plugin
+// got the chance to quarantine the address.
+func TestHandleMsg6DeclineGetsReply(t *testing.T) {
+	req := mustMessage6(t, dhcpv6.MessageTypeDecline)
+	conn := &fakeConn6{}
+	l := newTestListener6(nil, conn)
+	l.HandleMsg6(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("2001:db8::1")})
+
+	require.Len(t, conn.writes, 1)
+	sent, err := dhcpv6.FromBytes(conn.writes[0].b)
+	require.NoError(t, err)
+	assert.Equal(t, dhcpv6.MessageTypeReply, sent.Type())
 }
 
 func TestHandleMsg6WriteToError(t *testing.T) {

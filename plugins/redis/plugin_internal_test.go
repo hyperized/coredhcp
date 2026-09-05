@@ -480,6 +480,24 @@ func TestHandler4Inform(t *testing.T) {
 	assert.Empty(t, s.seen(), "an INFORM asks for options, not for a lease, so redis is not consulted")
 }
 
+// TestHandler4SkipsLookupForReleaseAndDecline covers the messages coredhcp
+// never answers: the plugin has to pass them on without spending a Redis
+// round trip that an unauthenticated sender could otherwise trigger at will.
+func TestHandler4SkipsLookupForReleaseAndDecline(t *testing.T) {
+	for _, mtype := range []dhcpv4.MessageType{dhcpv4.MessageTypeRelease, dhcpv4.MessageTypeDecline} {
+		t.Run(mtype.String(), func(t *testing.T) {
+			s := newFakeServer(t, nil)
+			p := newTestPlugin(t, s)
+
+			req, resp := v4Exchange(t, mtype)
+			got, stop := p.Handler4(req, resp)
+			assert.Same(t, resp, got)
+			assert.False(t, stop)
+			assert.Empty(t, s.seen(), "the lookup must not run for a message coredhcp never replies to")
+		})
+	}
+}
+
 func TestHandler4(t *testing.T) {
 	cases := []struct {
 		name string
@@ -684,6 +702,45 @@ func TestHandler6Structure(t *testing.T) {
 	})
 
 	assert.Empty(t, s.seen(), "none of these requests should have reached redis")
+}
+
+// TestHandler6SkipsLookupForReleaseAndDecline covers the messages coredhcp
+// never answers, both sent directly and behind a relay: the plugin has to
+// read the inner message's type, since a relayed message carries the
+// client's real type inside the RELAY-FORW envelope, not the outer one.
+func TestHandler6SkipsLookupForReleaseAndDecline(t *testing.T) {
+	for _, mtype := range []dhcpv6.MessageType{dhcpv6.MessageTypeRelease, dhcpv6.MessageTypeDecline} {
+		t.Run(mtype.String(), func(t *testing.T) {
+			s := newFakeServer(t, nil)
+			p := newTestPlugin(t, s)
+			s.setHash(testKey, map[string]string{fieldIPv6: "2001:db8::10:1"})
+
+			req, resp := v6Exchange(t)
+			req.MessageType = mtype
+
+			got, stop := p.Handler6(req, resp)
+			assert.Same(t, resp, got)
+			assert.False(t, stop)
+			assert.Empty(t, s.seen(), "the lookup must not run for a message coredhcp never replies to")
+		})
+
+		t.Run(mtype.String()+" relayed", func(t *testing.T) {
+			s := newFakeServer(t, nil)
+			p := newTestPlugin(t, s)
+			s.setHash(testKey, map[string]string{fieldIPv6: "2001:db8::10:1"})
+
+			inner, resp := v6Exchange(t)
+			inner.MessageType = mtype
+			relayed, err := dhcpv6.EncapsulateRelay(inner, dhcpv6.MessageTypeRelayForward,
+				net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"))
+			require.NoError(t, err)
+
+			got, stop := p.Handler6(relayed, resp)
+			assert.Same(t, resp, got)
+			assert.False(t, stop)
+			assert.Empty(t, s.seen(), "a relayed message must be read for its inner type, not the outer RELAY-FORW")
+		})
+	}
 }
 
 func TestHandler6(t *testing.T) {

@@ -81,8 +81,16 @@ time=2026-08-19T12:09:32.988+02:00 level=INFO msg="Starting DHCPv6 server" prefi
 time=2026-08-19T12:09:32.988+02:00 level=INFO msg="Listen [::]:547" prefix=server
 ```
 
-The server shuts down cleanly on SIGINT/SIGTERM. `-h` lists the flags: config
-path, log level, log file and a `-P` that prints the built-in plugin list.
+Without `-c`, the server looks for `config.yml` in `$XDG_CONFIG_HOME/coredhcp/`,
+`$HOME/.coredhcp/`, `/etc/coredhcp/` and the working directory, in that order.
+The working directory is searched last so a file left lying around next to the
+binary cannot quietly take precedence over the one an operator installed.
+
+The server shuts down cleanly on SIGINT/SIGTERM and exits 0. It exits non-zero
+when a listener dies under it or when the configuration names no address to
+bind, so a service manager sees a failure instead of a silent stop. `-h` lists
+the flags: config path, log level, log file and a `-P` that prints the built-in
+plugin list.
 
 ## Terminal UI
 
@@ -176,14 +184,47 @@ on demand against an existing NetBox instance with `NETBOX_URL`,
 ## Docker
 
 The [Dockerfile](./Dockerfile) builds a cgo-free binary and ships it on
-debian-slim. `make docker-image` builds it, and the entrypoint reads its
+distroless static. `make docker-image` builds it, and the entrypoint reads its
 configuration from `/etc/coredhcp/config.yaml`, so mount one there.
 
-Running the container takes some care: a DHCP server has to share a broadcast
-domain with its clients, so publishing ports out of a NAT network achieves
-nothing. The compose stack in [test/compose/](test/compose/) is a working
-example. It puts the server and its clients on one user-defined bridge and
-grants `NET_BIND_SERVICE` and `NET_RAW` rather than running privileged.
+The server runs as uid 65532, not as root, so the two things it needs from the
+kernel have to be granted. Binding udp/67 needs `NET_BIND_SERVICE`, and
+answering a client that has no address yet goes over an AF_PACKET socket, which
+needs `NET_RAW`. The binary carries both as file capabilities, so granting
+those two to the container is enough and privileged mode is never needed:
+
+```
+services:
+  coredhcp:
+    image: coredhcp
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE, NET_RAW]
+    volumes:
+      - ./config.yaml:/etc/coredhcp/config.yaml:ro
+      - coredhcp-leasedb:/var/lib/coredhcp
+
+volumes:
+  coredhcp-leasedb:
+```
+
+One hardening setting conflicts with this: file capabilities are ignored when
+the process may not gain privileges, so `security_opt: [no-new-privileges:true]`
+in compose, or `allowPrivilegeEscalation: false` in a Kubernetes security
+context, makes the bind of udp/67 fail. Leave that setting off for this
+container; the capability set above is already the minimum.
+
+The `range` plugin creates its lease database at the path the config gives it,
+and uid 65532 has to be able to write there. `/var/lib/coredhcp` in the image
+belongs to that user, and a named volume mounted over it inherits that owner. A
+bind mount does not: the directory keeps the ownership it has on the host, and
+the database fails to open. Either keep the lease database on a named
+volume or chown the host directory to 65532 first.
+
+Beyond the file system, running the container takes some care: a DHCP server
+has to share a broadcast domain with its clients, so publishing ports out of a
+NAT network achieves nothing. The compose stack in [test/compose/](test/compose/)
+is a working example, with the server and its clients on one user-defined
+bridge.
 
 # Plugins
 
@@ -201,7 +242,8 @@ This fork adds six plugins upstream does not have built in:
 * [metrics](plugins/metrics/) serves request counters in Prometheus text
   format, with no new dependencies
 * [macfilter](plugins/macfilter/) allows or denies clients by MAC, inline or
-  from a file
+  from a file, with the caveat spelled out in its package doc: a MAC is not a
+  credential, so allow mode is tidiness rather than authentication
 * [ntp](plugins/ntp/) announces NTP servers, option 42 on DHCPv4 and the
   RFC 5908 option on DHCPv6
 * [netbox](plugins/netbox/) serves each client the address documented in
@@ -216,11 +258,47 @@ The last two started as the `netbox` and `redis` plugins in the
 [coredhcp/plugins](https://github.com/coredhcp/plugins) repository, which has
 not moved since 2020. They are rewrites, not ports: both families are served,
 results are cached, errors are bounded, and the NetBox one speaks the current
-API. Tokens and passwords can be given as `env:NAME` instead of a literal;
-prefer that, because the config loader logs plugin arguments at startup.
+API. Neither asks its backend anything for a RELEASE or a DECLINE: the server
+replies to neither and neither plugin holds lease state, so the lookup only
+ever paid for an unauthenticated packet.
+
+Give secrets as `token:env:NAME` and `password:env:NAME`, which keeps them out
+of the config file. A literal is kept out of the log as well: the loader
+prints each plugin's name and argument count at the default level and the
+arguments themselves only at debug, and both that line and the terminal UI's
+plugin pane replace the value of a `password:`, `token:` or `secret:`
+argument, the password in a `scheme://user:pass@host` URL, and anything
+shaped like a NetBox API token with `***`. The last of those is matched on
+the value's shape rather than on a prefix, so `env:NAME` is still the form to
+prefer; NetBox accepts a bare token for compatibility and warns at startup to
+move it.
 
 The `range` plugin also releases expired leases here (a pool on upstream
-fills up forever: coredhcp/coredhcp#148).
+fills up forever: coredhcp/coredhcp#148). It frees a lease only when the
+client names it in `ciaddr`, as RFC 2131 requires, so a forged DHCPRELEASE
+can no longer drain the pool, and it keeps an address a client declined out
+of circulation for `decline-probation` (24h by default) instead of handing
+the next client into the same conflict. That quarantine is bounded by
+`decline-max`, a tenth of the pool by default, because a DECLINE is as
+unauthenticated as a RELEASE: holding addresses back without a limit let two
+forged packets per address park an entire pool for the day.
+
+The `file` plugin no longer stamps its static reservation onto a RELEASE or
+DECLINE, and `server_id` decides whether a DHCPv4 request is addressed to
+this server by option 54 rather than by `siaddr`, so two servers on one
+segment stop both answering the same REQUEST. It also drops a RELEASE or
+DECLINE that carries no option 54 at all, which RFC 2131 Table 5 makes a MUST
+on both.
+
+The `prefix` plugin got the same treatment for DHCPv6 delegations. Upstream
+wrote an expiry it never read and never called `Free`, so its pool drained
+permanently; delegations now lapse and go back to the pool, the lease time
+is a configuration argument rather than a hardcoded hour, and a RELEASE is
+answered with a status code per IA_PD instead of being treated as a renewal.
+What one packet can claim is capped as well: at most 8 IA_PDs in a message
+are answered, and one client holds at most `max-prefixes` delegations (4 by
+default). Without either, a 146-byte SOLICIT carrying eight IA_PDs emptied a
+pool of four /64s, and about 4096 of them fit in one datagram.
 
 ## Server with custom plugins
 
@@ -230,6 +308,11 @@ documentation on how to use it. Both `cmd/coredhcp/main.go` and
 `cmd/coredhcp-tui/main.go` are rendered by it from templates in that
 directory; edit the template, run `make generate`, and commit the result. CI
 regenerates them and fails when a committed file has drifted.
+
+The [sleep](plugins/sleep/) plugin is in the tree but not in either default
+binary. It delays every response, which is a debugging aid rather than
+something a running server wants; add it to `core-plugins.txt` when you need
+it.
 
 # How to write a plugin
 

@@ -30,6 +30,17 @@
 // Matching is exact and case-insensitive: addresses are canonicalized with
 // net.HardwareAddr.String() before comparison.
 //
+// # What a MAC filter is worth
+//
+// A MAC address is not a credential. On DHCPv4 the filter matches chaddr, a
+// field the client fills in itself; on DHCPv6 the address is derived from a
+// DUID or a relay option that the client or the relay chose. Anyone who can
+// put a frame on the segment can put any address in it. Allow mode keeps
+// honest clients off a network they do not belong on and keeps the lease pool
+// tidy. It is not authentication, and nothing here should be load-bearing
+// against someone who is trying: that is what 802.1X or a separate VLAN is
+// for.
+//
 // # Placement
 //
 // macfilter should be listed before any plugin that allocates or reserves a

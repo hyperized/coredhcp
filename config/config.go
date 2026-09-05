@@ -51,7 +51,11 @@ type PluginConfig struct {
 }
 
 // Load reads a configuration file and returns a Config object, or an error if
-// any.
+// any. With no override path, it searches $XDG_CONFIG_HOME/coredhcp/,
+// $HOME/.coredhcp/ and /etc/coredhcp/, in that order, before finally trying
+// the working directory. The working directory goes last so a config file left
+// in whatever directory the server happens to be started from does not quietly
+// win over the one an operator installed.
 func Load(pathOverride string) (*Config, error) {
 	log.Print("Loading configuration")
 	c := New()
@@ -60,10 +64,10 @@ func Load(pathOverride string) (*Config, error) {
 		c.v.SetConfigFile(pathOverride)
 	} else {
 		c.v.SetConfigName("config")
-		c.v.AddConfigPath(".")
 		c.v.AddConfigPath("$XDG_CONFIG_HOME/coredhcp/")
 		c.v.AddConfigPath("$HOME/.coredhcp/")
 		c.v.AddConfigPath("/etc/coredhcp/")
+		c.v.AddConfigPath(".")
 	}
 
 	if err := c.v.ReadInConfig(); err != nil {
@@ -140,7 +144,12 @@ func (c *Config) parseConfig(ver protocolVersion) error {
 		return err
 	}
 	for _, p := range plugins {
-		log.Printf("DHCPv%d: found plugin `%s` with %d args: %v", ver, p.Name, len(p.Args), p.Args)
+		// The arguments are where a NetBox token or a Redis password is
+		// written, and RedactArgs only recognises the shapes it knows about
+		// (see redact.go). Keep the default level to what loaded, and put the
+		// values themselves, redacted, behind debug.
+		log.Infof("DHCPv%d: found plugin `%s` with %d args", ver, p.Name, len(p.Args))
+		log.Debugf("DHCPv%d: plugin `%s` args: %v", ver, p.Name, RedactArgs(p.Args))
 	}
 
 	listeners, err := c.parseListen(ver)

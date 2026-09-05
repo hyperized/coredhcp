@@ -138,6 +138,7 @@ func TestPluginState6Handler6(t *testing.T) {
 
 func TestPluginState4Handler4(t *testing.T) {
 	serverID := net.ParseIP("192.0.2.1").To4()
+	otherID := net.ParseIP("192.0.2.9").To4()
 	p := &pluginState4{serverID: serverID}
 
 	t.Run("not a boot request", func(t *testing.T) {
@@ -150,7 +151,7 @@ func TestPluginState4Handler4(t *testing.T) {
 		assert.Nil(t, result.ServerIPAddr)
 	})
 
-	t.Run("no server IP set, accepted", func(t *testing.T) {
+	t.Run("no option 54 set, accepted", func(t *testing.T) {
 		req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest}
 		resp := &dhcpv4.DHCPv4{}
 
@@ -163,8 +164,13 @@ func TestPluginState4Handler4(t *testing.T) {
 		assert.True(t, serverID.Equal(sid))
 	})
 
-	t.Run("server IP is zero, accepted", func(t *testing.T) {
-		req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest, ServerIPAddr: net.IPv4zero}
+	// The old code keyed off req.ServerIPAddr (siaddr), which a client may
+	// carry over from an earlier exchange even though it has nothing to do
+	// with which DHCP server the request is for. This used to be rejected;
+	// now that the guard looks only at option 54, a request with no option
+	// 54 passes regardless of siaddr.
+	t.Run("siaddr points elsewhere but no option 54, accepted", func(t *testing.T) {
+		req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest, ServerIPAddr: otherID}
 		resp := &dhcpv4.DHCPv4{}
 
 		result, stop := p.Handler4(req, resp)
@@ -172,8 +178,9 @@ func TestPluginState4Handler4(t *testing.T) {
 		assert.False(t, stop)
 	})
 
-	t.Run("server IP matches, accepted", func(t *testing.T) {
-		req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest, ServerIPAddr: serverID}
+	t.Run("option 54 matches, accepted", func(t *testing.T) {
+		req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest}
+		req.UpdateOption(dhcpv4.OptServerIdentifier(serverID))
 		resp := &dhcpv4.DHCPv4{}
 
 		result, stop := p.Handler4(req, resp)
@@ -181,12 +188,80 @@ func TestPluginState4Handler4(t *testing.T) {
 		assert.False(t, stop)
 	})
 
-	t.Run("server IP mismatches, rejected", func(t *testing.T) {
-		req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest, ServerIPAddr: net.ParseIP("192.0.2.9").To4()}
+	t.Run("option 54 mismatches, rejected", func(t *testing.T) {
+		req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest}
+		req.UpdateOption(dhcpv4.OptServerIdentifier(otherID))
 		resp := &dhcpv4.DHCPv4{}
 
 		result, stop := p.Handler4(req, resp)
 		assert.Nil(t, result)
 		assert.True(t, stop)
+	})
+
+	messageTypeCases := []struct {
+		name        string
+		messageType dhcpv4.MessageType
+	}{
+		{"REQUEST with foreign option 54 rejected", dhcpv4.MessageTypeRequest},
+		{"RELEASE with foreign option 54 rejected", dhcpv4.MessageTypeRelease},
+		{"DECLINE with foreign option 54 rejected", dhcpv4.MessageTypeDecline},
+	}
+	for _, tc := range messageTypeCases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest}
+			req.UpdateOption(dhcpv4.OptMessageType(tc.messageType))
+			req.UpdateOption(dhcpv4.OptServerIdentifier(otherID))
+			resp := &dhcpv4.DHCPv4{}
+
+			result, stop := p.Handler4(req, resp)
+			assert.Nil(t, result)
+			assert.True(t, stop)
+		})
+	}
+
+	requireServerIDCases := []struct {
+		name        string
+		messageType dhcpv4.MessageType
+	}{
+		{"RELEASE", dhcpv4.MessageTypeRelease},
+		{"DECLINE", dhcpv4.MessageTypeDecline},
+	}
+	for _, tc := range requireServerIDCases {
+		t.Run(tc.name+" with no option 54, rejected", func(t *testing.T) {
+			req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest}
+			req.UpdateOption(dhcpv4.OptMessageType(tc.messageType))
+			resp := &dhcpv4.DHCPv4{}
+
+			result, stop := p.Handler4(req, resp)
+			assert.Nil(t, result)
+			assert.True(t, stop)
+		})
+
+		t.Run(tc.name+" with matching option 54, accepted", func(t *testing.T) {
+			req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest}
+			req.UpdateOption(dhcpv4.OptMessageType(tc.messageType))
+			req.UpdateOption(dhcpv4.OptServerIdentifier(serverID))
+			resp := &dhcpv4.DHCPv4{}
+
+			result, stop := p.Handler4(req, resp)
+			require.NotNil(t, result)
+			assert.False(t, stop)
+			assert.True(t, serverID.Equal(result.ServerIPAddr))
+
+			sid := dhcpv4.GetIP(dhcpv4.OptionServerIdentifier, result.Options)
+			assert.True(t, serverID.Equal(sid))
+		})
+	}
+
+	// Regression: option 54 is only required for RELEASE and DECLINE. A
+	// DISCOVER with no server identifier still passes.
+	t.Run("DISCOVER with no option 54, accepted", func(t *testing.T) {
+		req := &dhcpv4.DHCPv4{OpCode: dhcpv4.OpcodeBootRequest}
+		req.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeDiscover))
+		resp := &dhcpv4.DHCPv4{}
+
+		result, stop := p.Handler4(req, resp)
+		require.NotNil(t, result)
+		assert.False(t, stop)
 	})
 }

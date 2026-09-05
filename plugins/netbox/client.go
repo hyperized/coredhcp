@@ -45,6 +45,11 @@ const (
 	paramInterfaceID   = "interface_id"
 	paramVMInterfaceID = "vminterface_id"
 
+	// tokenPrefix marks a token argument as a secret. The config loader
+	// redacts an argument's logged value when it starts with "token:",
+	// "password:" or "secret:"; a bare argument gets no such treatment and
+	// is printed in full.
+	tokenPrefix = "token:"
 	// tokenEnvPrefix marks a token argument that names an environment
 	// variable instead of carrying the secret in config.yml.
 	tokenEnvPrefix = "env:"
@@ -99,17 +104,47 @@ func parseBaseURL(raw string) (string, error) {
 	return strings.TrimSuffix(u.String(), "/"), nil
 }
 
-// resolveToken returns the API token to authenticate with. An "env:NAME"
-// argument reads NAME from the environment at setup time, which keeps the
-// secret out of config.yml; anything else is the token itself.
+// resolveToken returns the API token to authenticate with. The accepted
+// forms are token:env:NAME and token:<value>, which name the argument as a
+// secret so the config loader's redaction rule (a "token:", "password:" or
+// "secret:" prefix) finds it, plus the older bare env:NAME and a bare
+// literal for compatibility. token:env:NAME is the recommended form.
+//
+// A bare literal is still accepted, since rejecting it would break existing
+// configs, but the config loader cannot tell it apart from a non-secret
+// argument and logs it in full at startup, so this is warned about once at
+// setup rather than silently allowed.
 func resolveToken(arg string) (string, error) {
-	name, fromEnv := strings.CutPrefix(arg, tokenEnvPrefix)
-	if !fromEnv {
-		if arg == "" {
-			return "", errors.New("API token cannot be empty")
-		}
-		return arg, nil
+	if arg == "" {
+		return "", errors.New("API token cannot be empty")
 	}
+	if rest, ok := strings.CutPrefix(arg, tokenPrefix); ok {
+		return resolveTaggedToken(arg, rest)
+	}
+	if name, ok := strings.CutPrefix(arg, tokenEnvPrefix); ok {
+		return resolveEnvToken(arg, name)
+	}
+	log.Warning("the API token is given as a bare argument, which the config loader cannot tell is a secret and logs in full at startup; give it as token:env:NAME instead")
+	return arg, nil
+}
+
+// resolveTaggedToken handles a "token:"-prefixed argument, dispatching to
+// resolveEnvToken for its env: form and treating anything else as a literal
+// token value. arg is the original argument, kept for error messages.
+func resolveTaggedToken(arg, rest string) (string, error) {
+	if name, ok := strings.CutPrefix(rest, tokenEnvPrefix); ok {
+		return resolveEnvToken(arg, name)
+	}
+	if rest == "" {
+		return "", fmt.Errorf("token argument %q needs a token or %sNAME after %q", arg, tokenEnvPrefix, tokenPrefix)
+	}
+	return rest, nil
+}
+
+// resolveEnvToken reads the token from the environment variable named name,
+// which comes from an "env:NAME" or "token:env:NAME" argument. arg is the
+// original argument, kept for error messages.
+func resolveEnvToken(arg, name string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("token argument %q needs an environment variable name after %q", arg, tokenEnvPrefix)
 	}

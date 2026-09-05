@@ -349,3 +349,44 @@ func TestRegisterBackingDBDoubleRegistration(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot swap out a lease database")
 }
+
+func TestValidateDBPath(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, wantErrSub string
+	}{
+		{name: "a relative path", path: "leases.db"},
+		{name: "an absolute path", path: "/var/lib/coredhcp/leases.db"},
+		{name: "the in-memory store", path: ":memory:"},
+		{name: "a path with a space", path: "/var/lib/core dhcp/leases.db"},
+		{name: "a query string", path: "leases.db?mode=memory", wantErrSub: `may not contain "?"`},
+		{name: "a fragment", path: "leases.db#tail", wantErrSub: `may not contain "#"`},
+		{name: "both, the first one wins", path: "leases.db#a?b", wantErrSub: `may not contain "#"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateDBPath(tc.path)
+			if tc.wantErrSub == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErrSub)
+		})
+	}
+}
+
+// TestLoadDBRejectsURIPathBeforeOpen pins where the check happens. The driver
+// reads the DSN as a URI, so "leases.db?mode=memory" would open an in-memory
+// store and lose every lease at the next restart without a word in the log.
+// A rejected path must never reach sql.Open at all.
+func TestLoadDBRejectsURIPathBeforeOpen(t *testing.T) {
+	orig := sqlOpen
+	t.Cleanup(func() { sqlOpen = orig })
+	sqlOpen = func(string, string) (*sql.DB, error) {
+		t.Error("sql.Open must not be reached for a rejected path")
+		return nil, errors.New("unreachable")
+	}
+
+	_, err := loadDB("leases.db?mode=memory")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "may not contain")
+}

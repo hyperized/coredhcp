@@ -82,8 +82,11 @@ server6:
         # netbox serves the IPv6 address documented in NetBox on the interface
         # that carries the client's MAC address (NetBox 4.2 or newer). Results
         # are cached; ttl:, negative-ttl:, timeout: and lifetime: tune it.
-        # - netbox: <base URL> <token | env:NAME> [ttl:5m] [negative-ttl:30s] [timeout:5s] [lifetime:1h]
-        # - netbox: https://netbox.example.com env:NETBOX_TOKEN
+        # The token: prefix is what tells the startup log the argument is a
+        # secret, so give the token as token:env:NAME. A bare token still
+        # works and is warned about at startup, because nothing can redact it.
+        # - netbox: <base URL> <token:env:NAME> [ttl:5m] [negative-ttl:30s] [timeout:5s] [lifetime:1h]
+        # - netbox: https://netbox.example.com token:env:NETBOX_TOKEN
 
         # redis serves the ipv6 field of the hash stored at mac:<client MAC>,
         # plus dns and leaseTime when present. The address may be a host:port
@@ -100,9 +103,16 @@ server6:
         - nbp: "http://[2001:db8:a::1]/nbp"
 
         # prefix provides prefix delegation.
-        # - prefix: <prefix> <allocation size>
-        # prefix is the prefix pool from which the allocations will be carved
+        # - prefix: <prefix> <allocation size> [lease duration] [sweep:<interval>] [max-prefixes:<count>]
+        # prefix is the IPv6 prefix pool from which the allocations will be carved
         # allocation size is the maximum size for prefixes that will be allocated to clients
+        # The lease duration defaults to 1h and lapsed delegations go back to
+        # the pool on a background sweep, by default every max(30s, half the
+        # lease duration). max-prefixes caps how many delegations one client
+        # may hold at a time (4 by default); an IA_PD past that is answered
+        # with NoPrefixAvail. At most 8 IA_PDs in one message are answered at
+        # all, since nothing authenticates the sender of a packet carrying
+        # thousands of them.
         # EG for allocating /64 or smaller prefixes within 2001:db8::/48 :
         - prefix: 2001:db8::/48 64
 
@@ -186,9 +196,14 @@ server4:
         - netmask: 255.255.255.0
 
         # range allocates leases within a range of IPs
-        # - range: <lease file> <start IP> <end IP> <lease duration> [sweep:<interval>]
+        # - range: <lease file> <start IP> <end IP> <lease duration> [sweep:<interval>] [decline-probation:<duration>] [decline-max:<count>]
         # Expired leases are reclaimed by a background sweep, by default every
         # max(30s, half the lease duration); sweep: overrides the interval.
+        # An address a client declines is held out of the pool for
+        # decline-probation (24h), and decline-max bounds how many are held at
+        # once (a tenth of the pool). The bound matters: a DECLINE is
+        # unauthenticated, so without it two forged packets per address park
+        # the whole pool for a day. Either set to 0 turns the quarantine off.
         # * the lease file is an initially empty file where the leases that are
         # allocated to clients will be stored across server restarts
         # * lease duration can be given in any format understood by go's
@@ -200,8 +215,11 @@ server4:
         # devices and virtual machines alike (NetBox 4.2 or newer). Unknown
         # clients fall through to the plugins after it; list it before range
         # and after the option plugins, as with file.
-        # - netbox: <base URL> <token | env:NAME> [ttl:5m] [negative-ttl:30s] [timeout:5s]
-        # - netbox: https://netbox.example.com env:NETBOX_TOKEN
+        # The token: prefix is what tells the startup log the argument is a
+        # secret, so give the token as token:env:NAME. A bare token still
+        # works and is warned about at startup, because nothing can redact it.
+        # - netbox: <base URL> <token:env:NAME> [ttl:5m] [negative-ttl:30s] [timeout:5s]
+        # - netbox: https://netbox.example.com token:env:NETBOX_TOKEN
 
         # redis serves static leases from Redis hashes keyed mac:<client MAC>,
         # with fields ipv4 (address or CIDR, CIDR also sets the subnet mask),

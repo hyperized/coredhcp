@@ -728,6 +728,20 @@ func TestFamilyCountersAdd(t *testing.T) {
 		assert.EqualValues(t, 1, c.sendErrs)
 	})
 
+	t.Run("a no-reply is counted as traffic, not as a problem", func(t *testing.T) {
+		t.Parallel()
+
+		c := newFamilyCounters()
+		c.add(events.Request{Type: "DECLINE", Outcome: events.OutcomeNoReply})
+
+		assert.EqualValues(t, 1, c.total)
+		assert.EqualValues(t, 1, c.in["DECLINE"])
+		assert.Zero(t, c.dropped)
+		assert.Zero(t, c.parseErrs)
+		assert.Zero(t, c.unsupported)
+		assert.Zero(t, c.sendErrs)
+	})
+
 	t.Run("the path array counts every valid path", func(t *testing.T) {
 		t.Parallel()
 
@@ -996,6 +1010,21 @@ func TestModelRecordOutcome(t *testing.T) {
 		assert.Zero(t, m.tot.dropped)
 		assert.Zero(t, m.tot.errors)
 	})
+
+	// A RELEASE or DECLINE is ordinary traffic the server does not answer.
+	// Counting it as a drop would put the status line into a warning state
+	// on a healthy network.
+	t.Run("no reply touches nothing", func(t *testing.T) {
+		t.Parallel()
+
+		m := newModel(baseTime, "v", 10, 10, 10)
+		m.recordOutcome(events.Request{Time: baseTime, Outcome: events.OutcomeNoReply})
+		assert.Zero(t, m.tot.dropped)
+		assert.Zero(t, m.tot.errors)
+		assert.True(t, m.tot.lastSoftErr.IsZero())
+		assert.True(t, m.tot.lastSendErr.IsZero())
+		assert.Zero(t, sum(m.errRate.series(baseTime)))
+	})
 }
 
 // TestModelRecordChain pins how a request's outcome is attributed to the
@@ -1078,6 +1107,22 @@ func TestModelRecordChain(t *testing.T) {
 		m.recordChain(events.Request{Family: events.FamilyV4, Outcome: events.OutcomeDropped, Position: 3})
 
 		assert.EqualValues(t, 1, m.chains[events.FamilyV4][2].dropped)
+	})
+
+	// The chain ran up to the plugin that stopped it, so those links were
+	// reached, but the stopping one neither answered nor dropped anything.
+	t.Run("a stopping position with no reply is attributed as neither", func(t *testing.T) {
+		t.Parallel()
+
+		m := newModel(baseTime, "v", 10, 10, 10)
+		m.chains = newChain()
+		m.recordChain(events.Request{Family: events.FamilyV4, Outcome: events.OutcomeNoReply, Position: 2})
+
+		links := m.chains[events.FamilyV4]
+		assert.EqualValues(t, 1, links[0].reached)
+		assert.EqualValues(t, 1, links[1].reached)
+		assert.Zero(t, links[1].replied)
+		assert.Zero(t, links[1].dropped)
 	})
 
 	t.Run("parse and unsupported outcomes reach nobody", func(t *testing.T) {
@@ -1249,9 +1294,21 @@ func TestLeaseTransitionV4(t *testing.T) {
 			leaseReleased,
 		},
 		{
-			"decline as unsupported is declined",
-			events.Request{Family: events.FamilyV4, Type: "DECLINE", Outcome: events.OutcomeUnsupported},
+			"release with no reply is still released",
+			events.Request{Family: events.FamilyV4, Type: "RELEASE", Outcome: events.OutcomeNoReply},
+			leaseReleased,
+		},
+		{
+			"decline with no reply is declined",
+			events.Request{Family: events.FamilyV4, Type: "DECLINE", Outcome: events.OutcomeNoReply},
 			leaseDeclined,
+		},
+		{
+			// A DECLINE the server never got to run the chain on says
+			// nothing about the lease.
+			"decline as unsupported is not declined",
+			events.Request{Family: events.FamilyV4, Type: "DECLINE", Outcome: events.OutcomeUnsupported},
+			leaseNone,
 		},
 		{
 			"decline replied is not declined",
@@ -1822,6 +1879,7 @@ func TestOutcomeWord(t *testing.T) {
 		{"a nak is a warning", events.Request{Outcome: events.OutcomeReplied, ReplyType: "NAK"}, tagWarn, "NAK"},
 		{"a reply type outside replyTags", events.Request{Outcome: events.OutcomeReplied, ReplyType: "WEIRD"}, tagPlain, "WEIRD"},
 		{"dropped", events.Request{Outcome: events.OutcomeDropped}, tagWarn, "drop"},
+		{"no reply", events.Request{Outcome: events.OutcomeNoReply}, tagDim, "no reply"},
 		{"parse error", events.Request{Outcome: events.OutcomeParseError}, tagBad, "parse"},
 		{"unsupported", events.Request{Outcome: events.OutcomeUnsupported}, tagBad, "unsup"},
 		{"send error", events.Request{Outcome: events.OutcomeSendError}, tagBad, "send"},
