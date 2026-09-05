@@ -144,7 +144,12 @@ func (c *Config) parseConfig(ver protocolVersion) error {
 		return err
 	}
 	for _, p := range plugins {
-		log.Printf("DHCPv%d: found plugin `%s` with %d args: %v", ver, p.Name, len(p.Args), RedactArgs(p.Args))
+		// The arguments are where a NetBox token or a Redis password is
+		// written, and RedactArgs only recognises the shapes it knows about
+		// (see redact.go). Keep the default level to what loaded, and put the
+		// values themselves, redacted, behind debug.
+		log.Infof("DHCPv%d: found plugin `%s` with %d args", ver, p.Name, len(p.Args))
+		log.Debugf("DHCPv%d: plugin `%s` args: %v", ver, p.Name, RedactArgs(p.Args))
 	}
 
 	listeners, err := c.parseListen(ver)

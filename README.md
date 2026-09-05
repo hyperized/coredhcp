@@ -259,10 +259,14 @@ The last two started as the `netbox` and `redis` plugins in the
 not moved since 2020. They are rewrites, not ports: both families are served,
 results are cached, errors are bounded, and the NetBox one speaks the current
 API. Tokens and passwords can be given as `env:NAME` instead of a literal,
-which is the better option because it keeps the secret out of the config file.
-A literal is not printed either way: the startup log and the terminal UI's
-plugin pane replace the value of a `password:`, `token:` or `secret:` argument,
-and the password in a `scheme://user:pass@host` URL, with `***`.
+which keeps the secret out of the config file. A literal is kept out of the
+log as well: the loader prints each plugin's name and argument count at the
+default level and the arguments themselves only at debug, and both that line
+and the terminal UI's plugin pane replace the value of a `password:`, `token:`
+or `secret:` argument, the password in a `scheme://user:pass@host` URL, and
+anything shaped like a NetBox API token with `***`. The last of those is
+matched on the value's shape rather than on a prefix, so `env:NAME` is still
+the form to prefer.
 
 The `range` plugin also releases expired leases here (a pool on upstream
 fills up forever: coredhcp/coredhcp#148). It frees a lease only when the

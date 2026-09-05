@@ -22,9 +22,12 @@
 // introduced and are sent as "Authorization: Bearer"; everything else is sent
 // as "Authorization: Token". NetBox deprecated the legacy tokens in 4.6 and
 // plans to drop them in 5.0, so new deployments should be issuing v2 tokens
-// already. The token is never logged by this plugin; note that the config
-// loader prints every plugin's arguments at startup, which is the reason to
-// prefer env:NAME over a literal token.
+// already. This plugin never logs the token, and the config loader keeps it
+// out of its own output too: at the default level it prints each plugin's
+// name and argument count, and the arguments themselves only at debug level,
+// with anything shaped like a token, password or secret replaced by ***.
+// Recognising a bare token by its shape is a safety net rather than a
+// guarantee, so env:NAME stays the better way to configure it.
 //
 // The remaining arguments are optional and may appear in any order:
 //

@@ -5,17 +5,72 @@
 package config_test
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/coredhcp/coredhcp/config"
+	"github.com/coredhcp/coredhcp/logger"
 )
+
+// captureLog redirects the logger's console stream into a buffer and raises
+// the level to debug for the duration of one test. The logger is process
+// wide, so this only holds because no test in this package runs in parallel.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	logger.WithConsole(&buf)
+	require.NoError(t, logger.SetLevel("debug"))
+	t.Cleanup(func() {
+		logger.WithConsole(os.Stderr)
+		require.NoError(t, logger.SetLevel("info"))
+	})
+	return &buf
+}
+
+// lineWith returns the first logged line containing want, and fails the test
+// when there is none.
+func lineWith(t *testing.T, log, want string) string {
+	t.Helper()
+	for line := range strings.SplitSeq(log, "\n") {
+		if strings.Contains(line, want) {
+			return line
+		}
+	}
+	t.Fatalf("no logged line contains %q, log was:\n%s", want, log)
+	return ""
+}
+
+// A plugin's arguments carry its secrets, so the line the server prints at
+// its default level names the plugin and counts the arguments and nothing
+// else. The values, redacted, are a debug detail.
+func TestLoadKeepsPluginArgumentsOutOfTheDefaultLog(t *testing.T) {
+	buf := captureLog(t)
+
+	_, err := config.Load("testdata/plugin_with_secrets.yml")
+	require.NoError(t, err)
+
+	out := buf.String()
+	assert.NotContains(t, out, "nbt_ABCdef123")
+	assert.NotContains(t, out, "hunter2")
+
+	info := lineWith(t, out, "found plugin")
+	assert.Contains(t, info, "level=INFO")
+	assert.Contains(t, info, "with 3 args")
+	assert.NotContains(t, info, "ttl:5m")
+
+	debug := lineWith(t, out, "plugin `netbox` args")
+	assert.Contains(t, debug, "level=DEBUG")
+	assert.Contains(t, debug, "ttl:5m")
+	assert.Contains(t, debug, "***")
+}
 
 func TestLoadWithExplicitPath(t *testing.T) {
 	t.Run("both servers configured", func(t *testing.T) {
