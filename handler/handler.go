@@ -7,6 +7,8 @@
 package handler
 
 import (
+	"context"
+
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
 )
@@ -23,3 +25,21 @@ type Handler6 func(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool)
 
 // Handler4 behaves like Handler6, but for DHCPv4 packets.
 type Handler4 func(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool)
+
+// Handler6Ctx is Handler6 with a context in front of the packets, for a
+// plugin that needs to know where the request came from as well as what it
+// says.
+//
+// The stop and drop rules are Handler6's: a true return ends the chain, and a
+// nil response means no answer is sent. ctx is never nil, and carries a
+// RequestInfo whenever the server built one, which it does for any chain
+// holding at least one context-aware plugin. Read it with RequestInfoFrom and
+// handle the false case, since a handler can also be called through the
+// legacy plugins.LoadPlugins API, which has no request to describe.
+//
+// The context belongs to the call: a handler must not keep it, or anything
+// derived from it, after it returns.
+type Handler6Ctx func(ctx context.Context, req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool)
+
+// Handler4Ctx behaves like Handler6Ctx, but for DHCPv4 packets.
+type Handler4Ctx func(ctx context.Context, req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool)
