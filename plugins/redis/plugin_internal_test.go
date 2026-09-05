@@ -25,9 +25,9 @@ const testKey = "mac:aa:bb:cc:dd:ee:ff"
 
 // newTestPlugin builds an instance pointed at s without dialling, so a test
 // can arrange the server's answers first.
-func newTestPlugin(t *testing.T, s *fakeServer, args ...string) *pluginState {
+func newTestPlugin(t *testing.T, v6 bool, s *fakeServer, args ...string) *pluginState {
 	t.Helper()
-	p, err := newPluginState(append([]string{s.addr}, args...)...)
+	p, err := newPluginState(v6, append([]string{s.addr}, args...)...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = p.client.Close() })
 	return p
@@ -66,11 +66,12 @@ func v6Exchange(t *testing.T, mods ...dhcpv6.Modifier) (*dhcpv6.Message, *dhcpv6
 }
 
 func TestParseArgsDefaults(t *testing.T) {
-	s, err := parseArgs([]string{"10.0.0.9:6379"})
+	s, err := parseArgs(false, []string{"10.0.0.9:6379"})
 	require.NoError(t, err)
 	assert.Equal(t, "10.0.0.9:6379", s.client.addr)
 	assert.Equal(t, defaultTimeout, s.client.timeout)
-	assert.Equal(t, defaultPrefix, s.prefix)
+	assert.Equal(t, keyMAC, s.mode)
+	assert.Equal(t, defaultPrefixMAC, s.prefix)
 	assert.Equal(t, defaultLifetime, s.lifetime)
 	assert.Zero(t, s.client.db)
 	assert.Nil(t, s.client.tls)
@@ -119,7 +120,7 @@ func TestParseArgsAddress(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := parseArgs([]string{tc.arg})
+			s, err := parseArgs(false, []string{tc.arg})
 			if tc.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErr)
@@ -146,7 +147,7 @@ func TestParseArgsAddress(t *testing.T) {
 // be careful about what it says: net/url puts the whole URL in its error, and
 // the URL may carry a password.
 func TestParseArgsURLErrorHidesCredentials(t *testing.T) {
-	_, err := parseArgs([]string{"redis://coredhcp:hunter2@ho st:6379"})
+	_, err := parseArgs(false, []string{"redis://coredhcp:hunter2@ho st:6379"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid redis URL")
 	assert.NotContains(t, err.Error(), "hunter2")
@@ -249,7 +250,7 @@ func TestParseArgsOptions(t *testing.T) {
 			for name, value := range tc.env {
 				t.Setenv(name, value)
 			}
-			s, err := parseArgs(append([]string{"redis://:fromurl@10.0.0.9:6379"}, tc.args...))
+			s, err := parseArgs(false, append([]string{"redis://:fromurl@10.0.0.9:6379"}, tc.args...))
 			if tc.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErr)
@@ -263,16 +264,84 @@ func TestParseArgsOptions(t *testing.T) {
 }
 
 func TestParseArgsNoAddress(t *testing.T) {
-	s, err := parseArgs(nil)
+	s, err := parseArgs(false, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "need a redis address")
 	assert.Nil(t, s)
 }
 
+// TestParseArgsKeyMode covers the key: argument: its default, the default
+// prefix each mode carries, an explicit prefix overriding that default from
+// either side of key: on the line, and the family checks that keep a DUID out
+// of DHCPv4 and option 61 out of DHCPv6.
+func TestParseArgsKeyMode(t *testing.T) {
+	cases := []struct {
+		name       string
+		v6         bool
+		args       []string
+		wantErr    string
+		wantMode   keyMode
+		wantPrefix string
+	}{
+		{name: "default mode is mac, under server4", wantMode: keyMAC, wantPrefix: defaultPrefixMAC},
+		{name: "default mode is mac, under server6", v6: true, wantMode: keyMAC, wantPrefix: defaultPrefixMAC},
+		{name: "key:mac under server4", args: []string{"key:mac"}, wantMode: keyMAC, wantPrefix: defaultPrefixMAC},
+		{name: "key:mac under server6", v6: true, args: []string{"key:mac"}, wantMode: keyMAC, wantPrefix: defaultPrefixMAC},
+		{name: "key:duid defaults its own prefix", v6: true, args: []string{"key:duid"}, wantMode: keyDUID, wantPrefix: defaultPrefixDUID},
+		{
+			name: "key:client-id defaults its own prefix",
+			args: []string{"key:client-id"}, wantMode: keyClientID, wantPrefix: defaultPrefixClientID,
+		},
+		{
+			name:     "an explicit prefix wins when it comes first",
+			v6:       true,
+			args:     []string{"prefix:x:", "key:duid"},
+			wantMode: keyDUID, wantPrefix: "x:",
+		},
+		{
+			name:     "an explicit prefix wins when it comes last",
+			v6:       true,
+			args:     []string{"key:duid", "prefix:x:"},
+			wantMode: keyDUID, wantPrefix: "x:",
+		},
+		{
+			name:     "an empty prefix still means a bare identifier",
+			args:     []string{"key:client-id", "prefix:"},
+			wantMode: keyClientID, wantPrefix: "",
+		},
+		{
+			name: "key:duid is refused under server4",
+			args: []string{"key:duid"}, wantErr: "key:duid works under server6 only",
+		},
+		{
+			name: "key:client-id is refused under server6",
+			v6:   true,
+			args: []string{"key:client-id"}, wantErr: "key:client-id works under server4 only",
+		},
+		{name: "key:bogus", args: []string{"key:bogus"}, wantErr: "unknown key:bogus"},
+		{name: "unknown argument still fails by name", args: []string{"nope:1"}, wantErr: `unknown argument "nope:1"`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := parseArgs(tc.v6, append([]string{"10.0.0.9:6379"}, tc.args...))
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				assert.Nil(t, s)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantMode, s.mode)
+			assert.Equal(t, tc.wantPrefix, s.prefix)
+		})
+	}
+}
+
 func TestSetupState(t *testing.T) {
 	t.Run("server answers", func(t *testing.T) {
 		s := newFakeServer(t, nil)
-		p, err := setupState(s.addr)
+		p, err := setupState(false, s.addr)
 		require.NoError(t, err)
 		require.NotNil(t, p)
 		t.Cleanup(func() { _ = p.client.Close() })
@@ -282,14 +351,14 @@ func TestSetupState(t *testing.T) {
 	t.Run("server is down", func(t *testing.T) {
 		// Setup has to succeed anyway: coredhcp keeps serving its other
 		// plugins while redis comes back.
-		p, err := setupState("127.0.0.1:1")
+		p, err := setupState(false, "127.0.0.1:1")
 		require.NoError(t, err)
 		require.NotNil(t, p)
 		t.Cleanup(func() { _ = p.client.Close() })
 	})
 
 	t.Run("bad arguments", func(t *testing.T) {
-		p, err := setupState("nonsense")
+		p, err := setupState(false, "nonsense")
 		require.Error(t, err)
 		assert.Nil(t, p)
 	})
@@ -324,31 +393,34 @@ func TestIsKnownField(t *testing.T) {
 
 func TestLookup(t *testing.T) {
 	s := newFakeServer(t, nil)
-	p := newTestPlugin(t, s, "prefix:dhcp:")
+	p := newTestPlugin(t, false, s, "prefix:dhcp:")
 	s.setHash("dhcp:aa:bb:cc:dd:ee:ff", map[string]string{"ipv4": "10.0.0.5", "hostname": "printer"})
 
-	fields, err := p.lookup(testMAC)
+	fields, err := p.lookup(testMAC.String())
 	require.NoError(t, err)
 	// Unknown fields are handed back untouched; only the handlers decide what
 	// to act on.
 	assert.Equal(t, map[string]string{"ipv4": "10.0.0.5", "hostname": "printer"}, fields)
 
 	s.replyRaw("HGETALL", "-ERR boom\r\n")
-	fields, err = p.lookup(testMAC)
+	fields, err = p.lookup(testMAC.String())
 	require.Error(t, err)
 	assert.Nil(t, fields)
 }
 
 func TestAddressField(t *testing.T) {
-	value, ok := addressField(nil, fieldIPv4, testMAC)
+	p := &pluginState{mode: keyMAC}
+	ident := testMAC.String()
+
+	value, ok := p.addressField(nil, fieldIPv4, ident)
 	assert.False(t, ok)
 	assert.Empty(t, value)
 
-	value, ok = addressField(map[string]string{fieldIPv6: "2001:db8::1"}, fieldIPv4, testMAC)
+	value, ok = p.addressField(map[string]string{fieldIPv6: "2001:db8::1"}, fieldIPv4, ident)
 	assert.False(t, ok)
 	assert.Empty(t, value)
 
-	value, ok = addressField(map[string]string{fieldIPv4: "10.0.0.5"}, fieldIPv4, testMAC)
+	value, ok = p.addressField(map[string]string{fieldIPv4: "10.0.0.5"}, fieldIPv4, ident)
 	assert.True(t, ok)
 	assert.Equal(t, "10.0.0.5", value)
 }
@@ -471,7 +543,7 @@ func TestLeaseTime(t *testing.T) {
 
 func TestHandler4Inform(t *testing.T) {
 	s := newFakeServer(t, nil)
-	p := newTestPlugin(t, s)
+	p := newTestPlugin(t, false, s)
 
 	req, resp := v4Exchange(t, dhcpv4.MessageTypeInform)
 	got, stop := p.Handler4(req, resp)
@@ -487,7 +559,7 @@ func TestHandler4SkipsLookupForReleaseAndDecline(t *testing.T) {
 	for _, mtype := range []dhcpv4.MessageType{dhcpv4.MessageTypeRelease, dhcpv4.MessageTypeDecline} {
 		t.Run(mtype.String(), func(t *testing.T) {
 			s := newFakeServer(t, nil)
-			p := newTestPlugin(t, s)
+			p := newTestPlugin(t, false, s)
 
 			req, resp := v4Exchange(t, mtype)
 			got, stop := p.Handler4(req, resp)
@@ -630,7 +702,7 @@ func TestHandler4(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newFakeServer(t, nil)
-			p := newTestPlugin(t, s)
+			p := newTestPlugin(t, false, s)
 			if tc.fields != nil {
 				s.setHash(testKey, tc.fields)
 			}
@@ -664,7 +736,7 @@ func TestHandler4(t *testing.T) {
 
 func TestHandler6Structure(t *testing.T) {
 	s := newFakeServer(t, nil)
-	p := newTestPlugin(t, s)
+	p := newTestPlugin(t, true, s)
 	s.setHash(testKey, map[string]string{fieldIPv6: "2001:db8::10:1"})
 
 	t.Run("cannot decapsulate", func(t *testing.T) {
@@ -712,7 +784,7 @@ func TestHandler6SkipsLookupForReleaseAndDecline(t *testing.T) {
 	for _, mtype := range []dhcpv6.MessageType{dhcpv6.MessageTypeRelease, dhcpv6.MessageTypeDecline} {
 		t.Run(mtype.String(), func(t *testing.T) {
 			s := newFakeServer(t, nil)
-			p := newTestPlugin(t, s)
+			p := newTestPlugin(t, true, s)
 			s.setHash(testKey, map[string]string{fieldIPv6: "2001:db8::10:1"})
 
 			req, resp := v6Exchange(t)
@@ -726,7 +798,7 @@ func TestHandler6SkipsLookupForReleaseAndDecline(t *testing.T) {
 
 		t.Run(mtype.String()+" relayed", func(t *testing.T) {
 			s := newFakeServer(t, nil)
-			p := newTestPlugin(t, s)
+			p := newTestPlugin(t, true, s)
 			s.setHash(testKey, map[string]string{fieldIPv6: "2001:db8::10:1"})
 
 			inner, resp := v6Exchange(t)
@@ -819,7 +891,7 @@ func TestHandler6(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newFakeServer(t, nil)
-			p := newTestPlugin(t, s, tc.args...)
+			p := newTestPlugin(t, true, s, tc.args...)
 			if tc.fields != nil {
 				s.setHash(testKey, tc.fields)
 			}
@@ -871,4 +943,143 @@ func namesOrNil(names []string) []string {
 		return nil
 	}
 	return names
+}
+
+// TestHandler4ClientIDKeyMode covers key:client-id end to end: the key it
+// builds, a client that sends no option 61 at all, an option 61 redis has
+// never heard of, and a backend failure. The 01-prefixed identifier is the
+// package doc's own example, an RFC 2132 type 1 (hardware address) client
+// identifier carrying testMAC.
+func TestHandler4ClientIDKeyMode(t *testing.T) {
+	clientID := []byte{0x01, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}
+	const wantKey = "client-id:01aabbccddeeff"
+
+	cases := []struct {
+		name       string
+		noOption61 bool
+		fields     map[string]string
+		raw        string
+		wantDrop   bool
+		wantPass   bool
+	}{
+		{name: "known client is served", fields: map[string]string{fieldIPv4: "10.0.0.5"}},
+		{name: "no option 61 skips the lookup entirely", noOption61: true, wantPass: true},
+		{name: "unknown client passes", wantPass: true},
+		{name: "backend error drops", raw: "-ERR boom\r\n", wantDrop: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newFakeServer(t, nil)
+			p := newTestPlugin(t, false, s, "key:client-id")
+			if tc.fields != nil {
+				s.setHash(wantKey, tc.fields)
+			}
+			if tc.raw != "" {
+				s.replyRaw("HGETALL", tc.raw)
+			}
+
+			var mods []dhcpv4.Modifier
+			if !tc.noOption61 {
+				mods = append(mods, dhcpv4.WithOption(dhcpv4.OptClientIdentifier(clientID)))
+			}
+			req, resp := v4Exchange(t, dhcpv4.MessageTypeDiscover, mods...)
+
+			got, stop := p.Handler4(req, resp)
+			if tc.wantDrop {
+				assert.Nil(t, got)
+				assert.True(t, stop)
+				return
+			}
+			assert.Same(t, resp, got)
+			if tc.wantPass {
+				assert.False(t, stop)
+				assert.True(t, got.YourIPAddr.IsUnspecified())
+				if tc.noOption61 {
+					assert.Empty(t, s.seen(), "no option 61 means there is nothing to look up")
+				}
+				return
+			}
+			assert.True(t, stop)
+			assert.Equal(t, "10.0.0.5", got.YourIPAddr.String())
+			assert.Equal(t, [][]string{{"HGETALL", wantKey}}, s.seen(), "a change in key construction has to fail loudly here")
+		})
+	}
+}
+
+// TestHandler6DUIDKeyMode covers key:duid end to end: the key it builds, a
+// client with no client ID at all, a DUID too long to look up, an unknown
+// DUID, and a backend failure. v6Exchange's default client ID is a DUID-LL
+// over testMAC, which hex encodes to the package doc's own example.
+func TestHandler6DUIDKeyMode(t *testing.T) {
+	const wantKey = "duid:00030001aabbccddeeff"
+
+	cases := []struct {
+		name         string
+		noClientID   bool
+		overlongDUID bool
+		fields       map[string]string
+		raw          string
+		wantDrop     bool
+		wantPass     bool
+	}{
+		{name: "known client is served", fields: map[string]string{fieldIPv6: "2001:db8::10:1"}},
+		{name: "no client ID skips the lookup entirely", noClientID: true, wantPass: true},
+		{name: "an over-long DUID is passed through, not looked up", overlongDUID: true, wantPass: true},
+		{name: "unknown client passes", wantPass: true},
+		{name: "backend error drops", raw: "-ERR boom\r\n", wantDrop: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newFakeServer(t, nil)
+			p := newTestPlugin(t, true, s, "key:duid")
+			if tc.fields != nil {
+				s.setHash(wantKey, tc.fields)
+			}
+			if tc.raw != "" {
+				s.replyRaw("HGETALL", tc.raw)
+			}
+
+			var req, resp *dhcpv6.Message
+			switch {
+			case tc.noClientID:
+				// An IA_NA is present but there is no client ID at all, DUID
+				// or otherwise.
+				var err error
+				req, err = dhcpv6.NewMessage(dhcpv6.WithIANA())
+				require.NoError(t, err)
+				resp, err = dhcpv6.NewMessage()
+				require.NoError(t, err)
+			case tc.overlongDUID:
+				duid := &dhcpv6.DUIDEN{EnterpriseNumber: 1, EnterpriseIdentifier: make([]byte, 200)}
+				req, resp = v6Exchange(t, dhcpv6.WithClientID(duid))
+			default:
+				req, resp = v6Exchange(t)
+			}
+
+			got, stop := p.Handler6(req, resp)
+			if tc.wantDrop {
+				assert.Nil(t, got)
+				assert.True(t, stop)
+				return
+			}
+			assert.Same(t, resp, got)
+			assert.False(t, stop)
+			if tc.wantPass {
+				assert.Empty(t, got.GetOption(dhcpv6.OptionIANA))
+				if tc.noClientID || tc.overlongDUID {
+					assert.Empty(t, s.seen(), "the lookup must not run without a usable DUID")
+				}
+				return
+			}
+
+			iana, ok := got.GetOneOption(dhcpv6.OptionIANA).(*dhcpv6.OptIANA)
+			require.True(t, ok, "want an IA_NA in the response")
+			addr := iana.Options.OneAddress()
+			require.NotNil(t, addr)
+			assert.Equal(t, "2001:db8::10:1", addr.IPv6Addr.String())
+			assert.Equal(t, [][]string{{"HGETALL", wantKey}}, s.seen(), "a change in key construction has to fail loudly here")
+		})
+	}
 }

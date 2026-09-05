@@ -72,11 +72,22 @@ server6:
         # The supported DUID formats are LL and LLT
         - server_id: LL 00:de:ad:be:ef:00
 
-        # file serves leases defined in a static file, matching link-layer addresses to IPs
-        # - file: <file name> [autorefresh]
-        # The file format is one lease per line, "<hw address> <IPv6>"
+        # file serves leases defined in a static file, matching client
+        # identifiers to IPs
+        # - file: <file name> [autorefresh] [key:mac|duid|client-id]
+        # The file format is one lease per line, "<identifier> <IPv6>"
         # When the 'autorefresh' argument is given, the plugin will try to refresh
         # the lease mapping during runtime whenever the lease file is updated.
+        # Both optional arguments may come in either order.
+        # key: says what the first field of a line holds and defaults to mac.
+        # Under server6 it may be duid, and the field is then the client DUID
+        # as it goes on the wire, two-octet type code included, written in hex
+        # with an optional 0x prefix and optional colons between the bytes.
+        # That is the only usable key for a client whose DUID is a DUID-EN or
+        # a DUID-UUID, and for one behind a relay that sends no client
+        # link-layer address option. Under server4 the counterpart is
+        # key:client-id, which matches the raw bytes of option 61.
+        # - file: leases-duid.txt key:duid
         - file: "leases.txt"
 
         # netbox serves the IPv6 address documented in NetBox on the interface
@@ -91,8 +102,12 @@ server6:
         # redis serves the ipv6 field of the hash stored at mac:<client MAC>,
         # plus dns and leaseTime when present. The address may be a host:port
         # or a redis:// / rediss:// URL with credentials and database.
-        # - redis: <address> [password:<value | env:NAME>] [timeout:2s] [prefix:mac:] [lifetime:1h]
+        # key: picks the identifier the hash key is built from and defaults to
+        # mac. key:duid keys on duid:<client DUID in lowercase hex>, type code
+        # included. The prefix follows the key unless prefix: overrides it.
+        # - redis: <address> [password:<value | env:NAME>] [timeout:2s] [prefix:mac:] [lifetime:1h] [key:mac|duid]
         # - redis: rediss://redis.example.com:6380/0 password:env:REDIS_PASSWORD
+        # - redis: 127.0.0.1:6379 key:duid
 
         # dns adds information about available DNS resolvers to the responses
         # - dns: <resolver IP> <... resolver IPs>
@@ -225,7 +240,10 @@ server4:
         # with fields ipv4 (address or CIDR, CIDR also sets the subnet mask),
         # router, dns (comma-separated) and leaseTime (a Go duration).
         # Unknown clients fall through; list it like file.
-        # - redis: <address> [password:<value | env:NAME>] [timeout:2s] [prefix:mac:]
+        # key: picks the identifier and defaults to mac. key:client-id keys on
+        # client-id:<option 61 in lowercase hex>, for clients that name
+        # themselves with option 61 instead of by hardware address.
+        # - redis: <address> [password:<value | env:NAME>] [timeout:2s] [prefix:mac:] [key:mac|client-id]
         # - redis: 127.0.0.1:6379
 
         # staticroute advertises additional routes the client should install in

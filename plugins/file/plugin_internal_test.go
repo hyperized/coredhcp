@@ -50,3 +50,77 @@ func TestSetupFileWatcherAddError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to watch")
 }
+
+// TestParseArgs covers the config-line grammar directly: the required file
+// name, the two optional arguments in either order, and the errors each bad
+// input produces.
+func TestParseArgs(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		v6       bool
+		args     []string
+		wantErr  string
+		wantOpts options
+	}{
+		{name: "no arguments", wantErr: "need a file name"},
+		{name: "empty file name", args: []string{""}, wantErr: "got empty file name"},
+		{
+			name:     "file name only defaults to mac",
+			args:     []string{"leases.txt"},
+			wantOpts: options{filename: "leases.txt", mode: keyMAC},
+		},
+		{
+			name:     "autorefresh",
+			args:     []string{"leases.txt", autoRefreshArg},
+			wantOpts: options{filename: "leases.txt", autorefresh: true, mode: keyMAC},
+		},
+		{
+			name:     "key:mac explicit",
+			args:     []string{"leases.txt", "key:mac"},
+			wantOpts: options{filename: "leases.txt", mode: keyMAC},
+		},
+		{
+			name:     "key:duid on server6",
+			v6:       true,
+			args:     []string{"leases.txt", "key:duid"},
+			wantOpts: options{filename: "leases.txt", mode: keyDUID},
+		},
+		{
+			name:     "key:client-id on server4",
+			args:     []string{"leases.txt", "key:client-id"},
+			wantOpts: options{filename: "leases.txt", mode: keyClientID},
+		},
+		{
+			name:     "autorefresh then key",
+			v6:       true,
+			args:     []string{"leases.txt", autoRefreshArg, "key:duid"},
+			wantOpts: options{filename: "leases.txt", autorefresh: true, mode: keyDUID},
+		},
+		{
+			name:     "key then autorefresh, reversed order",
+			v6:       true,
+			args:     []string{"leases.txt", "key:duid", autoRefreshArg},
+			wantOpts: options{filename: "leases.txt", autorefresh: true, mode: keyDUID},
+		},
+		{name: "unknown argument", args: []string{"leases.txt", "bogus"}, wantErr: `unknown argument "bogus"`},
+		{name: "unknown key value", args: []string{"leases.txt", "key:bogus"}, wantErr: `unknown key "bogus"`},
+		{name: "key:duid rejected on server4", args: []string{"leases.txt", "key:duid"}, wantErr: "key:duid"},
+		{
+			name:    "key:client-id rejected on server6",
+			v6:      true,
+			args:    []string{"leases.txt", "key:client-id"},
+			wantErr: "key:client-id",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseArgs(tc.v6, tc.args)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantOpts, got)
+		})
+	}
+}

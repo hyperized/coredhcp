@@ -37,10 +37,10 @@ func (s *pluginState) Leases() []leases.Lease {
 	defer s.mu.RUnlock()
 
 	out := make([]leases.Lease, 0, len(s.recs))
-	for mac, addr := range s.recs {
+	for key, addr := range s.recs {
 		out = append(out, leases.Lease{
 			Family:  s.family,
-			Client:  mac,
+			Client:  key,
 			Address: netip.PrefixFrom(addr, addr.BitLen()),
 			Static:  true,
 			Source:  s.name,

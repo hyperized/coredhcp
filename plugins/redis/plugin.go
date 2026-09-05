@@ -10,7 +10,7 @@
 //
 //	server4:
 //	  plugins:
-//	    - redis: 10.0.0.9:6379 password:env:REDIS_PASSWORD timeout:2s prefix:mac: lifetime:1h
+//	    - redis: 10.0.0.9:6379 password:env:REDIS_PASSWORD timeout:2s prefix:mac: lifetime:1h key:mac
 //
 // The first argument is the server address. It is either a plain host:port,
 // or a URL: redis://[user[:password]@]host[:port][/db] for a cleartext
@@ -28,17 +28,48 @@
 //     userinfo part of the URL.
 //   - timeout:<duration> bounds the dial, the TLS handshake and every
 //     command. It defaults to 2s and has to be positive.
-//   - prefix:<key-prefix> is put in front of the MAC address to build the key.
-//     It defaults to "mac:". An empty prefix means the key is the bare MAC.
+//   - prefix:<key-prefix> is put in front of the client identifier to build
+//     the key. It defaults to the key mode's own prefix, and an explicit one
+//     wins wherever it appears on the line. An empty prefix means the key is
+//     the bare identifier.
 //   - lifetime:<duration> is the DHCPv6 preferred and valid lifetime used for
 //     clients whose hash carries no leaseTime. It defaults to 1h.
+//   - key:<mac|duid|client-id> selects the client identifier the keys are
+//     built from. It defaults to mac.
 //
 // # Data model
 //
-// One hash per client, keyed by <prefix><mac>, with the MAC written the way
-// net.HardwareAddr.String() writes it: lowercase hex, colon separated.
+// One hash per client, keyed by <prefix><identifier>. Which identifier that
+// is, and how it is written, follows the key: argument.
+//
+// key:mac is the default and works for both families. The MAC is written the
+// way net.HardwareAddr.String() writes it, lowercase hex, colon separated,
+// and the prefix defaults to "mac:".
 //
 //	HSET mac:aa:bb:cc:dd:ee:ff ipv4 10.0.0.5/24 router 10.0.0.1 dns 10.0.0.2,10.0.0.3 leaseTime 12h
+//
+// key:duid is for server6 and fails setup under server4. A MAC is a poor key
+// there: a client identifying with a DUID-EN or a DUID-UUID carries no
+// link-layer address in its DUID, and behind a relay that sends no client
+// link-layer address option there is nothing to extract either. The key is
+// the DUID as it goes on the wire, two-octet type code included, in
+// lowercase hex with no separators, behind the default prefix "duid:".
+//
+//	HSET duid:00030001aabbccddeeff ipv6 2001:db8::10:1 leaseTime 12h
+//
+// A DUID is at most 130 octets, since RFC 8415 section 11.1 caps it at 128
+// and the type code is two more. A request carrying a longer one is passed
+// to the next plugin rather than looked up.
+//
+// key:client-id is for server4 and fails setup under server6. The key is the
+// raw bytes of option 61 in lowercase hex, behind the default prefix
+// "client-id:". RFC 2132 section 9.14 puts a type octet first: type 1 is a
+// hardware address, so a client whose identifier is its MAC appears as 01
+// followed by the six address bytes, and an RFC 4361 client puts a DUID
+// behind type 255. A client that sends no option 61 at all is passed to the
+// next plugin.
+//
+//	HSET client-id:01aabbccddeeff ipv4 10.0.0.5/24
 //
 // The fields this plugin reads:
 //
@@ -123,6 +154,7 @@ const (
 	timeoutArg  = "timeout:"
 	prefixArg   = "prefix:"
 	lifetimeArg = "lifetime:"
+	keyArg      = "key:"
 
 	// envPrefix marks a password that names an environment variable instead
 	// of carrying the secret in the config file.
@@ -131,8 +163,13 @@ const (
 	// Defaults for the optional arguments.
 	defaultPort     = "6379"
 	defaultTimeout  = 2 * time.Second
-	defaultPrefix   = "mac:"
 	defaultLifetime = time.Hour
+
+	// One default key prefix per key mode, so a database serving more than
+	// one of them keeps the three key spaces apart.
+	defaultPrefixMAC      = "mac:"
+	defaultPrefixDUID     = "duid:"
+	defaultPrefixClientID = "client-id:"
 
 	// Schemes accepted in the address argument.
 	schemePlain = "redis"
@@ -148,8 +185,15 @@ const (
 
 // settings is the parsed plugin configuration.
 type settings struct {
-	client   clientConfig
-	prefix   string
+	client clientConfig
+	mode   keyMode
+
+	// prefix is only meaningful once parsing is done: it stays empty until
+	// either a prefix: argument sets it, which prefixSet records, or the key
+	// mode's default fills it in.
+	prefix    string
+	prefixSet bool
+
 	lifetime time.Duration
 }
 
@@ -159,11 +203,12 @@ type settings struct {
 type pluginState struct {
 	client   *client
 	prefix   string
+	mode     keyMode
 	lifetime time.Duration
 }
 
 func setup6(args ...string) (handler.Handler6, error) {
-	p, err := setupState(args...)
+	p, err := setupState(true, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +216,7 @@ func setup6(args ...string) (handler.Handler6, error) {
 }
 
 func setup4(args ...string) (handler.Handler4, error) {
-	p, err := setupState(args...)
+	p, err := setupState(false, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -180,8 +225,8 @@ func setup4(args ...string) (handler.Handler4, error) {
 
 // setupState builds the plugin instance and greets the server. See the
 // package documentation for why a failed greeting is only a warning.
-func setupState(args ...string) (*pluginState, error) {
-	p, err := newPluginState(args...)
+func setupState(v6 bool, args ...string) (*pluginState, error) {
+	p, err := newPluginState(v6, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -196,14 +241,15 @@ func setupState(args ...string) (*pluginState, error) {
 // newPluginState parses the arguments and builds the instance without
 // touching the network. Setup goes through setupState; this is split out so
 // tests can reach the client before it dials.
-func newPluginState(args ...string) (*pluginState, error) {
-	s, err := parseArgs(args)
+func newPluginState(v6 bool, args ...string) (*pluginState, error) {
+	s, err := parseArgs(v6, args)
 	if err != nil {
 		return nil, err
 	}
 	return &pluginState{
 		client:   newClient(s.client),
 		prefix:   s.prefix,
+		mode:     s.mode,
 		lifetime: s.lifetime,
 	}, nil
 }
@@ -218,16 +264,18 @@ var optionParsers = []struct {
 	{timeoutArg, applyTimeout},
 	{prefixArg, applyPrefix},
 	{lifetimeArg, applyLifetime},
+	{keyArg, applyKey},
 }
 
 // parseArgs turns the config line into settings, applying the defaults first
-// so an argument only ever overrides one of them.
-func parseArgs(args []string) (*settings, error) {
+// so an argument only ever overrides one of them. The key prefix is the
+// exception: its default follows the key mode, which an argument anywhere on
+// the line may have changed, so it is filled in once the line is read.
+func parseArgs(v6 bool, args []string) (*settings, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("need a redis address, either host:port or a %s:// or %s:// URL", schemePlain, schemeTLS)
 	}
 	s := &settings{
-		prefix:   defaultPrefix,
 		lifetime: defaultLifetime,
 		client:   clientConfig{timeout: defaultTimeout},
 	}
@@ -239,6 +287,12 @@ func parseArgs(args []string) (*settings, error) {
 			return nil, err
 		}
 	}
+	if err := s.mode.checkFamily(v6); err != nil {
+		return nil, err
+	}
+	if !s.prefixSet {
+		s.prefix = s.mode.defaultPrefix()
+	}
 	return s, nil
 }
 
@@ -249,8 +303,8 @@ func applyOption(s *settings, arg string) error {
 			return o.apply(s, raw)
 		}
 	}
-	return fmt.Errorf("unknown argument %q, want one of %s%s%s%s<value>",
-		arg, passwordArg, timeoutArg, prefixArg, lifetimeArg)
+	return fmt.Errorf("unknown argument %q, want one of %s %s %s %s %s",
+		arg, passwordArg, timeoutArg, prefixArg, lifetimeArg, keyArg)
 }
 
 // applyPassword takes the password literally, or reads it from the
@@ -296,9 +350,20 @@ func applyLifetime(s *settings, raw string) error {
 }
 
 // applyPrefix sets the key prefix. An empty value is allowed and means the
-// keys are bare MAC addresses.
+// keys are bare client identifiers.
 func applyPrefix(s *settings, raw string) error {
 	s.prefix = raw
+	s.prefixSet = true
+	return nil
+}
+
+// applyKey selects which client identifier the keys are built from.
+func applyKey(s *settings, raw string) error {
+	mode, err := parseKeyMode(raw)
+	if err != nil {
+		return err
+	}
+	s.mode = mode
 	return nil
 }
 
@@ -409,9 +474,11 @@ func parseDB(path string) (int, error) {
 	return db, nil
 }
 
-// lookup reads one client's hash.
-func (p *pluginState) lookup(mac net.HardwareAddr) (map[string]string, error) {
-	key := p.prefix + mac.String()
+// lookup reads one client's hash. ident is the canonical identifier the key
+// mode built out of the request, and the Redis key is the configured prefix
+// in front of it.
+func (p *pluginState) lookup(ident string) (map[string]string, error) {
+	key := p.prefix + ident
 	fields, err := p.client.hgetall(key)
 	if err != nil {
 		return nil, err
@@ -436,14 +503,14 @@ func isKnownField(name string) bool {
 
 // addressField returns the address field for this family, logging why the
 // request is being passed on when there is none.
-func addressField(fields map[string]string, name string, mac net.HardwareAddr) (string, bool) {
+func (p *pluginState) addressField(fields map[string]string, name, ident string) (string, bool) {
 	if len(fields) == 0 {
-		log.Infof("MAC address %s is unknown, passing", mac)
+		log.Infof("%s %s is unknown, passing", p.mode.label(), ident)
 		return "", false
 	}
 	value, ok := fields[name]
 	if !ok {
-		log.Infof("MAC address %s has no %s field, passing", mac, name)
+		log.Infof("%s %s has no %s field, passing", p.mode.label(), ident, name)
 		return "", false
 	}
 	return value, true
@@ -541,19 +608,22 @@ func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 	if skipsLookup4(req.MessageType()) {
 		return resp, false
 	}
-	mac := req.ClientHWAddr
-	fields, err := p.lookup(mac)
+	ident, ok := p.mode.key4(req)
+	if !ok {
+		return resp, false
+	}
+	fields, err := p.lookup(ident)
 	if err != nil {
-		log.Warningf("looking up %s failed, dropping the request: %v", mac, err)
+		log.Warningf("looking up %s failed, dropping the request: %v", ident, err)
 		return nil, true
 	}
-	value, ok := addressField(fields, fieldIPv4, mac)
+	value, ok := p.addressField(fields, fieldIPv4, ident)
 	if !ok {
 		return resp, false
 	}
 	addr, mask, err := parseIPv4(value)
 	if err != nil {
-		log.Warningf("dropping the request from %s: %v", mac, err)
+		log.Warningf("dropping the request from %s: %v", ident, err)
 		return nil, true
 	}
 	resp.YourIPAddr = addr
@@ -561,7 +631,7 @@ func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 		resp.Options.Update(dhcpv4.OptSubnetMask(mask))
 	}
 	addOptions4(req, resp, fields)
-	log.Infof("MAC address %s given IP address %s", mac, addr)
+	log.Infof("%s %s given IP address %s", p.mode.label(), ident, addr)
 	return resp, true
 }
 
@@ -625,12 +695,11 @@ func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 		log.Debug("No address requested")
 		return resp, false
 	}
-	mac, err := dhcpv6.ExtractMAC(req)
-	if err != nil {
-		log.Infof("Could not find client MAC for %s, passing", req)
+	ident, ok := p.mode.key6(req, decap)
+	if !ok {
 		return resp, false
 	}
-	return p.answer6(decap, resp, iana, mac)
+	return p.answer6(decap, resp, iana, ident)
 }
 
 // skipsLookup6 reports whether mtype is a DHCPv6 message the plugin passes on
@@ -649,20 +718,20 @@ func skipsLookup6(mtype dhcpv6.MessageType) bool {
 }
 
 // answer6 is the part of Handler6 that runs once the request is known to ask
-// for an address on behalf of a MAC address we can name.
-func (p *pluginState) answer6(decap *dhcpv6.Message, resp dhcpv6.DHCPv6, iana *dhcpv6.OptIANA, mac net.HardwareAddr) (dhcpv6.DHCPv6, bool) {
-	fields, err := p.lookup(mac)
+// for an address on behalf of a client we can name.
+func (p *pluginState) answer6(decap *dhcpv6.Message, resp dhcpv6.DHCPv6, iana *dhcpv6.OptIANA, ident string) (dhcpv6.DHCPv6, bool) {
+	fields, err := p.lookup(ident)
 	if err != nil {
-		log.Warningf("looking up %s failed, dropping the request: %v", mac, err)
+		log.Warningf("looking up %s failed, dropping the request: %v", ident, err)
 		return nil, true
 	}
-	value, ok := addressField(fields, fieldIPv6, mac)
+	value, ok := p.addressField(fields, fieldIPv6, ident)
 	if !ok {
 		return resp, false
 	}
 	addr, err := parseIPv6(value)
 	if err != nil {
-		log.Warningf("dropping the request from %s: %v", mac, err)
+		log.Warningf("dropping the request from %s: %v", ident, err)
 		return nil, true
 	}
 	lifetime := p.lifetime
@@ -684,6 +753,6 @@ func (p *pluginState) answer6(decap *dhcpv6.Message, resp dhcpv6.DHCPv6, iana *d
 			resp.UpdateOption(dhcpv6.OptDNS(servers...))
 		}
 	}
-	log.Infof("MAC address %s given IP address %s", mac, addr)
+	log.Infof("%s %s given IP address %s", p.mode.label(), ident, addr)
 	return resp, false
 }
