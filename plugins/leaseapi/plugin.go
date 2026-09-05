@@ -6,7 +6,9 @@
 // read-only HTTP API, on a unix socket or on loopback.
 //
 // Lease-holding plugins register themselves with the leases package during
-// setup; this plugin serves whatever the registry currently reports.
+// setup; this plugin serves whatever the registry currently reports on
+// GET /v1/leases, /v1/pools and /v1/health, with family=4|6 and source=<name>
+// filters on the first two.
 //
 //	server4:
 //	  plugins:
@@ -17,7 +19,7 @@
 //
 // Socket permissions are the authentication (default mode 0600); a tcp
 // address must be loopback. Put a reverse proxy or an ssh forward in front to
-// expose this remotely — never bind a routable address, which would publish
+// expose this remotely. Never bind a routable address, which would publish
 // every client's MAC, DUID, hostname and address to anyone who can reach it.
 //
 // The API is read-only: there is no endpoint that frees a lease or changes
