@@ -5,6 +5,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -103,10 +104,13 @@ func takesNoReply4(mt dhcpv4.MessageType) bool {
 // dropped. stoppedAt is the position of the link that stopped the chain, or
 // -1 when every plugin ran; the links are indexed rather than ranged over so
 // the loop does not copy a Link6 per plugin per packet.
-func applyHandlers6(chain []plugins.Link6, req, resp dhcpv6.DHCPv6) (_ dhcpv6.DHCPv6, stoppedAt int) {
+//
+// Every handler is called with ctx, which describes the request when any
+// plugin in the chain asked for it and is a background context otherwise.
+func applyHandlers6(ctx context.Context, chain []plugins.Link6, req, resp dhcpv6.DHCPv6) (_ dhcpv6.DHCPv6, stoppedAt int) {
 	for i := range chain {
 		var stop bool
-		resp, stop = chain[i].Handler(req, resp)
+		resp, stop = chain[i].Handler(ctx, req, resp)
 		if stop {
 			return resp, i
 		}
@@ -117,10 +121,10 @@ func applyHandlers6(chain []plugins.Link6, req, resp dhcpv6.DHCPv6) (_ dhcpv6.DH
 // applyHandlers4 walks the plugin chain. A nil response means the request is
 // dropped. stoppedAt is the position of the link that stopped the chain, or
 // -1 when every plugin ran.
-func applyHandlers4(chain []plugins.Link4, req, resp *dhcpv4.DHCPv4) (_ *dhcpv4.DHCPv4, stoppedAt int) {
+func applyHandlers4(ctx context.Context, chain []plugins.Link4, req, resp *dhcpv4.DHCPv4) (_ *dhcpv4.DHCPv4, stoppedAt int) {
 	for i := range chain {
 		var stop bool
-		resp, stop = chain[i].Handler(req, resp)
+		resp, stop = chain[i].Handler(ctx, req, resp)
 		if stop {
 			return resp, i
 		}

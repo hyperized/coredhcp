@@ -5,13 +5,17 @@
 package example
 
 import (
+	"context"
 	"net"
+	"net/netip"
 	"testing"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/coredhcp/coredhcp/handler"
 )
 
 func TestSetup6(t *testing.T) {
@@ -22,6 +26,12 @@ func TestSetup6(t *testing.T) {
 
 func TestSetup4(t *testing.T) {
 	h, err := setup4()
+	require.NoError(t, err)
+	assert.NotNil(t, h)
+}
+
+func TestSetup4Ctx(t *testing.T) {
+	h, err := setup4Ctx()
 	require.NoError(t, err)
 	assert.NotNil(t, h)
 }
@@ -48,4 +58,28 @@ func TestExampleHandler4(t *testing.T) {
 	got, stop := exampleHandler4(req, resp)
 	assert.Same(t, resp, got)
 	assert.False(t, stop)
+}
+
+func TestExampleHandler4Ctx(t *testing.T) {
+	req, err := dhcpv4.NewDiscovery(net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff})
+	require.NoError(t, err)
+	resp, err := dhcpv4.NewReplyFromRequest(req)
+	require.NoError(t, err)
+
+	t.Run("with request info", func(t *testing.T) {
+		ctx := handler.WithRequestInfo(context.Background(), handler.RequestInfo{
+			Interface: "eth0",
+			Peer:      netip.MustParseAddrPort("192.0.2.10:68"),
+		})
+
+		got, stop := exampleHandler4Ctx(ctx, req, resp)
+		assert.Same(t, resp, got)
+		assert.False(t, stop)
+	})
+
+	t.Run("without request info", func(t *testing.T) {
+		got, stop := exampleHandler4Ctx(context.Background(), req, resp)
+		assert.Same(t, resp, got)
+		assert.False(t, stop)
+	})
 }

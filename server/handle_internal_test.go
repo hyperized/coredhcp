@@ -5,6 +5,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -248,14 +249,14 @@ func TestApplyHandlers4(t *testing.T) {
 	base := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
 
 	t.Run("empty chain returns resp unchanged and no stop position", func(t *testing.T) {
-		resp, stoppedAt := applyHandlers4(nil, base, base)
+		resp, stoppedAt := applyHandlers4(context.Background(), nil, base, base)
 		assert.Same(t, base, resp)
 		assert.Equal(t, -1, stoppedAt)
 	})
 
 	t.Run("chain that runs to the end reports no stop position", func(t *testing.T) {
 		pass := func(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) { return resp, false }
-		resp, stoppedAt := applyHandlers4(chain4(pass, pass), base, base)
+		resp, stoppedAt := applyHandlers4(context.Background(), chain4(pass, pass), base, base)
 		assert.Same(t, base, resp)
 		assert.Equal(t, -1, stoppedAt)
 	})
@@ -274,7 +275,7 @@ func TestApplyHandlers4(t *testing.T) {
 			order = append(order, 3)
 			return resp, false
 		}
-		resp, stoppedAt := applyHandlers4(chain4(h1, h2, h3), base, base)
+		resp, stoppedAt := applyHandlers4(context.Background(), chain4(h1, h2, h3), base, base)
 		assert.Nil(t, resp)
 		assert.Equal(t, []int{1, 2}, order)
 		assert.Equal(t, 1, stoppedAt)
@@ -285,14 +286,14 @@ func TestApplyHandlers6(t *testing.T) {
 	base := mustSolicit(t, false)
 
 	t.Run("empty chain returns resp unchanged and no stop position", func(t *testing.T) {
-		resp, stoppedAt := applyHandlers6(nil, base, base)
+		resp, stoppedAt := applyHandlers6(context.Background(), nil, base, base)
 		assert.Same(t, base, resp)
 		assert.Equal(t, -1, stoppedAt)
 	})
 
 	t.Run("chain that runs to the end reports no stop position", func(t *testing.T) {
 		pass := func(_, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) { return resp, false }
-		resp, stoppedAt := applyHandlers6(chain6(pass, pass), base, base)
+		resp, stoppedAt := applyHandlers6(context.Background(), chain6(pass, pass), base, base)
 		assert.Same(t, base, resp)
 		assert.Equal(t, -1, stoppedAt)
 	})
@@ -311,7 +312,7 @@ func TestApplyHandlers6(t *testing.T) {
 			order = append(order, 3)
 			return resp, false
 		}
-		resp, stoppedAt := applyHandlers6(chain6(h1, h2, h3), base, base)
+		resp, stoppedAt := applyHandlers6(context.Background(), chain6(h1, h2, h3), base, base)
 		assert.Nil(t, resp)
 		assert.Equal(t, []int{1, 2}, order)
 		assert.Equal(t, 1, stoppedAt)
@@ -483,10 +484,12 @@ func newTestListener4(handlers []handler.Handler4, conn *fakeConn4) *listener4 {
 
 // chain4 turns bare handlers into a chain, naming each link after its
 // position so a test can tell from an event which one stopped the chain.
+// Each one is wrapped the way plugins.LoadChains wraps a handler from a
+// plain Setup4, so the chain a test drives is shaped like a loaded one.
 func chain4(handlers ...handler.Handler4) []plugins.Link4 {
 	chain := make([]plugins.Link4, 0, len(handlers))
 	for i, h := range handlers {
-		chain = append(chain, plugins.Link4{Name: fmt.Sprintf("plugin%d", i+1), Handler: h})
+		chain = append(chain, plugins.Link4{Name: fmt.Sprintf("plugin%d", i+1), Handler: ignoreCtx4(h)})
 	}
 	return chain
 }
@@ -495,9 +498,24 @@ func chain4(handlers ...handler.Handler4) []plugins.Link4 {
 func chain6(handlers ...handler.Handler6) []plugins.Link6 {
 	chain := make([]plugins.Link6, 0, len(handlers))
 	for i, h := range handlers {
-		chain = append(chain, plugins.Link6{Name: fmt.Sprintf("plugin%d", i+1), Handler: h})
+		chain = append(chain, plugins.Link6{Name: fmt.Sprintf("plugin%d", i+1), Handler: ignoreCtx6(h)})
 	}
 	return chain
+}
+
+// ignoreCtx4 is the adapter plugins puts around a handler from a plain
+// Setup4: the context goes no further than the wrapper.
+func ignoreCtx4(h handler.Handler4) handler.Handler4Ctx {
+	return func(_ context.Context, req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+		return h(req, resp)
+	}
+}
+
+// ignoreCtx6 is ignoreCtx4 for DHCPv6.
+func ignoreCtx6(h handler.Handler6) handler.Handler6Ctx {
+	return func(_ context.Context, req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
+		return h(req, resp)
+	}
 }
 
 func TestHandleMsg4ParseError(t *testing.T) {

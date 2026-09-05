@@ -12,6 +12,8 @@ package example
 // Feedback is welcome!
 
 import (
+	"context"
+
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
 
@@ -72,6 +74,23 @@ var Plugin = plugins.Plugin{
 	Setup4: setup4,
 }
 
+// PluginContext is a second plugin declared from this same package: nothing
+// ties a plugin to a package one to one, only its name to a slot in the
+// registry, which is why this one carries a name of its own. It reaches a
+// running server the way Plugin does, by being listed in the binary's plugin
+// set.
+//
+// Where Plugin declares the plain Setup4, this one declares Setup4Ctx and its
+// handler is given the context the server dispatched the request with. A
+// plugin picks one form or the other per family; RegisterPlugin refuses one
+// that declares both, since only one of them could ever be called. Neither
+// Setup6 nor Setup6Ctx is set here, which is how a plugin says it does not
+// handle that family.
+var PluginContext = plugins.Plugin{
+	Name:      "example_context",
+	Setup4Ctx: setup4Ctx,
+}
+
 // setup6 is the setup function to initialize the handler for DHCPv6
 // traffic. This function implements the `plugin.SetupFunc6` interface.
 // This function returns a `handler.Handler6` function, and an error if any.
@@ -89,6 +108,14 @@ func setup6(_ ...string) (handler.Handler6, error) {
 func setup4(_ ...string) (handler.Handler4, error) {
 	log.Printf("loaded plugin for DHCPv4.")
 	return exampleHandler4, nil
+}
+
+// setup4Ctx is setup4's context-aware counterpart, returned by PluginContext
+// for DHCPv4. It implements the `plugins.SetupFunc4Ctx` interface, and hands
+// back `exampleHandler4Ctx` instead of `exampleHandler4`.
+func setup4Ctx(_ ...string) (handler.Handler4Ctx, error) {
+	log.Printf("loaded context-aware plugin for DHCPv4.")
+	return exampleHandler4Ctx, nil
 }
 
 // exampleHandler6 handles DHCPv6 packets for the example plugin. It implements
@@ -119,5 +146,30 @@ func exampleHandler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	// return the unmodified response, and false. This means that the next
 	// plugin in the chain will be called, and the unmodified response packet
 	// will be used as its input.
+	return resp, false
+}
+
+// exampleHandler4Ctx behaves like exampleHandler4, but implements the
+// `handler.Handler4Ctx` interface, so it also gets the context the server
+// dispatched the request with. That context is where handler.RequestInfo
+// lives: which interface the request arrived on and where it came from,
+// neither of which is anywhere in the DHCP payload itself. This is what a
+// plugin choosing a subnet per interface, or rate limiting by source address,
+// would key on.
+//
+// The information can be absent, as it is for a handler called through the
+// legacy plugins.LoadPlugins API or straight from a test, so a handler reads
+// it with the ok form and copes with false rather than assuming it is always
+// there. And ctx belongs to the call: nothing pulled out of it may be kept
+// around after the handler returns.
+func exampleHandler4Ctx(ctx context.Context, req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+	info, ok := handler.RequestInfoFrom(ctx)
+	if !ok {
+		// No request information: the handler was called outside the
+		// server's dispatch path, so there is nothing to describe.
+		log.Printf("received DHCPv4 packet: %s", req.Summary())
+		return resp, false
+	}
+	log.Printf("received DHCPv4 packet on %s from %s: %s", info.Interface, info.Peer, req.Summary())
 	return resp, false
 }

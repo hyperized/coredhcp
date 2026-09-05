@@ -5,6 +5,7 @@
 package server
 
 import (
+	"context"
 	"net"
 	"testing"
 
@@ -12,6 +13,8 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
+
+	"github.com/coredhcp/coredhcp/handler"
 )
 
 // discardConn4 is a conn4 double whose WriteTo drops every reply instead of
@@ -60,6 +63,44 @@ func BenchmarkHandleMsg4Discover(b *testing.B) {
 
 	l := &listener4{conn4: discardConn4{}, chain: chain4(passthrough4)}
 	l.Index = 1 // bound interface: avoids the "no interface information" error log on every broadcast reply
+	peer := &net.UDPAddr{IP: net.ParseIP("192.0.2.1")}
+
+	for b.Loop() {
+		buf := *bufpool.Get().(*[]byte)
+		buf = buf[:MaxDatagram]
+		n := copy(buf, data)
+		l.HandleMsg4(buf[:n], nil, peer)
+	}
+}
+
+// passthroughCtx4 is passthrough4 for a context-aware chain: it actually
+// reads the RequestInfo, so the benchmark below pays for building one instead
+// of measuring a handler that would ignore it anyway.
+func passthroughCtx4(ctx context.Context, _, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+	if info, ok := handler.RequestInfoFrom(ctx); ok {
+		_ = info.Interface
+	}
+	return resp, false
+}
+
+// BenchmarkHandleMsg4DiscoverWithContext is BenchmarkHandleMsg4Discover with
+// one difference: the listener wants a context, so every packet pays for a
+// RequestInfo before the chain sees it. Next to the legacy chain above, which
+// builds none, this is what that per-packet cost looks like.
+func BenchmarkHandleMsg4DiscoverWithContext(b *testing.B) {
+	b.ReportAllocs()
+
+	req, err := dhcpv4.New(dhcpv4.WithHwAddr(testMAC), dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
+	if err != nil {
+		b.Fatal(err)
+	}
+	req.SetBroadcast()
+	data := req.ToBytes()
+
+	l := &listener4{conn4: discardConn4{}, chain: ctxChain4(passthroughCtx4), wantsCtx: true}
+	// Bound interface, as above, and named: an unnamed one would leave
+	// RequestInfo.Interface empty, which no real listener does.
+	l.Index, l.Name = 1, "eth0"
 	peer := &net.UDPAddr{IP: net.ParseIP("192.0.2.1")}
 
 	for b.Loop() {

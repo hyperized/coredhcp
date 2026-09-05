@@ -5,6 +5,7 @@
 package plugins_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -347,4 +348,271 @@ func TestLoadChainsCopiesArgs(t *testing.T) {
 
 	require.Len(t, chains.V4, 1)
 	assert.Equal(t, []string{"original"}, chains.V4[0].Args)
+}
+
+// TestRegisterPluginConflictingSetup covers a plugin declaring both setup
+// forms for one family, once per family. The registry refuses it outright
+// rather than picking one and ignoring the other, which is what
+// ErrConflictingSetup exists to say.
+func TestRegisterPluginConflictingSetup(t *testing.T) {
+	cases := []struct {
+		name   string
+		plugin *plugins.Plugin
+		family string
+	}{
+		{
+			name: "DHCPv4",
+			plugin: &plugins.Plugin{
+				Name:      "test-conflict-v4",
+				Setup4:    stubHandler4,
+				Setup4Ctx: func(_ ...string) (handler.Handler4Ctx, error) { return nil, nil },
+			},
+			family: "DHCPv4",
+		},
+		{
+			name: "DHCPv6",
+			plugin: &plugins.Plugin{
+				Name:      "test-conflict-v6",
+				Setup6:    stubHandler6,
+				Setup6Ctx: func(_ ...string) (handler.Handler6Ctx, error) { return nil, nil },
+			},
+			family: "DHCPv6",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := plugins.RegisterPlugin(tc.plugin)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, plugins.ErrConflictingSetup)
+			assert.Contains(t, err.Error(), tc.plugin.Name)
+			assert.Contains(t, err.Error(), tc.family)
+
+			_, ok := plugins.RegisteredPlugins[tc.plugin.Name]
+			assert.False(t, ok, "a plugin that failed to register must not end up in the registry")
+		})
+	}
+}
+
+// TestLoadChainsContextAwarePlugin loads a chain with one context-aware
+// plugin next to a plain one. It checks the link-level bookkeeping
+// (WantsContext, a non-nil Handler) and that the handler can actually read
+// back the RequestInfo the caller attaches to the context it is invoked
+// with, which is the entire reason Setup4Ctx/Setup6Ctx exist.
+func TestLoadChainsContextAwarePlugin(t *testing.T) {
+	var gotV4, gotV6 handler.RequestInfo
+	ctxPlugin := &plugins.Plugin{
+		Name: "test-ctx-aware",
+		Setup4Ctx: func(_ ...string) (handler.Handler4Ctx, error) {
+			return func(ctx context.Context, _, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+				gotV4, _ = handler.RequestInfoFrom(ctx)
+				return resp, false
+			}, nil
+		},
+		Setup6Ctx: func(_ ...string) (handler.Handler6Ctx, error) {
+			return func(ctx context.Context, _, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
+				gotV6, _ = handler.RequestInfoFrom(ctx)
+				return resp, false
+			}, nil
+		},
+	}
+	plainSibling := &plugins.Plugin{Name: "test-ctx-aware-plain-sibling", Setup4: stubHandler4, Setup6: stubHandler6}
+	register(t, ctxPlugin)
+	register(t, plainSibling)
+
+	conf := &config.Config{
+		Server4: &config.ServerConfig{
+			Plugins: []config.PluginConfig{{Name: plainSibling.Name}, {Name: ctxPlugin.Name}},
+		},
+		Server6: &config.ServerConfig{
+			Plugins: []config.PluginConfig{{Name: plainSibling.Name}, {Name: ctxPlugin.Name}},
+		},
+	}
+	chains, err := plugins.LoadChains(conf)
+	require.NoError(t, err)
+
+	require.Len(t, chains.V4, 2)
+	assert.False(t, chains.V4[0].WantsContext)
+	assert.True(t, chains.V4[1].WantsContext)
+	require.NotNil(t, chains.V4[1].Handler)
+
+	require.Len(t, chains.V6, 2)
+	assert.False(t, chains.V6[0].WantsContext)
+	assert.True(t, chains.V6[1].WantsContext)
+	require.NotNil(t, chains.V6[1].Handler)
+
+	// One link in each chain wants a context, so the chain as a whole does,
+	// even though its sibling link ignores whatever it is handed.
+	assert.True(t, plugins.WantsContext(chains.V4))
+	assert.True(t, plugins.WantsContext(chains.V6))
+
+	info := handler.RequestInfo{Interface: "eth0"}
+	ctx := handler.WithRequestInfo(context.Background(), info)
+
+	_, stop4 := chains.V4[1].Handler(ctx, nil, nil)
+	assert.False(t, stop4)
+	assert.Equal(t, info, gotV4)
+
+	_, stop6 := chains.V6[1].Handler(ctx, nil, nil)
+	assert.False(t, stop6)
+	assert.Equal(t, info, gotV6)
+}
+
+// TestLoadChainsPlainPluginIgnoresContext loads a plugin declaring only the
+// plain Setup4/Setup6 forms and checks the link says WantsContext false, and
+// that the adapter around its handler swallows the context: a plain handler
+// was never written to expect one.
+func TestLoadChainsPlainPluginIgnoresContext(t *testing.T) {
+	plugin := &plugins.Plugin{Name: "test-plain-only", Setup4: stubHandler4, Setup6: stubHandler6}
+	register(t, plugin)
+
+	conf := &config.Config{
+		Server4: &config.ServerConfig{Plugins: []config.PluginConfig{{Name: plugin.Name}}},
+		Server6: &config.ServerConfig{Plugins: []config.PluginConfig{{Name: plugin.Name}}},
+	}
+	chains, err := plugins.LoadChains(conf)
+	require.NoError(t, err)
+
+	require.Len(t, chains.V4, 1)
+	assert.False(t, chains.V4[0].WantsContext)
+	require.Len(t, chains.V6, 1)
+	assert.False(t, chains.V6[0].WantsContext)
+	assert.False(t, plugins.WantsContext(chains.V4))
+	assert.False(t, plugins.WantsContext(chains.V6))
+
+	ctx := handler.WithRequestInfo(context.Background(), handler.RequestInfo{Interface: "eth0"})
+
+	resp4, stop4 := chains.V4[0].Handler(ctx, nil, nil)
+	assert.False(t, stop4)
+	assert.Nil(t, resp4)
+
+	resp6, stop6 := chains.V6[0].Handler(ctx, nil, nil)
+	assert.False(t, stop6)
+	assert.Nil(t, resp6)
+}
+
+// TestWantsContextEmptyChain rounds out WantsContext's cases that don't need
+// a loaded plugin behind them: nothing to range over reports false, for both
+// protocol families.
+func TestWantsContextEmptyChain(t *testing.T) {
+	cases := []struct {
+		name string
+		v4   []plugins.Link4
+		v6   []plugins.Link6
+	}{
+		{name: "nil chain", v4: nil, v6: nil},
+		{name: "empty chain", v4: []plugins.Link4{}, v6: []plugins.Link6{}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.False(t, plugins.WantsContext(tc.v4))
+			assert.False(t, plugins.WantsContext(tc.v6))
+		})
+	}
+}
+
+// TestLoadPluginsContextAwarePluginSeesNoRequestInfo checks the documented
+// gap in the legacy LoadPlugins path: it calls a context-aware handler with
+// context.Background(), so RequestInfoFrom must report false inside it,
+// because there was never a real request behind this call.
+func TestLoadPluginsContextAwarePluginSeesNoRequestInfo(t *testing.T) {
+	var sawV4, sawV6 bool
+	plugin := &plugins.Plugin{
+		Name: "test-loadplugins-ctx-aware",
+		Setup4Ctx: func(_ ...string) (handler.Handler4Ctx, error) {
+			return func(ctx context.Context, _, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+				_, sawV4 = handler.RequestInfoFrom(ctx)
+				return resp, false
+			}, nil
+		},
+		Setup6Ctx: func(_ ...string) (handler.Handler6Ctx, error) {
+			return func(ctx context.Context, _, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
+				_, sawV6 = handler.RequestInfoFrom(ctx)
+				return resp, false
+			}, nil
+		},
+	}
+	register(t, plugin)
+
+	conf := &config.Config{
+		Server4: &config.ServerConfig{Plugins: []config.PluginConfig{{Name: plugin.Name}}},
+		Server6: &config.ServerConfig{Plugins: []config.PluginConfig{{Name: plugin.Name}}},
+	}
+	handlers4, handlers6, err := plugins.LoadPlugins(conf)
+	require.NoError(t, err)
+	require.Len(t, handlers4, 1)
+	require.Len(t, handlers6, 1)
+
+	resp4, stop4 := handlers4[0](nil, nil)
+	assert.False(t, stop4)
+	assert.Nil(t, resp4)
+	assert.False(t, sawV4)
+
+	resp6, stop6 := handlers6[0](nil, nil)
+	assert.False(t, stop6)
+	assert.Nil(t, resp6)
+	assert.False(t, sawV6)
+}
+
+func TestLoadChainsSetupCtxError(t *testing.T) {
+	t.Run("v4", func(t *testing.T) {
+		plugin := &plugins.Plugin{Name: "test-chain-setup4ctx-error", Setup4Ctx: func(_ ...string) (handler.Handler4Ctx, error) {
+			return nil, errors.New("setup4ctx boom")
+		}}
+		register(t, plugin)
+
+		conf := &config.Config{Server4: &config.ServerConfig{
+			Plugins: []config.PluginConfig{{Name: plugin.Name}},
+		}}
+		chains, err := plugins.LoadChains(conf)
+		assert.Nil(t, chains)
+		assert.EqualError(t, err, "setup4ctx boom")
+	})
+
+	t.Run("v6", func(t *testing.T) {
+		plugin := &plugins.Plugin{Name: "test-chain-setup6ctx-error", Setup6Ctx: func(_ ...string) (handler.Handler6Ctx, error) {
+			return nil, errors.New("setup6ctx boom")
+		}}
+		register(t, plugin)
+
+		conf := &config.Config{Server6: &config.ServerConfig{
+			Plugins: []config.PluginConfig{{Name: plugin.Name}},
+		}}
+		chains, err := plugins.LoadChains(conf)
+		assert.Nil(t, chains)
+		assert.EqualError(t, err, "setup6ctx boom")
+	})
+}
+
+func TestLoadChainsNilHandlerCtx(t *testing.T) {
+	t.Run("v4", func(t *testing.T) {
+		plugin := &plugins.Plugin{Name: "test-chain-nil-handler4ctx", Setup4Ctx: func(_ ...string) (handler.Handler4Ctx, error) {
+			return nil, nil
+		}}
+		register(t, plugin)
+
+		conf := &config.Config{Server4: &config.ServerConfig{
+			Plugins: []config.PluginConfig{{Name: plugin.Name}},
+		}}
+		chains, err := plugins.LoadChains(conf)
+		assert.Nil(t, chains)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no DHCPv4 handler for plugin test-chain-nil-handler4ctx")
+	})
+
+	t.Run("v6", func(t *testing.T) {
+		plugin := &plugins.Plugin{Name: "test-chain-nil-handler6ctx", Setup6Ctx: func(_ ...string) (handler.Handler6Ctx, error) {
+			return nil, nil
+		}}
+		register(t, plugin)
+
+		conf := &config.Config{Server6: &config.ServerConfig{
+			Plugins: []config.PluginConfig{{Name: plugin.Name}},
+		}}
+		chains, err := plugins.LoadChains(conf)
+		assert.Nil(t, chains)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no DHCPv6 handler for plugin test-chain-nil-handler6ctx")
+	})
 }

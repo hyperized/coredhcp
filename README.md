@@ -320,6 +320,14 @@ The best way to learn is to read the comments and source code of the
 [example plugin](plugins/example/), which guides you through the implementation
 of a simple plugin that prints a packet every time it is received by the server.
 
+A plugin that needs to know which interface a request arrived on, or which
+address it came from, declares `Setup4Ctx`/`Setup6Ctx` instead of
+`Setup4`/`Setup6`. Its handler is given a `context.Context` as its first
+argument, and `handler.RequestInfoFrom(ctx)` reads the interface name and
+index, the peer address and the address the listening socket is bound to out
+of it. A plugin uses one form or the other per family, never both; the example
+plugin shows both.
+
 # Authors
 
 * [Andrea Barberio](https://github.com/insomniacslk)

@@ -51,6 +51,10 @@ type listener6 struct {
 	chain    []plugins.Link6
 	observer events.Observer
 	ifaces   ifaceCache
+	// wantsCtx records, once at startup, whether any plugin in the chain
+	// reads the request context. Answering it per packet would mean walking
+	// the whole chain before running any of it.
+	wantsCtx bool
 }
 
 type listener4 struct {
@@ -59,6 +63,7 @@ type listener4 struct {
 	chain    []plugins.Link4
 	observer events.Observer
 	ifaces   ifaceCache
+	wantsCtx bool
 }
 
 // ifaceCache maps interface indexes to names for one listener.
@@ -337,6 +342,7 @@ func (s *Servers) start6(c *config.Config, chains *plugins.Chains) error {
 		return nil
 	}
 	log.Println("Starting DHCPv6 server")
+	wantsCtx := plugins.WantsContext(chains.V6)
 	for i := range c.Server6.Addresses {
 		addr := c.Server6.Addresses[i]
 		l6, err := listen6(&addr)
@@ -344,6 +350,7 @@ func (s *Servers) start6(c *config.Config, chains *plugins.Chains) error {
 			return err
 		}
 		l6.chain = chains.V6
+		l6.wantsCtx = wantsCtx
 		l6.observer = s.observer
 		s.listeners = append(s.listeners, l6)
 		s.reportListener(events.FamilyV6, l6.LocalAddr(), addr.Zone)
@@ -358,6 +365,7 @@ func (s *Servers) start4(c *config.Config, chains *plugins.Chains) error {
 		return nil
 	}
 	log.Println("Starting DHCPv4 server")
+	wantsCtx := plugins.WantsContext(chains.V4)
 	for i := range c.Server4.Addresses {
 		addr := c.Server4.Addresses[i]
 		l4, err := listen4(&addr)
@@ -365,6 +373,7 @@ func (s *Servers) start4(c *config.Config, chains *plugins.Chains) error {
 			return err
 		}
 		l4.chain = chains.V4
+		l4.wantsCtx = wantsCtx
 		l4.observer = s.observer
 		s.listeners = append(s.listeners, l4)
 		s.reportListener(events.FamilyV4, l4.LocalAddr(), addr.Zone)
