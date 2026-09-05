@@ -273,7 +273,10 @@ fills up forever: coredhcp/coredhcp#148). It frees a lease only when the
 client names it in `ciaddr`, as RFC 2131 requires, so a forged DHCPRELEASE
 can no longer drain the pool, and it keeps an address a client declined out
 of circulation for `decline-probation` (24h by default) instead of handing
-the next client into the same conflict.
+the next client into the same conflict. That quarantine is bounded by
+`decline-max`, a tenth of the pool by default, because a DECLINE is as
+unauthenticated as a RELEASE: holding addresses back without a limit let two
+forged packets per address park an entire pool for the day.
 
 The `file` plugin no longer stamps its static reservation onto a RELEASE or
 DECLINE, and `server_id` decides whether a DHCPv4 request is addressed to

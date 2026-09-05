@@ -231,3 +231,32 @@ func TestPluginSetupDeclineProbationArgument(t *testing.T) {
 		})
 	}
 }
+
+// TestPluginSetupDeclineMaxArgument covers the third optional argument end to
+// end, alongside the other two and in the wrong shapes.
+func TestPluginSetupDeclineMaxArgument(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		extra   []string
+		wantErr bool
+	}{
+		{name: "on its own", extra: []string{"decline-max:3"}},
+		{name: "disabled", extra: []string{"decline-max:0"}},
+		{name: "alongside the other two", extra: []string{"sweep:90s", "decline-probation:1h", "decline-max:3"}},
+		{name: "in front of the other two", extra: []string{"decline-max:3", "decline-probation:1h", "sweep:90s"}},
+		{name: "not a number", extra: []string{"decline-max:lots"}, wantErr: true},
+		{name: "negative", extra: []string{"decline-max:-1"}, wantErr: true},
+		{name: "given twice", extra: []string{"decline-max:2", "decline-max:3"}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{filepath.Join(t.TempDir(), "leases.db"), "10.0.0.1", "10.0.0.5", "1h"}, tc.extra...)
+			h4, err := rangeplugin.Plugin.Setup4(args...)
+			if tc.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.NotNil(t, h4)
+		})
+	}
+}

@@ -467,7 +467,9 @@ func newTestPlugin(t *testing.T, start, end net.IP) (*pluginState, *fakeClock) {
 		declined:         make(map[string]time.Time),
 		allocator:        alloc,
 		LeaseTime:        testLeaseTime,
+		poolSize:         poolSize(start, end),
 		declineProbation: defaultDeclineProbation,
+		declineMax:       defaultDeclineMax(poolSize(start, end)),
 		now:              clock.Now,
 		stop:             make(chan struct{}),
 		done:             make(chan struct{}),
@@ -762,32 +764,52 @@ func TestDefaultSweepInterval(t *testing.T) {
 }
 
 func TestParseOptions(t *testing.T) {
+	// The pool size only feeds the decline-max default, so one representative
+	// size keeps the table readable; testPoolSize is big enough for a tenth of
+	// it to land above the floor of one.
+	const testPoolSize = 100
+
 	for _, tc := range []struct {
 		name          string
+		poolSize      uint64
 		extra         []string
 		wantSweep     time.Duration
 		wantProbation time.Duration
+		wantMax       int
 		wantErrSub    string
 	}{
-		{name: "both derived from defaults", wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation},
-		{name: "sweep override", extra: []string{"sweep:90s"}, wantSweep: 90 * time.Second, wantProbation: defaultDeclineProbation},
-		{name: "probation override", extra: []string{"decline-probation:15m"}, wantSweep: 30 * time.Minute, wantProbation: 15 * time.Minute},
-		{name: "probation disabled", extra: []string{"decline-probation:0"}, wantSweep: 30 * time.Minute},
-		{name: "both, sweep first", extra: []string{"sweep:90s", "decline-probation:15m"}, wantSweep: 90 * time.Second, wantProbation: 15 * time.Minute},
-		{name: "both, probation first", extra: []string{"decline-probation:15m", "sweep:90s"}, wantSweep: 90 * time.Second, wantProbation: 15 * time.Minute},
+		{name: "all derived from defaults", wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation, wantMax: 10},
+		{name: "a pool too small for a tenth keeps one address back", poolSize: 4, wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation, wantMax: 1},
+		{name: "a pool big enough to hit the cap", poolSize: 1 << 32, wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation, wantMax: maxDeclineQuarantine},
+		{name: "sweep override", extra: []string{"sweep:90s"}, wantSweep: 90 * time.Second, wantProbation: defaultDeclineProbation, wantMax: 10},
+		{name: "probation override", extra: []string{"decline-probation:15m"}, wantSweep: 30 * time.Minute, wantProbation: 15 * time.Minute, wantMax: 10},
+		{name: "probation disabled", extra: []string{"decline-probation:0"}, wantSweep: 30 * time.Minute, wantMax: 10},
+		{name: "quarantine override", extra: []string{"decline-max:3"}, wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation, wantMax: 3},
+		{name: "quarantine disabled", extra: []string{"decline-max:0"}, wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation},
+		{name: "both, sweep first", extra: []string{"sweep:90s", "decline-probation:15m"}, wantSweep: 90 * time.Second, wantProbation: 15 * time.Minute, wantMax: 10},
+		{name: "both, probation first", extra: []string{"decline-probation:15m", "sweep:90s"}, wantSweep: 90 * time.Second, wantProbation: 15 * time.Minute, wantMax: 10},
+		{name: "all three, in reverse", extra: []string{"decline-max:2", "decline-probation:15m", "sweep:90s"}, wantSweep: 90 * time.Second, wantProbation: 15 * time.Minute, wantMax: 2},
 		{name: "bare duration left over from the positional args", extra: []string{"90s"}, wantErrSub: "unexpected argument"},
 		{name: "a key with no value", extra: []string{"sweep"}, wantErrSub: "unexpected argument"},
 		{name: "unknown key", extra: []string{"reap:90s"}, wantErrSub: "unexpected argument"},
 		{name: "sweep given twice", extra: []string{"sweep:90s", "sweep:2m"}, wantErrSub: "sweep given more than once"},
 		{name: "probation given twice", extra: []string{"decline-probation:1h", "decline-probation:2h"}, wantErrSub: "decline-probation given more than once"},
+		{name: "quarantine given twice", extra: []string{"decline-max:2", "decline-max:3"}, wantErrSub: "decline-max given more than once"},
 		{name: "malformed sweep duration", extra: []string{"sweep:soon"}, wantErrSub: "invalid sweep interval"},
 		{name: "zero sweep", extra: []string{"sweep:0s"}, wantErrSub: "has to be positive"},
 		{name: "negative sweep", extra: []string{"sweep:-1m"}, wantErrSub: "has to be positive"},
 		{name: "malformed probation duration", extra: []string{"decline-probation:never"}, wantErrSub: "invalid decline probation"},
 		{name: "negative probation", extra: []string{"decline-probation:-1h"}, wantErrSub: "cannot be negative"},
+		{name: "malformed quarantine size", extra: []string{"decline-max:lots"}, wantErrSub: "invalid decline maximum"},
+		{name: "fractional quarantine size", extra: []string{"decline-max:1.5"}, wantErrSub: "invalid decline maximum"},
+		{name: "negative quarantine size", extra: []string{"decline-max:-1"}, wantErrSub: "cannot be negative"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseOptions(time.Hour, tc.extra)
+			size := tc.poolSize
+			if size == 0 {
+				size = testPoolSize
+			}
+			got, err := parseOptions(time.Hour, size, tc.extra)
 			if tc.wantErrSub != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErrSub)
@@ -796,6 +818,28 @@ func TestParseOptions(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantSweep, got.sweepInterval)
 			assert.Equal(t, tc.wantProbation, got.declineProbation)
+			assert.Equal(t, tc.wantMax, got.declineMax)
+		})
+	}
+}
+
+// TestPoolSize pins the address count the decline-max default is derived from,
+// including the boundary the arithmetic has to survive: a range covering the
+// whole address space is 2^32 addresses, which wraps to zero if the increment
+// happens in uint32.
+func TestPoolSize(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		start, end net.IP
+		want       uint64
+	}{
+		{name: "one address", start: net.IPv4(10, 0, 0, 1), end: net.IPv4(10, 0, 0, 1), want: 1},
+		{name: "a typical pool", start: net.IPv4(10, 0, 0, 100), end: net.IPv4(10, 0, 0, 200), want: 101},
+		{name: "a /24", start: net.IPv4(192, 0, 2, 0), end: net.IPv4(192, 0, 2, 255), want: 256},
+		{name: "the whole address space", start: net.IPv4(0, 0, 0, 0), end: net.IPv4(255, 255, 255, 255), want: 1 << 32},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, poolSize(tc.start, tc.end))
 		})
 	}
 }
@@ -906,12 +950,17 @@ func TestHandler4ReleaseFreesTheNamedLease(t *testing.T) {
 // client reported the address as already in use, so the next client must not
 // be walked into the same conflict. The address comes back only once probation
 // has run out and a sweep has run.
+//
+// The pool holds a spare address on purpose. Probation gives way to a client
+// with nowhere else to go, which TestAllocateEvictsTheOldestQuarantine covers,
+// so a pool of one would test that rule instead of this one.
 func TestHandler4DeclineQuarantinesTheAddress(t *testing.T) {
-	pl, clock := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 1))
+	pl, clock := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2))
 
 	const (
 		conflicted = "02:00:00:00:13:00"
 		newcomer   = "02:00:00:00:13:01"
+		latecomer  = "02:00:00:00:13:02"
 	)
 	leased := request(t, pl, conflicted)
 	require.NotNil(t, leased)
@@ -925,13 +974,15 @@ func TestHandler4DeclineQuarantinesTheAddress(t *testing.T) {
 	assert.Equal(t, 0, leaseRowCount(pl.leasedb, conflicted), "and its row with it")
 	require.Len(t, pl.declined, 1, "but the address stays out of the pool")
 
-	assert.Nil(t, request(t, pl, newcomer), "a quarantined address must not be handed out")
+	other := request(t, pl, newcomer)
+	require.NotNil(t, other)
+	assert.NotEqual(t, leased, other, "the next client is given the spare, not the conflict")
 
 	clock.Advance(defaultDeclineProbation + time.Second)
 	pl.sweepOnce()
 	assert.Empty(t, pl.declined, "probation has run out")
 
-	got := request(t, pl, newcomer)
+	got := request(t, pl, latecomer)
 	require.NotNil(t, got, "the address must be back in the pool")
 	assert.Equal(t, leased, got)
 }
@@ -1032,6 +1083,116 @@ func TestSweepDeclinedKeepsUnfreeableAddresses(t *testing.T) {
 	mockAlloc.On("Free", net.IPNet{IP: net.ParseIP(ip)}).Return(errors.New("simulated double free"))
 
 	assert.Equal(t, 0, pl.sweepDeclined(clock.Now()))
+	assert.Len(t, pl.declined, 1, "the address stays parked for the next sweep")
+	mockAlloc.AssertExpectations(t)
+}
+
+// TestDeclineFloodLeavesThePoolServing is the regression for the starvation a
+// bounded quarantine exists to stop. A DISCOVER and a DECLINE from a fresh MAC
+// are two unauthenticated packets, and while every pair took an address out
+// for a day, 22 of them emptied an eleven-address pool. No lease was left for
+// expiry to reclaim either, so real clients were refused until the probation
+// ran out.
+func TestDeclineFloodLeavesThePoolServing(t *testing.T) {
+	pl, _ := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 11))
+
+	const poolAddresses = 11
+	require.EqualValues(t, poolAddresses, pl.poolSize)
+	require.Equal(t, 1, pl.declineMax, "a tenth of eleven addresses floors at one")
+
+	packets := 0
+	for i := range poolAddresses {
+		mac := fmt.Sprintf("02:00:00:00:20:%02x", i)
+		offered := request(t, pl, mac)
+		packets++
+		require.NotNil(t, offered, "the pool must keep offering under the flood")
+		decline(t, pl, mac, offered)
+		packets++
+	}
+	assert.Equal(t, 2*poolAddresses, packets)
+	assert.Len(t, pl.declined, pl.declineMax, "only the bound is held back")
+	assert.Empty(t, pl.Recordsv4, "and the flood is left holding no lease")
+
+	// Whatever the flood could not quarantine is still allocatable, without
+	// the quarantine having to give way for any of it.
+	for i := range poolAddresses - pl.declineMax {
+		require.NotNil(t, request(t, pl, fmt.Sprintf("02:00:00:00:21:%02x", i)), "a real client must still be served")
+	}
+	assert.Len(t, pl.Recordsv4, poolAddresses-pl.declineMax)
+	assert.Len(t, pl.declined, pl.declineMax, "the quarantine held through all of it")
+}
+
+// TestAllocateEvictsTheOldestQuarantine pins the last resort in allocate. With
+// every address either leased or in probation, the address held back longest
+// goes to the client instead of the client being turned away.
+func TestAllocateEvictsTheOldestQuarantine(t *testing.T) {
+	pl, clock := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 3))
+	pl.declineMax = 2
+
+	const (
+		firstDecliner  = "02:00:00:00:22:00"
+		secondDecliner = "02:00:00:00:22:01"
+		holder         = "02:00:00:00:22:02"
+		newcomer       = "02:00:00:00:22:03"
+	)
+
+	first := request(t, pl, firstDecliner)
+	require.NotNil(t, first)
+	decline(t, pl, firstDecliner, first)
+
+	// Separate the two probations in time, so "oldest" means something.
+	clock.Advance(time.Minute)
+
+	second := request(t, pl, secondDecliner)
+	require.NotNil(t, second)
+	decline(t, pl, secondDecliner, second)
+	require.Len(t, pl.declined, 2)
+
+	require.NotNil(t, request(t, pl, holder), "the last free address goes to a client that keeps it")
+
+	got := request(t, pl, newcomer)
+	require.NotNil(t, got, "an exhausted pool gives up a quarantine rather than a client")
+	assert.Equal(t, first, got, "the address held back longest is the one evicted")
+	assert.Len(t, pl.declined, 1)
+	assert.Contains(t, pl.declined, second.String(), "the more recent quarantine is left alone")
+}
+
+// TestHandler4DeclineMaxZero covers decline-max:0, the other way of saying
+// never quarantine: the address goes straight back even though a probation
+// period is configured.
+func TestHandler4DeclineMaxZero(t *testing.T) {
+	pl, _ := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 1))
+	pl.declineMax = 0
+	require.NotZero(t, pl.declineProbation, "decline-max is what disables the quarantine here")
+
+	const mac = "02:00:00:00:23:00"
+	leased := request(t, pl, mac)
+	require.NotNil(t, leased)
+
+	_, stop := decline(t, pl, mac, leased)
+	assert.False(t, stop)
+	assert.Empty(t, pl.declined, "nothing is quarantined")
+	assert.Empty(t, pl.Recordsv4)
+
+	got := request(t, pl, "02:00:00:00:23:01")
+	require.NotNil(t, got, "the address is available immediately")
+	assert.Equal(t, leased, got)
+}
+
+// TestEvictOldestDeclinedKeepsUnfreeableAddresses pins that an address the
+// allocator refuses to give back stays parked rather than being dropped from
+// the map, the same as in sweepDeclined: the bit would otherwise leak for the
+// life of the process.
+func TestEvictOldestDeclinedKeepsUnfreeableAddresses(t *testing.T) {
+	pl, clock := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2))
+	mockAlloc := &mockFailingAllocator{}
+	pl.allocator = mockAlloc
+
+	const ip = "10.0.0.1"
+	pl.declined[ip] = clock.Now().Add(time.Hour)
+	mockAlloc.On("Free", net.IPNet{IP: net.ParseIP(ip)}).Return(errors.New("simulated double free"))
+
+	assert.False(t, pl.evictOldestDeclined())
 	assert.Len(t, pl.declined, 1, "the address stays parked for the next sweep")
 	mockAlloc.AssertExpectations(t)
 }

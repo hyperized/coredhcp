@@ -186,9 +186,14 @@ server4:
         - netmask: 255.255.255.0
 
         # range allocates leases within a range of IPs
-        # - range: <lease file> <start IP> <end IP> <lease duration> [sweep:<interval>]
+        # - range: <lease file> <start IP> <end IP> <lease duration> [sweep:<interval>] [decline-probation:<duration>] [decline-max:<count>]
         # Expired leases are reclaimed by a background sweep, by default every
         # max(30s, half the lease duration); sweep: overrides the interval.
+        # An address a client declines is held out of the pool for
+        # decline-probation (24h), and decline-max bounds how many are held at
+        # once (a tenth of the pool). The bound matters: a DECLINE is
+        # unauthenticated, so without it two forged packets per address park
+        # the whole pool for a day. Either set to 0 turns the quarantine off.
         # * the lease file is an initially empty file where the leases that are
         # allocated to clients will be stored across server restarts
         # * lease duration can be given in any format understood by go's

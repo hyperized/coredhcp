@@ -12,7 +12,7 @@
 //	  plugins:
 //	    - range: leases.sqlite3 10.0.0.100 10.0.0.200 1h
 //
-// Two optional arguments may follow, in either order:
+// Three optional arguments may follow, in any order:
 //
 //	sweep:<duration>              how often expired leases are reclaimed in
 //	                              the background. Defaults to half the lease
@@ -21,6 +21,11 @@
 //	                              held back from the pool. Defaults to 24h,
 //	                              the same as Kea. 0 hands a declined address
 //	                              straight back out.
+//	decline-max:<count>           how many declined addresses may be held
+//	                              back at the same time. Defaults to a tenth
+//	                              of the pool, held between 1 and 65536.
+//	                              0 disables the quarantine, the same as
+//	                              decline-probation:0 does.
 //
 // Leases are reclaimed in two places: a background sweeper on a ticker, and
 // lazily on the allocation path when the pool looks exhausted. Without either,
@@ -42,6 +47,15 @@
 // period so the next client does not walk into the same conflict. Probation is
 // tracked in memory only: a restart puts every declined address back into
 // circulation.
+//
+// The quarantine is bounded, because a decline is as unauthenticated as a
+// release. Nothing stops one host on the segment taking an offer and declining
+// it, two packets per address, until the whole pool sits in probation and
+// nobody gets a lease for the next day. At most decline-max addresses are held
+// back at a time: past that, a declined address goes straight back to the
+// pool, and a pool that runs dry ends the probation of whichever address has
+// been held longest. Probation says which addresses look risky, it never
+// reserves one.
 package rangeplugin
 
 import (
@@ -50,6 +64,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -87,8 +102,12 @@ const (
 	// declined address stays out of the pool, e.g. "decline-probation:1h".
 	declineArg = "decline-probation"
 
+	// declineMaxArg names the optional argument that overrides how many
+	// declined addresses may sit in quarantine at once, e.g. "decline-max:8".
+	declineMaxArg = "decline-max"
+
 	// optionSyntax spells the optional arguments out for error messages.
-	optionSyntax = sweepArg + ":<duration> or " + declineArg + ":<duration>"
+	optionSyntax = sweepArg + ":<duration>, " + declineArg + ":<duration> or " + declineMaxArg + ":<count>"
 
 	// minSweepInterval floors the derived sweep interval. A short lease time
 	// (a captive portal handing out 30s leases, say) must not turn the
@@ -100,6 +119,19 @@ const (
 	// usually gone, and short enough that one bad afternoon does not bleed a
 	// pool dry.
 	defaultDeclineProbation = 24 * time.Hour
+
+	// declineQuarantineShare is the fraction of the pool decline-max defaults
+	// to. A tenth covers the conflicts a segment produces for real, a printer
+	// holding a static address inside the pool or a second DHCP server, and
+	// leaves the rest of the pool to the clients that behave.
+	declineQuarantineShare = 10
+
+	// maxDeclineQuarantine caps that default however large the pool is. Each
+	// quarantined address is a live map entry, and a segment producing tens of
+	// thousands of genuine conflicts has a problem no probation period is
+	// going to fix. An operator who wants more can still say so with
+	// decline-max.
+	maxDeclineQuarantine = 1 << 16
 )
 
 // Record holds an IP lease record
@@ -131,11 +163,18 @@ type pluginState struct {
 	// by the plugin lock, like Recordsv4, and initialized alongside it.
 	declined map[string]time.Time
 
+	// poolSize is how many addresses the configured range holds. It is what
+	// the declineMax default is derived from, and it is the number setup logs
+	// so an operator can see the quarantine bound in proportion.
+	poolSize uint64
+
 	// sweepInterval is how often the background sweeper reclaims expired
-	// leases. declineProbation is how long a declined address is held back.
-	// Both are set during setup and read-only afterwards.
+	// leases, declineProbation how long a declined address is held back, and
+	// declineMax how many may be held back at once. All three are set during
+	// setup and read-only afterwards.
 	sweepInterval    time.Duration
 	declineProbation time.Duration
+	declineMax       int
 
 	// now is the clock seam. It is written once during setup, before the
 	// sweeper goroutine starts, and only read afterwards. Use timeNow rather
@@ -235,7 +274,7 @@ func (p *pluginState) allocateLease(mac string, hint net.IPNet, hostname string,
 }
 
 // allocate asks the allocator for an address, and on failure reclaims what has
-// lapsed and retries once.
+// lapsed and retries, ending a quarantine early as a last resort.
 //
 // The sweep is the O(len(Recordsv4)) part of reclamation, so it deliberately
 // only runs when an allocation has actually failed. Sweeping before every
@@ -249,10 +288,43 @@ func (p *pluginState) allocate(hint net.IPNet) (net.IPNet, error) {
 	if err == nil {
 		return ip, nil
 	}
-	if freed := p.reclaim(p.timeNow()); freed == 0 {
+	if freed := p.reclaim(p.timeNow()); freed > 0 {
+		if ip, err = p.allocator.Allocate(hint); err == nil {
+			return ip, nil
+		}
+	}
+	if !p.evictOldestDeclined() {
 		return net.IPNet{}, err
 	}
 	return p.allocator.Allocate(hint)
+}
+
+// evictOldestDeclined ends the probation of the address held back longest and
+// returns it to the pool. It reports whether anything was evicted.
+//
+// This runs only once the allocator has failed twice, so the scan of
+// p.declined stays off the path a boot storm takes. A client with no address
+// at all is worse off than one handed an address it may have to decline again,
+// so an exhausted pool takes the quarantine apart rather than turning clients
+// away. The caller must hold p's lock.
+func (p *pluginState) evictOldestDeclined() bool {
+	var oldest string
+	var until time.Time
+	for ip, t := range p.declined {
+		if oldest == "" || t.Before(until) {
+			oldest, until = ip, t
+		}
+	}
+	if oldest == "" {
+		return false
+	}
+	if err := p.allocator.Free(net.IPNet{IP: net.ParseIP(oldest)}); err != nil {
+		log.Errorf("Could not return declined IP %s to the pool: %v", oldest, err)
+		return false
+	}
+	delete(p.declined, oldest)
+	log.Infof("Pool exhausted, ending the probation of declined address %s early", oldest)
+	return true
 }
 
 // reallocateExpired handles a client coming back after its lease lapsed but
@@ -363,21 +435,26 @@ func (p *pluginState) handleDecline(req *dhcpv4.DHCPv4) {
 }
 
 // quarantine drops a declined lease and holds its address back from the pool
-// for declineProbation.
+// for declineProbation, as long as the quarantine has room.
 //
 // The client just told us the address is already in use on the link, so
 // handing it to the next client would repeat the conflict. The record and the
 // row go, but the allocator bit stays set, which is what keeps the address out
-// of circulation; p.declined only records when it may come back. A probation
-// of zero skips all that and frees the address outright. The caller must hold
-// p's lock.
+// of circulation; p.declined only records when it may come back.
+//
+// Holding addresses back without a limit is what let two forged packets per
+// address park a whole pool for a day, so this is best effort: with either
+// knob set to zero, or with declineMax addresses already held back, the
+// declined address goes straight back to the pool instead. The caller must
+// hold p's lock.
 func (p *pluginState) quarantine(mac string, record *Record) {
-	if p.declineProbation == 0 {
-		if err := p.releaseLease(mac, record); err != nil {
-			log.Errorf("Could not free declined lease for MAC %s: %v", mac, err)
-			return
-		}
-		log.Printf("Freed declined IP address %s for MAC %s", record.IP, mac)
+	if p.declineProbation == 0 || p.declineMax == 0 {
+		p.freeDeclined(mac, record)
+		return
+	}
+	if len(p.declined) >= p.declineMax {
+		log.Infof("Quarantine full at %d address(es), not holding %s back for MAC %s", p.declineMax, record.IP, mac)
+		p.freeDeclined(mac, record)
 		return
 	}
 	if err := p.freeIPAddress(mac, record); err != nil {
@@ -389,6 +466,16 @@ func (p *pluginState) quarantine(mac string, record *Record) {
 	until := p.timeNow().Add(p.declineProbation)
 	p.declined[record.IP.String()] = until
 	log.Printf("MAC %s declined %s, holding it back until %s", mac, record.IP, until)
+}
+
+// freeDeclined hands a declined address straight back to the pool, for the
+// cases where no quarantine applies. The caller must hold p's lock.
+func (p *pluginState) freeDeclined(mac string, record *Record) {
+	if err := p.releaseLease(mac, record); err != nil {
+		log.Errorf("Could not free declined lease for MAC %s: %v", mac, err)
+		return
+	}
+	log.Printf("Freed declined IP address %s for MAC %s", record.IP, mac)
 }
 
 // sweepExpired frees every lease that had expired at t and reports how many
@@ -488,30 +575,61 @@ func defaultSweepInterval(leaseTime time.Duration) time.Duration {
 	return minSweepInterval
 }
 
+// poolSize counts the addresses in the inclusive range [start, end]. Both are
+// known to be IPv4 addresses, with start no higher than end, by the time this
+// runs.
+//
+// The count is kept in uint64 rather than uint: a range covering the whole
+// address space holds 2^32 addresses, which wraps back to zero in the 32 bits
+// uint has on a 32-bit build.
+func poolSize(start, end net.IP) uint64 {
+	first := binary.BigEndian.Uint32(start.To4())
+	last := binary.BigEndian.Uint32(end.To4())
+	return uint64(last-first) + 1
+}
+
+// defaultDeclineMax sets the quarantine to a share of the pool, held between
+// one address, so decline-probation still does something on a pool of two, and
+// maxDeclineQuarantine.
+func defaultDeclineMax(size uint64) int {
+	share := size / declineQuarantineShare
+	if share > maxDeclineQuarantine {
+		return maxDeclineQuarantine
+	}
+	if share < 1 {
+		return 1
+	}
+	return int(share)
+}
+
 // pluginOptions holds the settings taken from the optional key:value arguments
 // that may follow the four positional ones.
 type pluginOptions struct {
 	sweepInterval    time.Duration
 	declineProbation time.Duration
+	declineMax       int
 }
 
 // optionParsers dispatches on the argument key. parseOptions handles ordering,
 // duplicates and unknown keys for every entry here, so accepting another
 // argument is one line plus its parser.
 var optionParsers = map[string]func(*pluginOptions, string) error{
-	sweepArg:   parseSweepInterval,
-	declineArg: parseDeclineProbation,
+	sweepArg:      parseSweepInterval,
+	declineArg:    parseDeclineProbation,
+	declineMaxArg: parseDeclineMax,
 }
 
 // parseOptions reads the optional key:value arguments, which may come in any
-// order. extra holds whatever followed the four required arguments. An unknown
-// key, or a key given twice, is an error rather than something quietly
-// ignored: a typo must not leave the operator with a default they believe they
-// overrode.
-func parseOptions(leaseTime time.Duration, extra []string) (pluginOptions, error) {
+// order. extra holds whatever followed the four required arguments, and size
+// the number of addresses in the pool, which the decline-max default is
+// derived from. An unknown key, or a key given twice, is an error rather than
+// something quietly ignored: a typo must not leave the operator with a default
+// they believe they overrode.
+func parseOptions(leaseTime time.Duration, size uint64, extra []string) (pluginOptions, error) {
 	opts := pluginOptions{
 		sweepInterval:    defaultSweepInterval(leaseTime),
 		declineProbation: defaultDeclineProbation,
+		declineMax:       defaultDeclineMax(size),
 	}
 	seen := make(map[string]bool, len(extra))
 	for _, arg := range extra {
@@ -559,6 +677,21 @@ func parseDeclineProbation(opts *pluginOptions, raw string) error {
 	return nil
 }
 
+// parseDeclineMax reads the value of a "decline-max:" argument. Zero is
+// allowed and turns the quarantine off; a negative count is not, because it
+// would read as a limit and act as none at all.
+func parseDeclineMax(opts *pluginOptions, raw string) error {
+	count, err := strconv.Atoi(raw)
+	if err != nil {
+		return fmt.Errorf("invalid decline maximum %q: %w", raw, err)
+	}
+	if count < 0 {
+		return fmt.Errorf("decline maximum cannot be negative, got: %v", raw)
+	}
+	opts.declineMax = count
+	return nil
+}
+
 // setupRange builds the plugin instance and starts its background sweeper.
 func setupRange(args ...string) (handler.Handler4, error) {
 	p, err := newPluginState(args...)
@@ -568,7 +701,8 @@ func setupRange(args ...string) (handler.Handler4, error) {
 	// Started only once setup has fully succeeded: a failed setup must not
 	// leave a goroutine behind sweeping a half-built plugin.
 	p.startSweeper(p.sweepInterval)
-	log.Printf("Reclaiming expired DHCPv4 leases every %s, declined addresses after %s", p.sweepInterval, p.declineProbation)
+	log.Printf("Serving %d addresses, reclaiming expired DHCPv4 leases every %s, declined addresses after %s, quarantining at most %d at a time",
+		p.poolSize, p.sweepInterval, p.declineProbation, p.declineMax)
 	return p.Handler4, nil
 }
 
@@ -614,12 +748,14 @@ func newPluginState(args ...string) (*pluginState, error) {
 		return nil, fmt.Errorf("invalid lease duration: %v", args[3])
 	}
 
-	opts, err := parseOptions(p.LeaseTime, args[4:])
+	p.poolSize = poolSize(ipRangeStart, ipRangeEnd)
+	opts, err := parseOptions(p.LeaseTime, p.poolSize, args[4:])
 	if err != nil {
 		return nil, err
 	}
 	p.sweepInterval = opts.sweepInterval
 	p.declineProbation = opts.declineProbation
+	p.declineMax = opts.declineMax
 
 	if err := p.registerBackingDB(filename); err != nil {
 		return nil, fmt.Errorf("could not setup lease storage: %w", err)
