@@ -67,10 +67,38 @@ server6:
     # External plugins should document their arguments in their own
     # documentations or readmes
     plugins:
+        # ratelimit caps how fast one client may ask. Same arguments as in
+        # server4, and a separate instance with a table of its own, so a
+        # client speaking both families is held to the rate once per family.
+        # The DHCPv6 key is the MAC from the relay option or a DUID-LL, and
+        # the raw client DUID when there is no MAC to be had.
+        # - ratelimit: <n>/s [burst:<n>] [per:mac|source|both] [max:<n>] [global:<rate>]
+        # - ratelimit: 20/s burst:50 per:mac global:2000/s
+
+        # relay drops a relayed request whose source address is not a listed
+        # relay. DHCPv6 has no giaddr, so the datagram's source is what is
+        # matched; fe80::/10 is how you admit link-local relays. Chains nested
+        # deeper than eight relays and an outermost relay with no link address
+        # and a hop count above 32 are dropped as well. List it first.
+        # - relay: allow <address|prefix> ... [release-check:on|off]
+        # - relay: allow fe80::/10 2001:db8:0:1::1
+
         # server_id is mandatory for RFC-compliant operation.
         # - server_id: <DUID format> <LL address>
         # The supported DUID formats are LL and LLT
         - server_id: LL 00:de:ad:be:ef:00
+
+        # leaseapi serves what the server is holding right now over a
+        # read-only HTTP API: /v1/leases, /v1/pools and /v1/health, with
+        # optional family=4|6 and source=<name> filters on the first two.
+        # Nothing authenticates a request, so the socket's permissions are
+        # the authentication: mode: defaults to 0600, and a tcp address has
+        # to be in 127.0.0.0/8 or ::1. Put a proxy in front of it, or
+        # forward the socket over ssh, to reach it from another host.
+        # When server4 and server6 name the same address they share one
+        # listener, and either way the answers cover both families.
+        # - leaseapi: unix:/run/coredhcp/api.sock [mode:0660]
+        # - leaseapi: tcp:127.0.0.1:9755
 
         # file serves leases defined in a static file, matching client
         # identifiers to IPs
@@ -89,6 +117,13 @@ server6:
         # key:client-id, which matches the raw bytes of option 61.
         # - file: leases-duid.txt key:duid
         - file: "leases.txt"
+
+        # relayinfo assigns a fixed address per relay port instead of per
+        # client, from a file of "<key value> <IPv6> [lease]" lines. The key
+        # is the interface-id (option 18) or the remote-id (option 37) the
+        # relay stamped on the request. Put a relay allow list in front of it.
+        # - relayinfo: file:<path> key:<interface-id | remote-id> [autorefresh]
+        # - relayinfo: file:/etc/coredhcp/ports-v6.txt key:interface-id autorefresh
 
         # netbox serves the IPv6 address documented in NetBox on the interface
         # that carries the client's MAC address (NetBox 4.2 or newer). Results
@@ -117,6 +152,15 @@ server6:
         # - nbp: <NBP URL>
         - nbp: "http://[2001:db8:a::1]/nbp"
 
+        # bootfile is nbp per architecture: it picks the boot program from the
+        # architecture the client reports in option 61 instead of serving one
+        # URL to everyone. Keys are architecture names, arch:<n> for any other
+        # code, ipxe for clients already running iPXE, and default. The URL
+        # goes into option 59 unchanged, and HTTP boot clients also get the
+        # HTTPClient vendor class under enterprise number 343.
+        # - bootfile: <key>=<url> [<key>=<url> ...]
+        # - bootfile: x86-64-uefi=tftp://[2001:db8:a::1]/ipxe.efi arm64-uefi=tftp://[2001:db8:a::1]/ipxe-arm64.efi default=tftp://[2001:db8:a::1]/nbp
+
         # prefix provides prefix delegation.
         # - prefix: <prefix> <allocation size> [lease duration] [sweep:<interval>] [max-prefixes:<count>]
         # prefix is the IPv6 prefix pool from which the allocations will be carved
@@ -130,6 +174,48 @@ server6:
         # thousands of them.
         # EG for allocating /64 or smaller prefixes within 2001:db8::/48 :
         - prefix: 2001:db8::/48 64
+
+        # subnet serves several scopes from one server, choosing one per
+        # request from the outermost relay's link-address or the receiving
+        # interface. Each subnet carries its own resolvers and can delegate
+        # prefixes from a pool of its own, so it replaces dns and prefix
+        # rather than joining them. The same file serves both protocol
+        # versions; it is read once at startup, so editing it needs a restart.
+        # - subnet: file:<path to the subnet file>
+        # - subnet: file:/etc/coredhcp/subnets.yml
+
+        # range6 allocates addresses out of a pool, one per IA_NA, and
+        # remembers them across restarts. It is the DHCPv6 counterpart of
+        # range.
+        # - range6: <lease file> <first address> <last address> <lease duration> [sweep:<interval>] [decline-probation:<duration>] [decline-max:<count>]
+        # * the lease file is an initially empty file where the bindings
+        # allocated to clients are stored across server restarts
+        # * the pool is a contiguous range of at most 2^32 addresses, so a
+        # /96 is the widest one
+        # * lease duration can be given in any format understood by go's
+        # "ParseDuration": https://golang.org/pkg/time/#ParseDuration
+        # Expired bindings are reclaimed by a background sweep, by default
+        # every max(30s, half the lease duration); sweep: overrides it. An
+        # address a client declines is held out of the pool for
+        # decline-probation: (24h by default), and at most decline-max: of
+        # them at once (a tenth of the pool by default).
+        - range6: leases6.sqlite3 2001:db8:1::100 2001:db8:1::1ff 12h
+
+        # ddns writes AAAA records for the addresses a Reply hands out, from
+        # the client's FQDN option (39). An IPv6 reverse: prefix length has
+        # to be a multiple of 4. List it after whatever assigns the address.
+        # - ddns: server:<ip[:port]> zone:<name> key:<name>:<secret | env:NAME>
+        #     [algo:hmac-sha256] [ttl:300] [reverse:<cidr>] [timeout:2s]
+        #     [queue:1000] [remove-on-release:on]
+        # - ddns: server:10.0.0.53 zone:home.lan key:ddns-key:env:TSIG_KEY reverse:2001:db8::/32
+
+        # leasehook tells another system what was handed out: it POSTs a JSON
+        # object per lease event to a URL, or runs a local program with that
+        # object on stdin. DHCPv6 events are reply, release and decline.
+        # Delivery is queued and never blocks the packet path, and there are
+        # no retries. List it last, after every allocator.
+        # - leasehook: <url:<http(s) URL> | exec:<absolute path>> [secret:<value | env:NAME>] [timeout:2s] [queue:1000] [events:reply,release]
+        # - leasehook: url:https://ipam.example/hook secret:env:HOOK_SECRET
 
 # DHCPv4 configuration
 server4:
@@ -166,10 +252,43 @@ server4:
     # External plugins should document their arguments in their own
     # documentations or readmes
     plugins:
+        # ratelimit caps how fast one client may ask, so a flood costs the
+        # server a map lookup instead of a lease. List it first, ahead of
+        # server_id and every allocator. Rate first as <n>/s or <n>/m, then
+        # burst: (bucket size, default twice the per-second rate), per:
+        # (mac, source or both), max: (clients tracked, default 65536) and
+        # global: (one bucket shared by all traffic, off by default).
+        # Drops are summarised in the log once a minute, never per packet.
+        # - ratelimit: <n>/s [burst:<n>] [per:mac|source|both] [max:<n>] [global:<rate>]
+        # - ratelimit: 20/s burst:50 per:mac max:65536 global:2000/s
+
+        # relay names the DHCP relays this server answers, by address or by
+        # prefix, and drops a relayed request whose giaddr is not one of them:
+        # giaddr is where the reply is sent, and the sender picks it. Add
+        # strict-giaddr to also require the datagram's source to equal giaddr
+        # (off by default, RFC 1542 allows a multi-homed relay to differ).
+        # On-link clients pass, except that release-check (on by default)
+        # drops a RELEASE whose ciaddr is not the address it came from.
+        # List it first, before server_id and any plugin holding lease state.
+        # - relay: allow <address|prefix> ... [strict-giaddr] [release-check:on|off]
+        # - relay: allow 10.0.1.1 10.0.2.0/24
+
         # metrics serves Prometheus counters over plain HTTP. Put it first so
         # every request is counted. When server4 and server6 configure the
         # same address they share one listener.
         # - metrics: 127.0.0.1:9754
+
+        # leaseapi serves what the server is holding right now over a
+        # read-only HTTP API: /v1/leases, /v1/pools and /v1/health, with
+        # optional family=4|6 and source=<name> filters on the first two.
+        # Nothing authenticates a request, so the socket's permissions are
+        # the authentication: mode: defaults to 0600, and a tcp address has
+        # to be in 127.0.0.0/8 or ::1. Put a proxy in front of it, or
+        # forward the socket over ssh, to reach it from another host.
+        # When server4 and server6 name the same address they share one
+        # listener, and either way the answers cover both families.
+        # - leaseapi: unix:/run/coredhcp/api.sock [mode:0660]
+        # - leaseapi: tcp:127.0.0.1:9755
 
         # macfilter drops requests by client hardware address, before they
         # reach any allocation plugin. Mode first (allow or deny), then MACs
@@ -179,6 +298,18 @@ server4:
         # ntp advertises NTP servers: option 42 here, the RFC 5908 option in
         # a server6 section
         # - ntp: 192.0.2.123
+
+        # bootfile picks the network boot program from the architecture the
+        # client reports in option 93, so BIOS, UEFI and HTTP boot machines on
+        # one network each get a file they can run. Keys are architecture
+        # names (x86-bios, x86-uefi, x86-64-uefi, arm32-uefi, arm64-uefi,
+        # x86-http, x86-64-http, arm32-http, arm64-http, riscv64-uefi,
+        # riscv64-http), arch:<n> for any other code, ipxe for clients already
+        # running iPXE, and default. tftp URLs are split over options 66 and
+        # 67 like nbp, and HTTP boot clients also get option 60 set to
+        # HTTPClient.
+        # - bootfile: <key>=<url> [<key>=<url> ...]
+        # - bootfile: x86-bios=tftp://10.0.0.5/undionly.kpxe x86-64-uefi=tftp://10.0.0.5/ipxe.efi arm64-uefi=tftp://10.0.0.5/ipxe-arm64.efi x86-64-http=http://boot.example/ipxe.efi ipxe=http://boot.example/boot.ipxe default=tftp://10.0.0.5/undionly.kpxe
 
         # options sets arbitrary options as code:type:value specs, where the
         # type is one of string, ip, iplist, uint8, uint16, uint32, hex, bool
@@ -210,6 +341,14 @@ server4:
         # - netmask: <network mask>
         - netmask: 255.255.255.0
 
+        # relayinfo assigns a fixed address per relay port instead of per
+        # client, from a file of "<key value> <IPv4> [lease]" lines. The key
+        # is one of the option 82 sub-options the relay stamped on the
+        # request. It ends the chain on a match, like file, so list it after
+        # the option plugins. Put a relay allow list in front of it.
+        # - relayinfo: file:<path> key:<circuit-id | remote-id | subscriber-id> [autorefresh]
+        # - relayinfo: file:/etc/coredhcp/ports.txt key:circuit-id autorefresh
+
         # range allocates leases within a range of IPs
         # - range: <lease file> <start IP> <end IP> <lease duration> [sweep:<interval>] [decline-probation:<duration>] [decline-max:<count>]
         # Expired leases are reclaimed by a background sweep, by default every
@@ -224,6 +363,14 @@ server4:
         # * lease duration can be given in any format understood by go's
         # "ParseDuration": https://golang.org/pkg/time/#ParseDuration
         - range: leases.sqlite3 10.10.10.100 10.10.10.200 60s
+
+        # subnet serves several scopes from one server, choosing one per
+        # request from giaddr, the receiving interface, or the address the
+        # client already holds. The YAML file lists the subnets in match
+        # order, each with its own options, reservations and address pool, so
+        # it replaces router, netmask, dns and range rather than joining them.
+        # - subnet: file:<path to the subnet file>
+        # - subnet: file:/etc/coredhcp/subnets.yml
 
         # netbox serves the IPv4 address (and its subnet mask) documented in
         # NetBox on the interface that carries the client's MAC address, for
@@ -246,9 +393,28 @@ server4:
         # - redis: <address> [password:<value | env:NAME>] [timeout:2s] [prefix:mac:] [key:mac|client-id]
         # - redis: 127.0.0.1:6379
 
+        # ddns keeps DNS in step with the leases handed out: an RFC 2136
+        # update signed with a TSIG key on every ACK, withdrawn again on
+        # RELEASE. The server has to be a literal IP. reverse: may be
+        # repeated, and its prefix length has to be a multiple of 8.
+        # - ddns: server:<ip[:port]> zone:<name> key:<name>:<secret | env:NAME>
+        #     [algo:hmac-sha256] [ttl:300] [reverse:<cidr>] [timeout:2s]
+        #     [queue:1000] [remove-on-release:on]
+        # - ddns: server:10.0.0.53 zone:home.lan key:ddns-key:env:TSIG_KEY reverse:10.0.0.0/24
+
         # staticroute advertises additional routes the client should install in
         # its routing table as described in RFC3442
         # - staticroute: <destination>,<gateway> [<destination>,<gateway> ...]
         # where destination should be in CIDR notation and gateway should be
         # the IP address of the router through which the destination is reachable
         # - staticroute: 10.20.20.0/24,10.10.10.1
+
+        # leasehook reports each lease event to a webhook or a local program,
+        # like Kea's run_script hook. DHCPv4 events are offer, ack, nak,
+        # release and decline. With secret: set, every POST carries an
+        # X-Coredhcp-Signature: sha256=<hex HMAC of the body> header. Events
+        # are queued and dropped when the queue is full, so a stalled endpoint
+        # never slows DHCP down. List it last, after range and the static
+        # lease plugins.
+        # - leasehook: <url:<http(s) URL> | exec:<absolute path>> [secret:<value | env:NAME>] [timeout:2s] [queue:1000] [events:ack,release]
+        # - leasehook: exec:/usr/local/bin/lease-event timeout:5s
