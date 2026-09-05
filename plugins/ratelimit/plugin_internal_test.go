@@ -22,21 +22,16 @@ import (
 	"github.com/coredhcp/coredhcp/handler"
 )
 
-// epoch is the wall-clock time the fake clock starts at. It carries no
-// monotonic reading, which is exactly what a test wants: every duration in
-// these tests is one the test set itself.
+// No monotonic reading (unlike time.Now), since every duration here is one the test sets itself.
 var epoch = time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 
-// fakeClock is the clock the plugin reads through its now seam, advanced by
-// hand so no test ever sleeps.
+// The clock the plugin reads through its now seam, advanced by hand so no test ever sleeps.
 type fakeClock struct{ t time.Time }
 
 func (c *fakeClock) now() time.Time          { return c.t }
 func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
 
-// warnRecorder collects the summary lines the plugin would have logged. It
-// holds a mutex of its own because warn is deliberately called with the
-// plugin's own mutex released.
+// Its own mutex: warn is deliberately called with the plugin's own mutex released.
 type warnRecorder struct {
 	mu    sync.Mutex
 	lines []string
@@ -54,7 +49,6 @@ func (w *warnRecorder) all() []string {
 	return slices.Clone(w.lines)
 }
 
-// newTestState builds an instance whose clock and summary log the test owns.
 func newTestState(t *testing.T, args ...string) (*state, *fakeClock, *warnRecorder) {
 	t.Helper()
 	s, err := newState(args...)
@@ -272,8 +266,7 @@ func TestLimitTokens(t *testing.T) {
 	assert.Equal(t, int64(4), limit{interval: 50 * time.Millisecond, capacity: 200 * time.Millisecond}.tokens())
 }
 
-// keys reads the table's list from the head down, which is most recently seen
-// first.
+// Head to tail, i.e. most recently seen first.
 func keys(tbl *table) []string {
 	var out []string
 	for b := tbl.head; b != nil; b = b.next {
@@ -341,8 +334,7 @@ func TestTableEvictionResetsTheReusedBucket(t *testing.T) {
 }
 
 func TestEvictionResetsWhatTheRateLimitRemembers(t *testing.T) {
-	// The documented consequence of an LRU keyed on unauthenticated fields:
-	// a client that can push itself out of the table gets a fresh bucket.
+	// The documented consequence of keying an LRU on unauthenticated fields: self-eviction gets a fresh bucket.
 	s, _, _ := newTestState(t, "1/m", "burst:1", "max:1")
 	assert.True(t, s.allow([]byte("a")))
 	assert.False(t, s.allow([]byte("a")))
@@ -387,7 +379,6 @@ func TestNoGlobalBucketPassesEverything(t *testing.T) {
 func TestSummaryIsLoggedAtMostOncePerMinute(t *testing.T) {
 	s, clk, rec := newTestState(t, "1/m", "burst:1")
 
-	// Two clients each spend their one token and are then turned away.
 	require.True(t, s.allow([]byte("a")))
 	require.False(t, s.allow([]byte("a")))
 	require.True(t, s.allow([]byte("b")))
@@ -431,8 +422,7 @@ func TestSummaryCountsAGlobalOnlyDrop(t *testing.T) {
 	assert.Equal(t, uint64(1), s.distinct)
 }
 
-// ctxFrom builds the context the server would hand a handler for a request
-// from peer, or a bare one when peer is empty.
+// A bare background context when peer is empty.
 func ctxFrom(peer string) context.Context {
 	if peer == "" {
 		return context.Background()
@@ -442,15 +432,11 @@ func ctxFrom(peer string) context.Context {
 	})
 }
 
-// addr16 is the peer half of a key: an address in the 16-byte form both
-// families share.
 func addr16(s string) []byte {
 	a := netip.MustParseAddrPort(s).Addr().As16()
 	return a[:]
 }
 
-// withAddr appends the peer half of a key to the identifier half, which is
-// what per:both builds.
 func withAddr(id []byte, peer string) []byte {
 	return append(slices.Clone(id), addr16(peer)...)
 }
@@ -548,8 +534,7 @@ func TestNewStateRejectsBadArguments(t *testing.T) {
 }
 
 func TestLogLoaded(t *testing.T) {
-	// Nothing to assert beyond it running for both shapes: the lines go to
-	// the shared logger, which a test has no business redirecting.
+	// No assertions: the lines go to the shared logger, which this test has no business redirecting.
 	plain, _, _ := newTestState(t, "20/s")
 	plain.logLoaded("DHCPv4")
 	withGlobal, _, _ := newTestState(t, "20/s", "per:both", "global:2000/s")

@@ -6,80 +6,29 @@
 // faster than a configured rate, so that one client cannot drain a pool or
 // turn the server into a reflector by asking in a loop.
 //
-// # Configuration
-//
 //	server4:
 //	  plugins:
 //	    - ratelimit: 20/s burst:50 per:mac max:65536 global:2000/s
 //
 // The first argument is the rate every client is held to, written as <n>/s or
 // <n>/m with n a positive integer. The remaining arguments are optional, may
-// appear in any order, and may appear once each. An argument that is none of
-// them fails setup by name.
+// appear in any order, and may appear once each:
 //
-//   - burst:<n> is the bucket size: how many requests a client that has been
-//     quiet may send back to back before the rate starts to bite. It defaults
-//     to twice the per-second rate, and never to less than 1.
-//   - per:mac|source|both picks what counts as a client. mac keys on the
-//     client's hardware address, source on the address the datagram came
-//     from, both on the two together. The default is mac.
-//   - max:<n> bounds how many clients are tracked at once, and defaults to
-//     65536.
-//   - global:<n>/s or <n>/m adds a second bucket that all traffic shares.
-//     There is none by default. Its own burst is twice its per-second rate;
-//     burst: does not apply to it.
+//   - burst:<n>: the bucket size, how many requests a quiet client may send
+//     back to back. Defaults to twice the per-second rate, never below 1.
+//   - per:mac|source|both: what counts as a client (hardware address, source
+//     address, or both). Defaults to mac.
+//   - max:<n>: how many clients are tracked at once. Defaults to 65536.
+//   - global:<n>/s or <n>/m: a second bucket shared by all traffic, with its
+//     own burst (twice its rate). None by default.
 //
-// # How it works
+// Security: every field a key is built from comes off the wire, so an
+// attacker who varies it per packet gets a fresh bucket each time and never
+// meets the per-client limit; global: is what still caps the total. The
+// source key uses the peer address, not its port, since NAT hands out a
+// fresh port per datagram.
 //
-// Every tracked client owns a token bucket holding burst tokens, refilled at
-// the configured rate and charged one token per request. The refill happens
-// when the bucket is looked at, so there is no timer and no goroutine, and a
-// quiet client costs nothing between requests. A request that finds its own
-// bucket empty is dropped, and so is one that finds the global bucket empty,
-// in that order. Dropping ends the handler chain and sends nothing, so the
-// client retries a moment later, which is what a DHCP client does with a lost
-// packet anyway.
-//
-// Drops are not logged one at a time: a line per dropped packet is a way to
-// fill the disk of the machine you are defending. A summary goes to the log
-// at warning level at most once a minute instead, naming how many requests
-// were dropped and how many distinct clients they came from.
-//
-// # Bounds, and what an attacker can do inside them
-//
-// The client table is an LRU capped at max entries, where a new client beyond
-// the cap evicts the one seen longest ago. Every field a key is built from
-// comes off the wire, so an attacker who varies the hardware address or the
-// source address per packet gets a fresh entry each time, pushes real clients
-// out of the table, and never meets the per-client limit because their bucket
-// is always new. That is a property of keying on identifiers nobody
-// authenticated, and a larger table does not fix it. global: is the answer
-// for that case: there is one such bucket, an attacker cannot obtain a
-// second, and it caps what the server will do in total.
-//
-// The source key uses the peer address and not its port. A client behind NAT
-// picks a fresh source port per datagram, so keying on the port would hand
-// out a fresh bucket per packet.
-//
-// # Identifying a client
-//
-// On DHCPv4 the key is chaddr, the hardware address the client wrote into the
-// request itself. On DHCPv6 it is whatever dhcpv6.ExtractMAC finds, meaning
-// the relay's link-layer option, an EUI-64 peer address, or a DUID-LL or
-// DUID-LLT; when that finds nothing, the raw client DUID serves instead,
-// truncated to the 130 bytes RFC 8415 section 11.1 allows a DUID to be. A
-// message carrying neither is keyed on its source address under per:source
-// and per:both, and shares one bucket with every other such message under
-// per:mac.
-//
-// A ratelimit line under server4 and one under server6 are separate
-// instances with separate tables, so a client speaking both families is held
-// to the rate once per family.
-//
-// # Placement
-//
-// List ratelimit first, ahead of server_id and every allocator, so that a
-// client over its limit costs the server a map lookup and nothing more.
+// Placement: list ratelimit first, ahead of server_id and every allocator.
 package ratelimit
 
 import (
@@ -102,9 +51,6 @@ import (
 var log = logger.GetLogger("plugins/ratelimit")
 
 // Plugin wraps the ratelimit plugin information.
-//
-// Both setup functions are the context-aware form, because per:source and
-// per:both need the peer address, and that is only in the context.
 var Plugin = plugins.Plugin{
 	Name:      "ratelimit",
 	Setup4Ctx: setup4,
@@ -112,46 +58,37 @@ var Plugin = plugins.Plugin{
 }
 
 const (
-	// Prefixes of the optional arguments.
 	burstArg  = "burst:"
 	perArg    = "per:"
 	maxArg    = "max:"
 	globalArg = "global:"
 
-	// Values per: accepts.
 	perMAC    = "mac"
 	perSource = "source"
 	perBoth   = "both"
 
-	// Periods a rate may be written in.
 	periodSecond = "s"
 	periodMinute = "m"
 
-	// defaultMaxKeys is how many clients are tracked when max: is absent.
 	defaultMaxKeys = 65536
 
-	// Upper bounds on what a configuration file may ask for. They are here
-	// so that the arithmetic these numbers feed cannot be made to overflow,
-	// and so a typo cannot ask for a table the machine has no memory for.
+	// Bounds so the arithmetic these numbers feed cannot overflow, and a typo
+	// cannot ask for a table the machine has no memory for.
 	maxRate    = 1_000_000
 	maxBurst   = 10_000_000
 	maxTracked = 1 << 20
 
-	// maxIDLen is the longest client identifier a key carries, which is the
-	// longest DUID RFC 8415 section 11.1 allows.
+	// The longest DUID RFC 8415 section 11.1 allows.
 	maxIDLen = 130
 
-	// addrLen is an address in the 16-byte form netip uses for both families.
+	// 16-byte form netip uses for both families.
 	addrLen = 16
 
-	// maxKeyLen sizes the stack buffer a key is built in.
 	maxKeyLen = maxIDLen + addrLen
 
-	// summaryEvery is how often the drop summary may be logged.
 	summaryEvery = time.Minute
 )
 
-// mode says which part of a request identifies the client whose bucket pays.
 type mode uint8
 
 const (
@@ -172,12 +109,8 @@ func (m mode) String() string {
 	}
 }
 
-// parts reports which halves of the key this mode uses.
-//
-// havePeer is false when the context carried no handler.RequestInfo, which
-// this server always provides but a handler must not assume. Without it there
-// is no source address to key on, so every mode falls back to the client
-// identifier rather than letting every client share one bucket.
+// With no peer info every mode falls back to the identifier, so a handler
+// that can't assume RequestInfo never ends up sharing one bucket per client.
 func (m mode) parts(havePeer bool) (id, peer bool) {
 	if !havePeer {
 		return true, false
@@ -185,8 +118,6 @@ func (m mode) parts(havePeer bool) (id, peer bool) {
 	return m != modeSource, m != modeMAC
 }
 
-// settings is one plugin line, parsed. burst is kept apart from the interval
-// until the end because burst: may follow the rate on the line.
 type settings struct {
 	interval time.Duration
 	burst    int
@@ -195,8 +126,7 @@ type settings struct {
 	global   *limit
 }
 
-// optionParsers maps each optional argument to its parser. It is a fixed
-// table, read only after initialization.
+// Fixed at package init; read-only afterwards.
 var optionParsers = []struct {
 	prefix string
 	apply  func(*settings, string) error
@@ -207,8 +137,6 @@ var optionParsers = []struct {
 	{globalArg, applyGlobal},
 }
 
-// parseArgs turns a configuration line into settings, applying the defaults
-// first so that an argument only ever overrides one of them.
 func parseArgs(args []string) (*settings, error) {
 	if len(args) == 0 {
 		return nil, errors.New("need a rate as the first argument, for example 20/s or 600/m")
@@ -232,9 +160,7 @@ func parseArgs(args []string) (*settings, error) {
 	return s, nil
 }
 
-// applyOption dispatches one optional argument to its parser, and refuses a
-// second occurrence of the same one instead of quietly taking whichever came
-// last.
+// Refuses a second occurrence rather than quietly taking whichever came last.
 func applyOption(s *settings, seen map[string]struct{}, arg string) error {
 	for _, o := range optionParsers {
 		raw, ok := strings.CutPrefix(arg, o.prefix)
@@ -251,12 +177,10 @@ func applyOption(s *settings, seen map[string]struct{}, arg string) error {
 		arg, burstArg, perArg, perMAC, perSource, perBoth, maxArg, globalArg)
 }
 
-// argName is an argument prefix without its colon, for error messages.
 func argName(prefix string) string {
 	return strings.TrimSuffix(prefix, ":")
 }
 
-// applyBurst sets the per-client bucket size.
 func applyBurst(s *settings, raw string) error {
 	n, err := parseCount(argName(burstArg), raw, maxBurst)
 	if err != nil {
@@ -266,7 +190,6 @@ func applyBurst(s *settings, raw string) error {
 	return nil
 }
 
-// applyPer picks what a client is keyed on.
 func applyPer(s *settings, raw string) error {
 	switch raw {
 	case perMAC:
@@ -281,7 +204,6 @@ func applyPer(s *settings, raw string) error {
 	return nil
 }
 
-// applyMax bounds the client table.
 func applyMax(s *settings, raw string) error {
 	n, err := parseCount(argName(maxArg), raw, maxTracked)
 	if err != nil {
@@ -291,9 +213,7 @@ func applyMax(s *settings, raw string) error {
 	return nil
 }
 
-// applyGlobal adds the bucket shared by all traffic. Its burst comes from its
-// own rate, since burst: is documented as the per-client bucket size and
-// reusing it here would size the shared bucket off an unrelated number.
+// Its own burst comes from its own rate; reusing burst: here would size it off an unrelated number.
 func applyGlobal(s *settings, raw string) error {
 	interval, perSecond, err := parseRate(argName(globalArg), raw)
 	if err != nil {
@@ -306,13 +226,8 @@ func applyGlobal(s *settings, raw string) error {
 	return nil
 }
 
-// parseRate reads the <n>/s or <n>/m form, returning the time one token takes
-// to accrue along with the whole requests per second the rate works out to,
-// which is what the default burst is derived from.
-//
-// The interval is truncated to whole nanoseconds, so a rate that does not
-// divide its period evenly, such as 3/s, comes out a few nanoseconds per
-// second fast. Nothing downstream cares at that scale.
+// Truncated to whole nanoseconds, so a rate that doesn't divide its period
+// evenly (e.g. 3/s) runs a few nanoseconds per second fast; nothing downstream cares.
 func parseRate(name, raw string) (interval time.Duration, perSecond int, err error) {
 	count, period, ok := strings.Cut(raw, "/")
 	if !ok {
@@ -332,9 +247,7 @@ func parseRate(name, raw string) (interval time.Duration, perSecond int, err err
 	}
 }
 
-// parseCount reads a positive integer no larger than upper. The bound is not
-// an opinion about sensible rates; it is there because these numbers get
-// multiplied together and a configuration file is input like any other.
+// Not an opinion about sensible rates: these numbers get multiplied together, and a config file is input like any other.
 func parseCount(name, raw string, upper int) (int, error) {
 	n, err := strconv.Atoi(raw)
 	if err != nil {
@@ -346,9 +259,7 @@ func parseCount(name, raw string, upper int) (int, error) {
 	return n, nil
 }
 
-// defaultBurst lets a client that has been quiet spend two seconds of its
-// rate at once. A rate slower than one per second still gets a bucket of one,
-// or it could never send anything at all.
+// A rate slower than one per second still gets a bucket of one; zero would mean it could never send anything.
 func defaultBurst(perSecond int) int {
 	if perSecond < 1 {
 		return 1
@@ -356,23 +267,17 @@ func defaultBurst(perSecond int) int {
 	return 2 * perSecond
 }
 
-// state is one loaded instance of the plugin: the parsed limits, the table of
-// per-client buckets, and the drop accounting behind the summary log.
-//
-// Everything from mu down is written on the request path and read only with
-// mu held, so an instance is safe for the one goroutine per packet the server
-// runs. One mutex for the whole instance is deliberate: what it guards is a
-// map lookup and a handful of integer operations, which is cheaper than any
-// scheme for splitting the table would be.
+// Fields from mu down are read only with mu held. One mutex for the whole
+// instance is cheaper than any scheme for splitting the table would be.
 type state struct {
 	perKey limit
 	mode   mode
 
-	// now reads the clock. Buckets refill from it and the summary is paced
-	// by it, so a test drives both by replacing it instead of sleeping.
+	// A field, not time.Now, so a test can drive both refill and the summary
+	// pace without sleeping.
 	now func() time.Time
 
-	// warn emits the drop summary, and is a field for the same reason now is.
+	// A field for the same reason as now, so a test can intercept it.
 	warn func(format string, args ...any)
 
 	mu          sync.Mutex
@@ -385,7 +290,6 @@ type state struct {
 	lastSummary time.Time
 }
 
-// newState parses the arguments and builds the instance behind them.
 func newState(args ...string) (*state, error) {
 	s, err := parseArgs(args)
 	if err != nil {
@@ -398,8 +302,8 @@ func newState(args ...string) (*state, error) {
 		now:    time.Now,
 		warn:   log.Warningf,
 		table:  newTable(s.maxKeys),
-		// Buckets start at generation 0, so the first drop on any of them
-		// counts towards the distinct clients in the first window.
+		// Starts at 1 so a fresh bucket's zero-value gen differs, and its
+		// first drop counts as a new distinct client.
 		gen:         1,
 		lastSummary: now,
 	}
@@ -410,7 +314,6 @@ func newState(args ...string) (*state, error) {
 	return st, nil
 }
 
-// setup4 builds the DHCPv4 handler for one configured ratelimit line.
 func setup4(args ...string) (handler.Handler4Ctx, error) {
 	s, err := newState(args...)
 	if err != nil {
@@ -420,7 +323,6 @@ func setup4(args ...string) (handler.Handler4Ctx, error) {
 	return s.Handler4, nil
 }
 
-// setup6 is setup4 for DHCPv6.
 func setup6(args ...string) (handler.Handler6Ctx, error) {
 	s, err := newState(args...)
 	if err != nil {
@@ -430,8 +332,6 @@ func setup6(args ...string) (handler.Handler6Ctx, error) {
 	return s.Handler6, nil
 }
 
-// logLoaded says at startup what this instance will do, since a limit nobody
-// can see is a limit somebody will spend an afternoon on.
 func (s *state) logLoaded(family string) {
 	log.Infof("%s: one request per %s per %s, bursts of %d, tracking at most %d clients",
 		family, s.perKey.interval, s.mode, s.perKey.tokens(), s.table.maxKeys)
@@ -459,12 +359,8 @@ func (s *state) Handler6(ctx context.Context, req, resp dhcpv6.DHCPv6) (dhcpv6.D
 	return nil, true
 }
 
-// clientID6 finds something to identify a DHCPv6 client by. ExtractMAC covers
-// the relay's link-layer option, an EUI-64 peer address, and the DUID forms
-// that embed a hardware address; for every other DUID the bytes of the DUID
-// itself serve just as well here. A message with neither returns nil and is
-// keyed on its source address, or under per:mac shares one bucket with every
-// other such message.
+// A nil result is keyed on source address instead, or shares one bucket
+// under per:mac.
 func clientID6(req dhcpv6.DHCPv6) []byte {
 	if mac, err := dhcpv6.ExtractMAC(req); err == nil {
 		return mac
@@ -480,9 +376,8 @@ func clientID6(req dhcpv6.DHCPv6) []byte {
 	return duid.ToBytes()
 }
 
-// key writes the client's key into buf and returns the filled part of it. buf
-// belongs to the caller, so building a key allocates nothing, and the result
-// must not outlive the call.
+// buf belongs to the caller, so this allocates nothing; the result must not
+// outlive the call.
 func (s *state) key(ctx context.Context, buf *[maxKeyLen]byte, id []byte) []byte {
 	info, ok := handler.RequestInfoFrom(ctx)
 	useID, usePeer := s.mode.parts(ok)
@@ -497,10 +392,8 @@ func (s *state) key(ctx context.Context, buf *[maxKeyLen]byte, id []byte) []byte
 	return buf[:n]
 }
 
-// clampID cuts a client identifier down to the longest DUID RFC 8415 section
-// 11.1 permits. Nothing on the wire is trusted to stay within that, and a
-// fixed bound is what keeps a key from running into the peer address behind
-// it under per:both.
+// RFC 8415 section 11.1 bounds a DUID; nothing on the wire is trusted to
+// honor that, so this keeps a key from overrunning into the peer address under per:both.
 func clampID(id []byte) []byte {
 	if len(id) > maxIDLen {
 		return id[:maxIDLen]
@@ -508,9 +401,7 @@ func clampID(id []byte) []byte {
 	return id
 }
 
-// summary is what one drop decided about the periodic log line: nothing, or
-// the counts to print now. It comes back out from under the mutex so that
-// formatting and writing the line happen outside it.
+// Passed out from under the mutex so formatting and logging happen outside it.
 type summary struct {
 	emit     bool
 	dropped  uint64
@@ -518,8 +409,6 @@ type summary struct {
 	over     time.Duration
 }
 
-// allow charges one request to key's bucket, and to the shared bucket when
-// there is one. It reports false when the request has to be dropped.
 func (s *state) allow(key []byte) bool {
 	s.mu.Lock()
 	allowed, sum := s.consume(key)
@@ -531,7 +420,7 @@ func (s *state) allow(key []byte) bool {
 	return allowed
 }
 
-// consume does the accounting. It runs with mu held.
+// Runs with mu held.
 func (s *state) consume(key []byte) (bool, summary) {
 	now := s.now()
 	b := s.table.fetch(key, now, s.perKey.capacity)
@@ -541,10 +430,8 @@ func (s *state) consume(key []byte) (bool, summary) {
 	return false, s.recordDrop(b, now)
 }
 
-// allowGlobal charges the bucket all traffic shares, and passes everything
-// when global: was not configured. It is reached only once the per-client
-// bucket has paid, so a client already over its own limit does not also spend
-// the server's shared budget.
+// Reached only once the per-client bucket has paid, so a client already
+// over its own limit doesn't also spend the shared budget.
 func (s *state) allowGlobal(now time.Time) bool {
 	if s.global == nil {
 		return true
@@ -552,8 +439,6 @@ func (s *state) allowGlobal(now time.Time) bool {
 	return s.global.allow(now, s.globalLimit)
 }
 
-// recordDrop counts one dropped request and reports whether that drop is the
-// one that gets to log the summary for the window just ended.
 func (s *state) recordDrop(b *bucket, now time.Time) summary {
 	s.dropped++
 	if b.gen != s.gen {
