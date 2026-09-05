@@ -74,9 +74,7 @@ func TestSetup4(t *testing.T) {
 		assert.True(t, stop)
 	})
 
-	// Regression: siaddr carried over from a prior exchange used to be
-	// mistaken for the server identifier. Without option 54 present, this
-	// server is entitled to answer regardless of what siaddr says.
+	// siaddr may be stale from an earlier exchange; only option 54 identifies the server.
 	t.Run("stale siaddr without option 54, accepted", func(t *testing.T) {
 		h4, err := serverid.Plugin.Setup4("192.0.2.1")
 		require.NoError(t, err)
@@ -157,8 +155,6 @@ func TestSetup4(t *testing.T) {
 		})
 	}
 
-	// Regression: option 54 is only required for RELEASE and DECLINE. A
-	// REQUEST with no server identifier still passes.
 	t.Run("REQUEST with no option 54, accepted", func(t *testing.T) {
 		h4, err := serverid.Plugin.Setup4("192.0.2.1")
 		require.NoError(t, err)

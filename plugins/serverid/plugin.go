@@ -32,14 +32,10 @@ var Plugin = plugins.Plugin{
 	Setup4: setup4,
 }
 
-// pluginState6 holds the DUID a setup6 instance enforces as this server's
-// identifier.
 type pluginState6 struct {
 	serverID dhcpv6.DUID
 }
 
-// pluginState4 holds the IP address a setup4 instance enforces as this
-// server's identifier.
 type pluginState4 struct {
 	serverID net.IP
 }
@@ -48,21 +44,20 @@ type pluginState4 struct {
 func (p *pluginState6) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	msg, err := req.GetInnerMessage()
 	if err != nil {
-		// BUG: this should already have failed in the main handler. Abort
+		// Should already have failed in the main handler.
 		log.Error(err)
 		return nil, true
 	}
 
 	if sid := msg.Options.ServerID(); sid != nil {
-		// RFC8415 §16.{2,5,7}
-		// These message types MUST be discarded if they contain *any* ServerID option
+		// RFC 8415 §16.{2,5,7}: these MUST be discarded if they carry any
+		// ServerID option at all.
 		if msg.MessageType == dhcpv6.MessageTypeSolicit ||
 			msg.MessageType == dhcpv6.MessageTypeConfirm ||
 			msg.MessageType == dhcpv6.MessageTypeRebind {
 			return nil, true
 		}
 
-		// Approximately all others MUST be discarded if the ServerID doesn't match
 		if !sid.Equal(p.serverID) {
 			log.Infof("requested server ID does not match this server's ID. Got %v, want %v", sid, p.serverID)
 			return nil, true
@@ -71,8 +66,7 @@ func (p *pluginState6) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 		msg.MessageType == dhcpv6.MessageTypeRenew ||
 		msg.MessageType == dhcpv6.MessageTypeDecline ||
 		msg.MessageType == dhcpv6.MessageTypeRelease {
-		// RFC8415 §16.{6,8,10,11}
-		// These message types MUST be discarded if they *don't* contain a ServerID option
+		// RFC 8415 §16.{6,8,10,11}: these MUST be discarded without one.
 		return nil, true
 	}
 	dhcpv6.WithServerID(p.serverID)(resp)
@@ -81,16 +75,10 @@ func (p *pluginState6) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 
 // Handler4 handles DHCPv4 packets for the server_id plugin.
 //
-// The field that decides whether a request is addressed to this server is
-// option 54, the DHCP server identifier (RFC 2131 §4.3.2). A client in
-// SELECTING state copies the server identifier from the offer it accepted
-// into its DHCPREQUEST, and every other server on the segment is expected to
-// stay quiet. siaddr is a different field (the next-server address for
-// bootstrapping, e.g. TFTP) that a client may carry over from an earlier
-// exchange or leave zero; it says nothing about which DHCP server the
-// request is for. Deciding on siaddr instead of option 54 means two servers
-// on one segment both answer the same REQUEST, so this handler never looks
-// at it.
+// Only option 54 decides whether a request is addressed here (RFC 2131
+// §4.3.2). siaddr is the next-server address for bootstrapping and says
+// nothing about which DHCP server the request is for, so deciding on it would
+// have two servers on one segment answer the same REQUEST.
 func (p *pluginState4) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	if req.OpCode != dhcpv4.OpcodeBootRequest {
 		log.Warningf("not a BootRequest, ignoring")
@@ -98,16 +86,12 @@ func (p *pluginState4) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool)
 	}
 	sid := req.ServerIdentifier()
 	if sid == nil && requiresServerID(req.MessageType()) {
-		// RFC 2131 Table 5 makes option 54 a MUST on RELEASE and DECLINE:
-		// both are unicast to the server that owns the lease, so one with
-		// no server identifier (or a malformed option 54, which
-		// ServerIdentifier also reports as nil) cannot be shown to be
-		// addressed to us and is dropped like a mismatch would be.
+		// A malformed option 54 also reads as nil here, and neither case can
+		// be shown to be addressed to us.
 		log.Infof("%s with no server identifier, dropping", req.MessageType())
 		return nil, true
 	}
 	if sid != nil && !sid.Equal(p.serverID) {
-		// This request is for a different server, drop it.
 		log.Infof("requested server ID does not match this server's ID. Got %v, want %v", sid, p.serverID)
 		return nil, true
 	}
@@ -117,9 +101,8 @@ func (p *pluginState4) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool)
 	return resp, false
 }
 
-// requiresServerID reports whether RFC 2131 Table 5 requires message type t
-// to carry option 54. RELEASE and DECLINE are unicast to the server that
-// owns the lease, so a message of either type is meaningless without one.
+// RFC 2131 Table 5 makes option 54 a MUST on RELEASE and DECLINE: both are
+// unicast to the server that owns the lease.
 func requiresServerID(t dhcpv4.MessageType) bool {
 	return t == dhcpv4.MessageTypeRelease || t == dhcpv4.MessageTypeDecline
 }
