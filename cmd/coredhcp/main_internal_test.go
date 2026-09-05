@@ -21,9 +21,8 @@ import (
 	"github.com/coredhcp/coredhcp/plugins"
 )
 
-// withFlags sets the package-level pflag values for the duration of the
-// test and restores their previous values afterwards. run() reads these
-// directly, so tests cannot pass arguments any other way.
+// withFlags sets the package-level pflag values run() reads directly, restoring
+// them after; tests have no other way to pass arguments into run().
 func withFlags(t *testing.T, logFile, loglevel, confPath string, noStdout, pluginsFlag bool) {
 	t.Helper()
 	origLogFile, origLogNoStdout := *flagLogFile, *flagLogNoStdout
@@ -43,9 +42,8 @@ func withFlags(t *testing.T, logFile, loglevel, confPath string, noStdout, plugi
 	})
 }
 
-// TestRunPluginsFlag covers the -P listing path: it never touches plugin
-// registration, config loading, or the server, so it is safe to run any
-// number of times in any order relative to the other run() tests.
+// The -P listing path never touches plugin registration, config loading, or the
+// server, so it is safe to run in any order relative to the other run() tests.
 func TestRunPluginsFlag(t *testing.T) {
 	withFlags(t, "", "info", "", false, true)
 	var buf bytes.Buffer
@@ -84,11 +82,8 @@ func TestRunConfigLoadFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to load configuration")
 }
 
-// unregisterPlugins hands the package-global plugin registry back the way it
-// was found. run() registers desiredPlugins unconditionally on every call
-// that gets past config loading, and plugins.RegisterPlugin panics on a
-// duplicate name, so every test that lets run() get that far has to clean up
-// after itself or the next one dies on the panic.
+// unregisterPlugins undoes run()'s unconditional plugin registration; without it,
+// plugins.RegisterPlugin panics on the duplicate name the next test would hit.
 func unregisterPlugins(t *testing.T) {
 	t.Helper()
 	t.Cleanup(func() {
@@ -98,22 +93,14 @@ func unregisterPlugins(t *testing.T) {
 	})
 }
 
-// TestRunFullHappyPath is the exit-status contract for a clean shutdown: a
-// listener closed on purpose is not a failure, so SIGTERM has to leave run()
-// returning nil and the process exiting 0. Since run() now hands the error
-// from srv.Wait() straight to main, a regression here would turn every
-// ordinary `systemctl stop` into a failed unit.
-//
-// There is no hook to observe "the server is now listening and signal
-// handling is armed" from outside run(), so the delay before sending
-// SIGTERM is a real sleep rather than a channel sync.
+// There is no hook to observe "the server is now listening and signal handling
+// is armed" from outside run(), so the delay before SIGTERM is a real sleep.
 func TestRunFullHappyPath(t *testing.T) {
 	unregisterPlugins(t)
 	dir := t.TempDir()
 	confPath := filepath.Join(dir, "config.yml")
-	// The plugins section is mandatory and must be a non-empty list: an
-	// empty "plugins: []" is indistinguishable from an absent key once it
-	// goes through spf13/cast, and config.Load rejects both.
+	// An empty "plugins: []" is indistinguishable from an absent key once it goes
+	// through spf13/cast, and config.Load rejects both, so it must be non-empty.
 	conf := "server4:\n  listen:\n    - \"127.0.0.1:0\"\n  plugins:\n    - netmask: 255.255.255.0\n"
 	require.NoError(t, os.WriteFile(confPath, []byte(conf), 0o600))
 
@@ -133,9 +120,7 @@ func TestRunFullHappyPath(t *testing.T) {
 	}
 }
 
-// A configuration that binds nothing, which `listen: []` produces, has to
-// come back as an error so main exits non-zero. It used to bind no socket,
-// report success, and then panic inside Wait.
+// listen: [] must come back as an error, not a silent success, so main exits non-zero.
 func TestRunEmptyListenFails(t *testing.T) {
 	unregisterPlugins(t)
 	dir := t.TempDir()

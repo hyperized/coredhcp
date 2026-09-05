@@ -18,11 +18,8 @@ func TestRunBadMAC(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestRunExchangeFailureNonexistentInterface drives run() past the MAC
-// parse and into client6.Client.Exchange, which fails immediately on
-// net.InterfaceByName for an interface that doesn't exist. A successful
-// exchange needs a live DHCPv6 server on the interface, which is out of
-// scope for a unit test; that path belongs to the integration build.
+// Drives run() into client6.Client.Exchange, which fails on net.InterfaceByName for a
+// missing interface; a real exchange needs a live server and belongs to the integration build.
 func TestRunExchangeFailureNonexistentInterface(t *testing.T) {
 	err := run("00:11:22:33:44:55", "nonexistent-iface-zzz-coredhcp")
 	require.Error(t, err)

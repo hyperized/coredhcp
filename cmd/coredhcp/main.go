@@ -113,20 +113,17 @@ func run(w io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
-	// register plugins
 	for _, plugin := range desiredPlugins {
 		if err := plugins.RegisterPlugin(plugin); err != nil {
 			return fmt.Errorf("failed to register plugin '%s': %w", plugin.Name, err)
 		}
 	}
 
-	// start server
 	srv, err := server.Start(config)
 	if err != nil {
 		return err
 	}
 
-	// shut down cleanly on SIGINT/SIGTERM
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sig)
@@ -136,10 +133,7 @@ func run(w io.Writer) error {
 		srv.Close()
 	}()
 
-	// Wait reports nil once every listener has been closed on purpose, so
-	// anything non-nil here means a listener died under us. That has to
-	// reach the exit status: logging it and returning nil made the process
-	// exit 0 while no longer serving anything, which no service manager
-	// will restart.
+	// Wait is nil only for listeners closed on purpose, so an error here has to
+	// reach the exit status; exiting 0 while serving nothing gets no restart.
 	return srv.Wait()
 }
