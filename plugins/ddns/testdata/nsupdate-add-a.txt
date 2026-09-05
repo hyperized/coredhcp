@@ -1,0 +1,47 @@
+nsupdate-add-a.bin is a real RFC 2136 update captured off the wire, kept so
+the TSIG computation in this package can be checked against an implementation
+nobody here wrote.
+
+How it was made
+---------------
+
+A throwaway UDP listener bound to 127.0.0.1:5399 and wrote the first datagram
+it received to the file. Then, on the same machine (macOS, ISC nsupdate
+9.10.6 at /usr/bin/nsupdate):
+
+    nsupdate -y hmac-sha256:ddns-key:Y29yZWRoY3AtZGRucy1nb2xkZW4tdGVzdC1rZXkhISE= <<'CMDS'
+    server 127.0.0.1 5399
+    zone home.lan
+    update add host.home.lan 300 A 10.0.0.5
+    send
+    CMDS
+
+The listener never answered, so nsupdate retried and gave up. Only the first
+datagram was kept.
+
+What is in it
+-------------
+
+    key name        ddns-key.
+    algorithm       hmac-sha256.
+    secret          Y29yZWRoY3AtZGRucy1nb2xkZW4tdGVzdC1rZXkhISE=
+                    ("coredhcp-ddns-golden-test-key!!!", 32 octets)
+    message ID      0xe06e
+    time signed     1788589641 (2026-09-05T06:27:21Z)
+    fudge           300
+    MAC             e3500ee31020867d470b67d236f7151f94ee8c0b78df905892de2905378c5cc2
+    TSIG record at  offset 47
+    total length    128 octets
+
+The secret is a test key and nothing else has ever used it.
+
+One difference from what this package sends
+-------------------------------------------
+
+nsupdate compresses names: the update record's owner reads as "host" followed
+by a pointer to home.lan. in the zone section. This package writes every name
+out in full, so the two messages are not byte for byte comparable and the
+golden file is used for the MAC only. That is the interesting half anyway: the
+MAC covers the message exactly as it was rendered, so recomputing it over the
+captured bytes checks the digest, the TSIG variables and the field layout
+without depending on how the names were packed.
