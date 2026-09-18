@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"sync"
+	"time"
 
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -51,19 +53,26 @@ type listener6 struct {
 	chain    []plugins.Link6
 	observer events.Observer
 	ifaces   ifaceCache
+	gate     *gate
 	// wantsCtx records, once at startup, whether any plugin in the chain
 	// reads the request context. Answering it per packet would mean walking
 	// the whole chain before running any of it.
 	wantsCtx bool
+	// relayChecked records whether the chain holds the relay plugin, which
+	// is what decides which relays this server answers. Without it the
+	// server refuses relayed requests itself, see HandleMsg6.
+	relayChecked bool
 }
 
 type listener4 struct {
 	conn4
 	net.Interface
-	chain    []plugins.Link4
-	observer events.Observer
-	ifaces   ifaceCache
-	wantsCtx bool
+	chain        []plugins.Link4
+	observer     events.Observer
+	ifaces       ifaceCache
+	gate         *gate
+	wantsCtx     bool
+	relayChecked bool
 }
 
 // ifaceCache maps interface indexes to names for one listener.
@@ -149,6 +158,16 @@ type Servers struct {
 	// running counts the Serve goroutines that have been started, so a
 	// failed Start can wait for the ones it already launched.
 	running sync.WaitGroup
+	// gate bounds the handler goroutines the read loops start and is what
+	// Close waits on. One for the whole server: the limit is about the
+	// machine, not about one socket.
+	gate         *gate
+	maxInFlight  int
+	drainTimeout time.Duration
+	// drainOnce keeps the wait for in-flight handlers to one shutdown.
+	// Close is reached both from a signal handler and from Wait, and the
+	// second call must not sit out the timeout again.
+	drainOnce sync.Once
 }
 
 // Option configures Start.
@@ -163,6 +182,39 @@ type Option func(*Servers)
 // costs a nil check per packet.
 func WithObserver(o events.Observer) Option {
 	return func(s *Servers) { s.observer = o }
+}
+
+// WithMaxInFlight caps how many datagram handlers run at once, counted
+// across every socket the server binds. A datagram that arrives while the
+// limit is reached is dropped and counted, see Drops.
+//
+// Dropping is the right answer for DHCP: a client retransmits, so a shed
+// packet costs a retry, while queueing it would cost memory the server does
+// not get to bound. The limit also caps what the handlers hold, a 64 KiB
+// buffer each and one AF_PACKET descriptor per layer-2 reply in flight.
+//
+// The default is 8 per GOMAXPROCS. A limit below 1 leaves it in place.
+func WithMaxInFlight(n int) Option {
+	return func(s *Servers) {
+		if n < 1 {
+			return
+		}
+		s.maxInFlight = n
+	}
+}
+
+// WithDrainTimeout bounds how long Close waits for the handlers that are
+// still running before it closes the sockets under them. A handler stuck in
+// a plugin delays shutdown by at most d instead of holding it open.
+//
+// The default is 5 seconds. A timeout of zero or less leaves it in place.
+func WithDrainTimeout(d time.Duration) Option {
+	return func(s *Servers) {
+		if d <= 0 {
+			return
+		}
+		s.drainTimeout = d
+	}
 }
 
 // reportPlugins names the plugins in each chain, in chain order, DHCPv6 first
@@ -316,11 +368,14 @@ func Start(config *config.Config, opts ...Option) (*Servers, error) {
 		// Serve goroutine that had already been started when a later bind
 		// failed: cleanup closed its socket, Serve returned nil, and the
 		// send had nobody to hand it to.
-		errors: make(chan error, total),
+		errors:       make(chan error, total),
+		maxInFlight:  defaultMaxInFlight(),
+		drainTimeout: defaultDrainTimeout,
 	}
 	for _, opt := range opts {
 		opt(&srv)
 	}
+	srv.gate = newGate(srv.maxInFlight)
 	srv.reportPlugins(chains)
 
 	if err := srv.start6(config, chains); err != nil {
@@ -343,6 +398,8 @@ func (s *Servers) start6(c *config.Config, chains *plugins.Chains) error {
 	}
 	log.Println("Starting DHCPv6 server")
 	wantsCtx := plugins.WantsContext(chains.V6)
+	relayChecked := hasRelay6(chains.V6)
+	warnNoRelayPlugin(events.FamilyV6, relayChecked)
 	for i := range c.Server6.Addresses {
 		addr := c.Server6.Addresses[i]
 		l6, err := listen6(&addr)
@@ -351,6 +408,8 @@ func (s *Servers) start6(c *config.Config, chains *plugins.Chains) error {
 		}
 		l6.chain = chains.V6
 		l6.wantsCtx = wantsCtx
+		l6.relayChecked = relayChecked
+		l6.gate = s.gate
 		l6.observer = s.observer
 		s.listeners = append(s.listeners, l6)
 		s.reportListener(events.FamilyV6, l6.LocalAddr(), addr.Zone)
@@ -366,6 +425,8 @@ func (s *Servers) start4(c *config.Config, chains *plugins.Chains) error {
 	}
 	log.Println("Starting DHCPv4 server")
 	wantsCtx := plugins.WantsContext(chains.V4)
+	relayChecked := hasRelay4(chains.V4)
+	warnNoRelayPlugin(events.FamilyV4, relayChecked)
 	for i := range c.Server4.Addresses {
 		addr := c.Server4.Addresses[i]
 		l4, err := listen4(&addr)
@@ -374,12 +435,42 @@ func (s *Servers) start4(c *config.Config, chains *plugins.Chains) error {
 		}
 		l4.chain = chains.V4
 		l4.wantsCtx = wantsCtx
+		l4.relayChecked = relayChecked
+		l4.gate = s.gate
 		l4.observer = s.observer
 		s.listeners = append(s.listeners, l4)
 		s.reportListener(events.FamilyV4, l4.LocalAddr(), addr.Zone)
 		s.serve(l4)
 	}
 	return nil
+}
+
+// relayPluginName is the plugin that says which relays this server answers.
+// Its absence from a chain is what turns on the server's own refusal of
+// relayed requests for that family, see listener4.relayDropped.
+const relayPluginName = "relay"
+
+// hasRelay4 reports whether the DHCPv4 chain holds the relay plugin.
+func hasRelay4(chain []plugins.Link4) bool {
+	return slices.ContainsFunc(chain, func(l plugins.Link4) bool { return l.Name == relayPluginName })
+}
+
+// hasRelay6 reports whether the DHCPv6 chain holds the relay plugin.
+func hasRelay6(chain []plugins.Link6) bool {
+	return slices.ContainsFunc(chain, func(l plugins.Link6) bool { return l.Name == relayPluginName })
+}
+
+// warnNoRelayPlugin says once, at startup, that this family will refuse
+// relayed requests. The server replies where a relayed request tells it to,
+// so a deployment that has relays and no allow list answers wherever any
+// host on the segment points it; the refusal is the safe default and the
+// plugin is how an operator lifts it.
+func warnNoRelayPlugin(family events.Family, relayChecked bool) {
+	if relayChecked {
+		return
+	}
+	log.Warningf("%s: no `relay` plugin configured, relayed requests will be dropped. "+
+		"Add `relay: allow <address|prefix> ...` naming the relays this server answers.", family)
 }
 
 // serve runs one listener's read loop until its socket closes and reports how
@@ -425,15 +516,42 @@ func (s *Servers) Wait() error {
 	return errors.Join(errs...)
 }
 
-// Close closes all listening connections. It is safe to call more than once:
-// a shutdown signal and Wait both close the listeners, and the second close
-// of a connection is not an error worth reporting.
+// Drops reports how many datagrams the server threw away before any plugin
+// saw them, by reason. Safe to call from any goroutine at any time,
+// including after Close.
+func (s *Servers) Drops() Drops {
+	return s.gate.drops()
+}
+
+// Close stops the server. It first refuses new datagrams and waits for the
+// handlers that are still running, then closes the listening sockets.
+//
+// The order is what keeps a reply from being written to a socket that has
+// already gone: a handler sits in the plugin chain for as long as the chain
+// takes, and the sleep plugin alone makes that arbitrarily long. The wait is
+// bounded by the drain timeout (see WithDrainTimeout), so a plugin that
+// never returns delays shutdown rather than preventing it.
+//
+// It is safe to call more than once: a shutdown signal and Wait both close
+// the listeners, the wait for handlers happens on the first call only, and
+// the second close of a connection is not an error worth reporting.
 func (s *Servers) Close() {
+	s.drainOnce.Do(s.drain)
 	for _, srv := range s.listeners {
 		if srv != nil {
 			if err := srv.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 				log.Errorf("error closing listener: %v", err)
 			}
 		}
+	}
+}
+
+// drain stops the gate and waits for the handlers that were already
+// running, so the sockets stay open for as long as anything is still
+// writing replies to them.
+func (s *Servers) drain() {
+	s.gate.stop()
+	if !s.gate.wait(s.drainTimeout) {
+		log.Warningf("handlers still running after %s, closing the sockets under them", s.drainTimeout)
 	}
 }

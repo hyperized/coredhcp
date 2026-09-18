@@ -478,8 +478,14 @@ func TestOobIfIndex6(t *testing.T) {
 
 // --- HandleMsg4 ---
 
+// newTestListener4 builds a listener whose chain vets relays, the way
+// start4 marks one whose configuration loaded the relay plugin. That is the
+// interesting shape for everything below: a server that answers relayed
+// requests, so the tests get at what it does with them. The refusal a
+// server without the plugin applies clears the flag again and has tests of
+// its own, see TestHandleMsg4DropsRelayedWithoutRelayPlugin.
 func newTestListener4(handlers []handler.Handler4, conn *fakeConn4) *listener4 {
-	return &listener4{conn4: conn, chain: chain4(handlers...)}
+	return &listener4{conn4: conn, chain: chain4(handlers...), relayChecked: true}
 }
 
 // chain4 turns bare handlers into a chain, naming each link after its
@@ -747,8 +753,10 @@ func TestHandleMsg4EthernetSendSuccessAndFailure(t *testing.T) {
 
 // --- HandleMsg6 ---
 
+// newTestListener6 is newTestListener4 for DHCPv6, relay-vetting chain and
+// all.
 func newTestListener6(handlers []handler.Handler6, conn *fakeConn6) *listener6 {
-	return &listener6{conn6: conn, chain: chain6(handlers...)}
+	return &listener6{conn6: conn, chain: chain6(handlers...), relayChecked: true}
 }
 
 func TestHandleMsg6ParseError(t *testing.T) {
@@ -1428,4 +1436,199 @@ func TestHandleMsg6ObserverSolicitAdvertise(t *testing.T) {
 	ev := obs.only(t)
 	assert.Equal(t, "SOLICIT", ev.Type)
 	assert.Equal(t, "ADVERTISE", ev.ReplyType)
+}
+
+// --- relayed requests with no relay plugin in the chain ---
+
+// The server answers a DHCPv4 request where giaddr tells it to, and the
+// sender picks giaddr. With no relay plugin to hold an allow list, a
+// relayed request is refused here instead, and the client on the same
+// segment still gets served.
+func TestHandleMsg4DropsRelayedWithoutRelayPlugin(t *testing.T) {
+	captureLog(t)
+	relayed := mustRequest4(t,
+		dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover),
+		dhcpv4.WithGatewayIP(net.ParseIP("203.0.113.9")),
+	)
+	// Broadcast, so the reply leaves as a datagram rather than down the
+	// layer-2 path, which needs a raw socket this test has no business
+	// opening.
+	direct := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover), dhcpv4.WithBroadcast(true))
+
+	for _, tc := range []struct {
+		name         string
+		req          *dhcpv4.DHCPv4
+		relayChecked bool
+		wantWrites   int
+		wantDrops    Drops
+	}{
+		{
+			name:       "relayed request without the plugin is dropped",
+			req:        relayed,
+			wantWrites: 0,
+			wantDrops:  Drops{Relayed: 1},
+		},
+		{
+			name:         "relayed request with the plugin in the chain is answered",
+			req:          relayed,
+			relayChecked: true,
+			wantWrites:   1,
+		},
+		{
+			name:       "a request straight from a client is never relayed",
+			req:        direct,
+			wantWrites: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &fakeConn4{}
+			l, obs := observedListener4(nil, conn)
+			l.gate = newGate(1)
+			l.relayChecked = tc.relayChecked
+
+			l.HandleMsg4(datagramBuf(tc.req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("203.0.113.9"), Port: 67})
+
+			assert.Len(t, conn.writes, tc.wantWrites)
+			assert.Equal(t, tc.wantDrops, l.gate.drops())
+
+			// Whatever happened, the observer hears about the packet once.
+			ev := obs.only(t)
+			if tc.wantWrites == 0 {
+				assert.Equal(t, events.OutcomeDropped, ev.Outcome)
+				assert.Equal(t, events.PathNone, ev.Path)
+				assert.Equal(t, errRelayedNotAllowed.Error(), ev.Error)
+				// The drop is the server's, not a plugin's.
+				assert.Empty(t, ev.Plugin)
+				assert.Equal(t, "DISCOVER", ev.Type)
+				assert.Equal(t, netip.MustParseAddr("203.0.113.9"), ev.Relay)
+				return
+			}
+			assert.Equal(t, events.OutcomeReplied, ev.Outcome)
+		})
+	}
+}
+
+// The DHCPv6 half: a Relay-forward is what says a request came through a
+// relay, and it is refused until a plugin vets the relays.
+func TestHandleMsg6DropsRelayedWithoutRelayPlugin(t *testing.T) {
+	captureLog(t)
+	inner := message6(t, dhcpv6.MessageTypeRequest)
+	relayed, err := dhcpv6.EncapsulateRelay(inner, dhcpv6.MessageTypeRelayForward, net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"))
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name         string
+		req          dhcpv6.DHCPv6
+		relayChecked bool
+		wantWrites   int
+		wantDrops    Drops
+	}{
+		{
+			name:       "relay-forward without the plugin is dropped",
+			req:        relayed,
+			wantWrites: 0,
+			wantDrops:  Drops{Relayed: 1},
+		},
+		{
+			name:         "relay-forward with the plugin in the chain is answered",
+			req:          relayed,
+			relayChecked: true,
+			wantWrites:   1,
+		},
+		{
+			name:       "a message straight from a client is never relayed",
+			req:        inner,
+			wantWrites: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &fakeConn6{}
+			l, obs := observedListener6(nil, conn)
+			l.gate = newGate(1)
+			l.relayChecked = tc.relayChecked
+
+			l.HandleMsg6(datagramBuf(tc.req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 547})
+
+			assert.Len(t, conn.writes, tc.wantWrites)
+			assert.Equal(t, tc.wantDrops, l.gate.drops())
+
+			ev := obs.only(t)
+			if tc.wantWrites == 0 {
+				assert.Equal(t, events.OutcomeDropped, ev.Outcome)
+				assert.Equal(t, errRelayedNotAllowed.Error(), ev.Error)
+				assert.Equal(t, "REQUEST", ev.Type)
+				assert.Equal(t, netip.MustParseAddr("2001:db8::1"), ev.Relay)
+				return
+			}
+			assert.Equal(t, events.OutcomeReplied, ev.Outcome)
+		})
+	}
+}
+
+// A read loop whose listener arrived without a gate runs behind one with
+// the defaults, so the bound on handler goroutines holds there too.
+func TestGateForFallsBackToTheDefault(t *testing.T) {
+	g := newGate(2)
+	assert.Same(t, g, gateFor(g))
+
+	made := gateFor(nil)
+	require.NotNil(t, made)
+	assert.Equal(t, defaultMaxInFlight(), cap(made.sem))
+}
+
+// The read loop starts one goroutine per datagram, so the datagram that
+// arrives while the limit is reached is thrown away instead of queued. The
+// client retransmits; the server keeps the memory it had.
+func TestServeDropsWhenTheGateIsFull(t *testing.T) {
+	captureLog(t)
+	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
+	req.SetBroadcast()
+
+	hold := make(chan struct{})
+	slow := func(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+		<-hold
+		return resp, false
+	}
+
+	writeCh := make(chan struct{}, 2)
+	conn := &fakeConn4{
+		writeCh: writeCh,
+		reads: []fakeReadResult4{
+			{data: req.ToBytes(), peer: &net.UDPAddr{IP: net.ParseIP("192.0.2.1")}},
+			{data: req.ToBytes(), peer: &net.UDPAddr{IP: net.ParseIP("192.0.2.2")}},
+			{err: net.ErrClosed},
+		},
+	}
+	l := newTestListener4([]handler.Handler4{slow}, conn)
+	// One slot, taken by the first datagram's handler before the loop reads
+	// the second one, so the drop is the limit rather than a race.
+	l.gate = newGate(1)
+
+	require.NoError(t, l.Serve())
+	assert.Equal(t, Drops{Overload: 1}, l.gate.drops())
+
+	close(hold)
+	<-writeCh
+	require.True(t, l.gate.wait(time.Minute))
+	assert.Len(t, conn.writes, 1, "only the datagram that got a slot is answered")
+}
+
+// A datagram read after the gate closed is dropped rather than handed to a
+// handler that would write to a socket about to be closed.
+func TestServeDropsWhileShuttingDown(t *testing.T) {
+	captureLog(t)
+	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
+	conn := &fakeConn4{
+		reads: []fakeReadResult4{
+			{data: req.ToBytes(), peer: &net.UDPAddr{IP: net.ParseIP("192.0.2.1")}},
+			{err: net.ErrClosed},
+		},
+	}
+	l := newTestListener4(nil, conn)
+	l.gate = newGate(4)
+	l.gate.stop()
+
+	require.NoError(t, l.Serve())
+	assert.Equal(t, Drops{ShuttingDown: 1}, l.gate.drops())
+	assert.Empty(t, conn.writes)
 }

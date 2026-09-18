@@ -8,7 +8,10 @@ import (
 	"errors"
 	"net"
 	"runtime"
+	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
@@ -735,4 +738,261 @@ func TestReportListenerNamesTheInterface(t *testing.T) {
 	assert.Equal(t, []events.Listener{
 		{Family: events.FamilyV6, Address: "[::]:547", Interface: "eth0"},
 	}, obs.listeners)
+}
+
+// --- shutdown: handlers first, sockets after ---
+
+// closeRecorder is a listener double that only records that it was closed.
+// Serve is never called on it: these tests drive shutdown, not traffic.
+type closeRecorder struct {
+	onClose func()
+}
+
+func (c *closeRecorder) Close() error {
+	c.onClose()
+	return nil
+}
+
+func (c *closeRecorder) Serve() error { return nil }
+
+// A handler can sit in the plugin chain for as long as the chain takes, and
+// it writes its reply to the socket when it comes back. Close therefore
+// waits for the handlers before it closes the sockets under them.
+func TestCloseWaitsForHandlersBeforeClosingSockets(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var mu sync.Mutex
+		var order []string
+		record := func(what string) {
+			mu.Lock()
+			defer mu.Unlock()
+			order = append(order, what)
+		}
+
+		srv := &Servers{
+			listeners:    []listener{&closeRecorder{onClose: func() { record("socket closed") }}},
+			gate:         newGate(4),
+			drainTimeout: time.Minute,
+		}
+
+		hold := make(chan struct{})
+		require.True(t, srv.gate.run(func() {
+			<-hold
+			record("handler done")
+		}))
+
+		closed := make(chan struct{})
+		go func() {
+			srv.Close()
+			close(closed)
+		}()
+
+		synctest.Wait()
+		select {
+		case <-closed:
+			t.Fatal("Close returned while a handler was still running")
+		default:
+		}
+
+		close(hold)
+		<-closed
+
+		mu.Lock()
+		defer mu.Unlock()
+		assert.Equal(t, []string{"handler done", "socket closed"}, order)
+	})
+}
+
+// A plugin that never returns delays shutdown by the drain timeout instead
+// of holding the process open. The sockets close under it and the log says
+// so.
+func TestCloseGivesUpAtTheDrainTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		buf := captureLog(t)
+		closes := 0
+		srv := &Servers{
+			listeners:    []listener{&closeRecorder{onClose: func() { closes++ }}},
+			gate:         newGate(4),
+			drainTimeout: 2 * time.Second,
+		}
+
+		hold := make(chan struct{})
+		done := make(chan struct{})
+		require.True(t, srv.gate.run(func() {
+			<-hold
+			close(done)
+		}))
+
+		start := time.Now()
+		srv.Close()
+		assert.Equal(t, 2*time.Second, time.Since(start))
+		assert.Equal(t, 1, closes)
+		assert.Contains(t, buf.String(), "handlers still running after 2s")
+
+		close(hold)
+		<-done
+	})
+}
+
+// Close is reached from a signal handler and from Wait. The second call
+// must not sit out the drain timeout again.
+func TestCloseDrainsOnlyOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		captureLog(t)
+		closes := 0
+		srv := &Servers{
+			listeners:    []listener{&closeRecorder{onClose: func() { closes++ }}},
+			gate:         newGate(4),
+			drainTimeout: time.Second,
+		}
+
+		hold := make(chan struct{})
+		done := make(chan struct{})
+		require.True(t, srv.gate.run(func() {
+			<-hold
+			close(done)
+		}))
+
+		srv.Close()
+		start := time.Now()
+		srv.Close()
+		assert.Zero(t, time.Since(start), "the second Close must not wait again")
+		assert.Equal(t, 2, closes, "every listener is still closed on every call")
+
+		close(hold)
+		<-done
+	})
+}
+
+// A Servers a caller built rather than started has no gate: Close must not
+// panic on it and Drops has nothing to report.
+func TestZeroValueServersShutsDownQuietly(t *testing.T) {
+	s := &Servers{}
+	assert.NotPanics(t, s.Close)
+	assert.Equal(t, Drops{}, s.Drops())
+}
+
+// --- options ---
+
+func TestWithMaxInFlight(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		n    int
+		want int
+	}{
+		{name: "a usable limit is taken", n: 3, want: 3},
+		{name: "zero keeps the default", n: 0, want: 64},
+		{name: "negative keeps the default", n: -1, want: 64},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Servers{maxInFlight: 64}
+			WithMaxInFlight(tc.n)(s)
+			assert.Equal(t, tc.want, s.maxInFlight)
+		})
+	}
+}
+
+func TestWithDrainTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		d    time.Duration
+		want time.Duration
+	}{
+		{name: "a usable timeout is taken", d: time.Minute, want: time.Minute},
+		{name: "zero keeps the default", d: 0, want: time.Second},
+		{name: "negative keeps the default", d: -time.Hour, want: time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Servers{drainTimeout: time.Second}
+			WithDrainTimeout(tc.d)(s)
+			assert.Equal(t, tc.want, s.drainTimeout)
+		})
+	}
+}
+
+// Start hands every listener the same gate: the limit is about the machine,
+// not about one socket, and Close has one set of handlers to wait for.
+func TestStartSharesOneGateAcrossListeners(t *testing.T) {
+	cfg := testConfig(t,
+		[]net.UDPAddr{{IP: net.ParseIP("::1"), Port: 0}},
+		[]net.UDPAddr{{IP: net.ParseIP("127.0.0.1"), Port: 0}},
+	)
+	srv, err := Start(cfg, WithMaxInFlight(5), WithDrainTimeout(time.Minute))
+	require.NoError(t, err)
+	defer srv.Close()
+
+	require.Len(t, srv.listeners, 2)
+	require.NotNil(t, srv.gate)
+	assert.Equal(t, 5, cap(srv.gate.sem))
+	assert.Same(t, srv.gate, srv.listeners[0].(*listener6).gate)
+	assert.Same(t, srv.gate, srv.listeners[1].(*listener4).gate)
+	assert.Equal(t, Drops{}, srv.Drops())
+}
+
+// --- relay allow list at startup ---
+
+// Without the relay plugin, each family says once at startup that it will
+// refuse relayed requests, however many sockets it binds, and the listeners
+// carry that decision.
+func TestStartWarnsOncePerFamilyWithoutRelayPlugin(t *testing.T) {
+	buf := captureLog(t)
+	cfg := testConfig(t,
+		[]net.UDPAddr{{IP: net.ParseIP("::1"), Port: 0}, {IP: net.ParseIP("::1"), Port: 0}},
+		[]net.UDPAddr{{IP: net.ParseIP("127.0.0.1"), Port: 0}, {IP: net.ParseIP("127.0.0.1"), Port: 0}},
+	)
+	srv, err := Start(cfg)
+	require.NoError(t, err)
+	defer srv.Close()
+
+	assert.Equal(t, 1, buf.count("DHCPv6: no `relay` plugin configured"))
+	assert.Equal(t, 1, buf.count("DHCPv4: no `relay` plugin configured"))
+
+	require.Len(t, srv.listeners, 4)
+	assert.False(t, srv.listeners[0].(*listener6).relayChecked)
+	assert.False(t, srv.listeners[2].(*listener4).relayChecked)
+}
+
+// With the plugin in the chain there is nothing to warn about: the plugin
+// decides which relays are answered, and the server stays out of it.
+func TestStartWithRelayPluginLeavesRelayedRequestsToIt(t *testing.T) {
+	registerTestPlugin(t, &plugins.Plugin{
+		Name: relayPluginName,
+		Setup6: func(...string) (handler.Handler6, error) {
+			return func(_, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) { return resp, false }, nil
+		},
+		Setup4: func(...string) (handler.Handler4, error) {
+			return func(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) { return resp, false }, nil
+		},
+	})
+
+	buf := captureLog(t)
+	cfg := &config.Config{
+		Server6: &config.ServerConfig{
+			Addresses: []net.UDPAddr{{IP: net.ParseIP("::1"), Port: 0}},
+			Plugins:   []config.PluginConfig{{Name: relayPluginName, Args: []string{"allow", "fe80::/10"}}},
+		},
+		Server4: &config.ServerConfig{
+			Addresses: []net.UDPAddr{{IP: net.ParseIP("127.0.0.1"), Port: 0}},
+			Plugins:   []config.PluginConfig{{Name: relayPluginName, Args: []string{"allow", "10.0.1.1"}}},
+		},
+	}
+	srv, err := Start(cfg)
+	require.NoError(t, err)
+	defer srv.Close()
+
+	assert.NotContains(t, buf.String(), "no `relay` plugin configured")
+	require.Len(t, srv.listeners, 2)
+	assert.True(t, srv.listeners[0].(*listener6).relayChecked)
+	assert.True(t, srv.listeners[1].(*listener4).relayChecked)
+}
+
+// hasRelay4 and hasRelay6 look for the plugin by name anywhere in the
+// chain, not just at its head.
+func TestHasRelayPlugin(t *testing.T) {
+	assert.False(t, hasRelay4(nil))
+	assert.False(t, hasRelay4([]plugins.Link4{{Name: "server_id"}, {Name: "range"}}))
+	assert.True(t, hasRelay4([]plugins.Link4{{Name: "ratelimit"}, {Name: relayPluginName}}))
+
+	assert.False(t, hasRelay6(nil))
+	assert.False(t, hasRelay6([]plugins.Link6{{Name: "server_id"}}))
+	assert.True(t, hasRelay6([]plugins.Link6{{Name: relayPluginName}, {Name: "dns"}}))
 }

@@ -93,6 +93,25 @@ bind, so a service manager sees a failure instead of a silent stop. `-h` lists
 the flags: config path, log level, log file and a `-P` that prints the built-in
 plugin list.
 
+Each datagram is handled on its own goroutine, and how many of those run at
+once is capped: eight per processor by default. A datagram that arrives while
+they are all busy is dropped and counted instead of queued, and a DHCP client
+answers that with a retransmission. Shutdown waits up to five seconds
+for the handlers that are still running before closing the sockets under them,
+so a reply that is halfway through a slow plugin still goes out. Both numbers
+are options on `server.Start` for anyone embedding the package
+(`WithMaxInFlight`, `WithDrainTimeout`), and `Servers.Drops` reads the counts
+back.
+
+Relayed requests need the [relay](plugins/relay/) plugin. A DHCPv4 reply goes
+to `giaddr` and the sender is the one who writes `giaddr`, so a server that
+answers relays it was never told about will send a full reply wherever any
+host on the segment points it. Without `relay` in a family's plugin chain the
+server therefore drops relayed requests for that family, a non-zero `giaddr`
+on DHCPv4 and a Relay-forward on DHCPv6, and warns once at startup. On-link
+clients are unaffected. A deployment that has relays and no `relay` plugin has
+to add one, naming the relay addresses, before its relays work again.
+
 ## Terminal UI
 
 `coredhcp-tui` is the same server with a screen in front of it. It shows the
@@ -271,7 +290,8 @@ This fork adds fifteen plugins upstream does not have built in:
   where the reply goes), and drops a DHCPRELEASE whose ciaddr is not the
   address it was sent from, so a neighbour's lease cannot be freed by
   forging one; DHCPv6 matches the relay's source address instead and caps
-  relay nesting and hop count
+  relay nesting and hop count. Without it in the chain the server answers no
+  relay at all, see above
 * [ratelimit](plugins/ratelimit/) drops requests that arrive faster than a
   configured rate, one token bucket per client in a bounded LRU, keyed by MAC,
   source address or both, with an optional bucket shared by all traffic; the

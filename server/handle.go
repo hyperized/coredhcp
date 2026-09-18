@@ -95,6 +95,35 @@ func (l *listener4) requestContext(oob *ipv4.ControlMessage, src *net.UDPAddr) c
 	})
 }
 
+// relayDropped reports whether this request came through a relay while
+// nothing in the chain vets relays, and counts the drop when it did.
+//
+// A DHCPv4 reply goes to giaddr, and giaddr is picked by whoever sent the
+// packet, so with no allow list any host that can reach the server makes it
+// send a full reply to any address it names. The relay plugin is what holds
+// that list; without it in the chain the server answers no relay at all.
+// Configured deployments are unaffected: with relay loaded this check is
+// off and the plugin decides, allow list and all.
+func (l *listener4) relayDropped(req *dhcpv4.DHCPv4) bool {
+	if l.relayChecked || !isRelayed4(req) {
+		return false
+	}
+	l.gate.dropped(reasonRelayed)
+	return true
+}
+
+// relayDropped is the DHCPv6 half. There is no giaddr here: a relay wraps
+// the client's message in a Relay-forward and the reply goes back to the
+// datagram's source, so the message being relayed at all is what this
+// refuses when no plugin is there to say which relays are legitimate.
+func (l *listener6) relayDropped(req dhcpv6.DHCPv6) bool {
+	if l.relayChecked || !req.IsRelay() {
+		return false
+	}
+	l.gate.dropped(reasonRelayed)
+	return true
+}
+
 // startReport begins the event for one packet, or returns nil when no
 // observer is attached. Everything it would cost, the clock read and the
 // interface lookup included, sits behind that check.
@@ -128,6 +157,10 @@ func (l *listener6) HandleMsg6(buf []byte, oob *ipv6.ControlMessage, peer *net.U
 		return
 	}
 	rep.request6(req)
+	if l.relayDropped(req) {
+		rep.emit(events.OutcomeDropped, events.PathNone, errRelayedNotAllowed)
+		return
+	}
 
 	resp, err := buildReply6(req)
 	if err != nil {
@@ -185,6 +218,10 @@ func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, src *net.UD
 		return
 	}
 	rep.request4(req)
+	if l.relayDropped(req) {
+		rep.emit(events.OutcomeDropped, events.PathNone, errRelayedNotAllowed)
+		return
+	}
 
 	resp, err := buildReply4(req)
 	if err != nil {
@@ -274,7 +311,11 @@ const MaxDatagram = 1 << 16
 
 // serve is the shared read loop: hand each datagram to handle on its own
 // goroutine until the connection closes.
-func serve[M any](localAddr net.Addr, readFrom func([]byte) (int, M, net.Addr, error), handle func([]byte, M, *net.UDPAddr)) error {
+//
+// The gate bounds how many of those goroutines exist at once, so a flood of
+// datagrams cannot become a flood of goroutines. A datagram it turns away is
+// dropped here, buffer and all, and counted.
+func serve[M any](localAddr net.Addr, g *gate, readFrom func([]byte) (int, M, net.Addr, error), handle func([]byte, M, *net.UDPAddr)) error {
 	log.Printf("Listen %s", localAddr)
 	for {
 		b := *bufpool.Get().(*[]byte)
@@ -288,18 +329,36 @@ func serve[M any](localAddr net.Addr, readFrom func([]byte) (int, M, net.Addr, e
 			log.Printf("Error reading from connection: %v", err)
 			return err
 		}
-		go handle(b[:n], oob, peer.(*net.UDPAddr))
+		datagram, src := b[:n], peer.(*net.UDPAddr)
+		if !g.run(func() { handle(datagram, oob, src) }) {
+			// No handler ran, so nobody will hand the buffer back.
+			bufpool.Put(&b)
+		}
 	}
+}
+
+// gateFor is the listener's gate, or a fresh one with the defaults when it
+// came without. Only a listener built outside Start has none, and the bound
+// on handler goroutines has to hold for that one too.
+//
+// The gate it hands back stays local to the read loop and is not written
+// back onto the listener: the handler goroutines read that field while they
+// run, so writing it here would be a race.
+func gateFor(g *gate) *gate {
+	if g == nil {
+		return newGate(0)
+	}
+	return g
 }
 
 // Serve handles datagrams received on the DHCPv6 connection and passes them
 // to the plugin chain.
 func (l *listener6) Serve() error {
-	return serve(l.LocalAddr(), l.ReadFrom, l.HandleMsg6)
+	return serve(l.LocalAddr(), gateFor(l.gate), l.ReadFrom, l.HandleMsg6)
 }
 
 // Serve handles datagrams received on the DHCPv4 connection and passes them
 // to the plugin chain.
 func (l *listener4) Serve() error {
-	return serve(l.LocalAddr(), l.ReadFrom, l.HandleMsg4)
+	return serve(l.LocalAddr(), gateFor(l.gate), l.ReadFrom, l.HandleMsg4)
 }

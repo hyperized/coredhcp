@@ -80,6 +80,8 @@ server6:
         # matched; fe80::/10 is how you admit link-local relays. Chains nested
         # deeper than eight relays and an outermost relay with no link address
         # and a hop count above 32 are dropped as well. List it first.
+        # Without this plugin the server drops every relayed request for this
+        # family, so configure it if any of your clients sit behind a relay.
         # - relay: allow <address|prefix> ... [release-check:on|off]
         # - relay: allow fe80::/10 2001:db8:0:1::1
 
@@ -270,6 +272,8 @@ server4:
         # On-link clients pass, except that release-check (on by default)
         # drops a RELEASE whose ciaddr is not the address it came from.
         # List it first, before server_id and any plugin holding lease state.
+        # Without this plugin the server drops every request carrying a
+        # giaddr, so configure it if any of your clients sit behind a relay.
         # - relay: allow <address|prefix> ... [strict-giaddr] [release-check:on|off]
         # - relay: allow 10.0.1.1 10.0.2.0/24
 

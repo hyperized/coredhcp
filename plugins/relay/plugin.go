@@ -47,6 +47,16 @@
 // on-link. DHCPDECLINE gets no such check, because it carries no ciaddr to
 // compare against.
 //
+// # Without this plugin
+//
+// A family whose chain does not hold this plugin drops relayed requests in
+// the server core instead: a non-zero giaddr on DHCPv4, a Relay-forward on
+// DHCPv6. The server says so once at startup and counts the drops. That is
+// a safe default rather than a substitute for the allow list, since it
+// serves on-link clients and no relay at all. Configuring this plugin
+// switches the core check off again and hands the decision to the list
+// below.
+//
 // # DHCPv6
 //
 // A DHCPv6 relay puts no address in the client's packet the way giaddr does.
