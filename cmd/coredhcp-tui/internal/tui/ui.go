@@ -225,13 +225,9 @@ func (u *UI) Run(ctx context.Context) error {
 
 	var draws sync.WaitGroup
 
-	draws.Add(1)
-
-	go func() {
-		defer draws.Done()
-
+	draws.Go(func() {
 		u.redraw(ctx, app, p)
-	}()
+	})
 
 	runDone := make(chan struct{})
 	watcher := u.watch(ctx, app, cancel, &draws, entered, runDone)
@@ -346,7 +342,7 @@ func (u *UI) build(app *tview.Application) *panes {
 		rate:     newPane(" rate (last 60 s) "),
 	}
 
-	for id := paneTraffic; id < paneCount; id++ {
+	for id := range paneCount {
 		p.scroll[id] = newPane(" " + id.title() + " ")
 	}
 

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/coredhcp/coredhcp/config"
 	"github.com/coredhcp/coredhcp/events"
 )
 
@@ -26,14 +27,25 @@ const maxArgsW = 40
 // tend to be credentials taken out. The events package warns that arguments
 // may hold secrets, and this pane is the one place they would otherwise end up
 // on a shared screen.
+//
+// config.RedactArgs runs first, so the pane covers the same shapes the
+// startup log does: the password:, token: and secret: prefixes, and a NetBox
+// token recognised by its length. The server already redacts before it hands
+// the event over, but the pane cannot tell where an event came from, and a
+// second pass over an argument that is already *** changes nothing. The local
+// pass after it catches what config leaves alone, such as a bare hex key too
+// short to be a NetBox token.
 func redactArgs(args []string) string {
 	if len(args) == 0 {
 		return ""
 	}
 
-	out := make([]string, 0, len(args))
-	for _, a := range args {
-		out = append(out, redactArg(a))
+	// RedactArgs hands back a slice of its own, so the second pass writes
+	// over that one instead of allocating another. The caller's slice is
+	// untouched either way.
+	out := config.RedactArgs(args)
+	for i, a := range out {
+		out[i] = redactArg(a)
 	}
 
 	return strings.Join(out, " ")
@@ -64,22 +76,23 @@ func redactUserinfo(a string) string {
 
 	rest := a[scheme+3:]
 
-	at := strings.IndexByte(rest, '@')
-	if at < 0 {
+	userinfo, host, ok := strings.Cut(rest, "@")
+	if !ok {
 		return a
 	}
 
-	userinfo := rest[:at]
+	// An @ after the authority belongs to the path or the query, not to a
+	// userinfo that was never there.
 	if strings.ContainsAny(userinfo, "/?#") {
 		return a
 	}
 
-	colon := strings.IndexByte(userinfo, ':')
-	if colon < 0 {
+	user, _, ok := strings.Cut(userinfo, ":")
+	if !ok {
 		return a
 	}
 
-	return a[:scheme+3] + userinfo[:colon] + ":***@" + rest[at+1:]
+	return a[:scheme+3] + user + ":***@" + host
 }
 
 // tagged is one coloured piece of a right hand column, kept as data so the
