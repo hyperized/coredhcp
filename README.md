@@ -306,7 +306,10 @@ This fork adds fifteen plugins upstream does not have built in:
   do: one JSON object per offer, ack, nak, release, decline or DHCPv6 reply,
   optionally signed with an HMAC. Delivery runs on a worker behind a bounded
   queue, so an endpoint that stops answering slows down deliveries and not
-  DHCP
+  DHCP. A hook program is started with an environment built from an allow
+  list (PATH, HOME, TMPDIR, LANG, LC_\*) plus its own LEASEHOOK_\* variables,
+  so the secrets other plugins were handed as `env:NAME` never reach it, and
+  a webhook redirect is refused rather than followed
 * [leaseapi](plugins/leaseapi/) answers what the server is holding right now
   over a read-only HTTP API on a unix socket or on loopback, which is the
   most-asked-for thing in the upstream tracker (coredhcp/coredhcp#111) and what
