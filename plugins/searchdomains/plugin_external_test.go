@@ -40,7 +40,9 @@ func TestAddDomains6(t *testing.T) {
 	require.NotNil(t, resp, "plugin did not return a message")
 	assert.False(t, stop, "plugin interrupted processing")
 
-	searchLabels := resp.(*dhcpv6.Message).Options.DomainSearchList().Labels
+	msg, ok := resp.(*dhcpv6.Message)
+	require.True(t, ok)
+	searchLabels := msg.Options.DomainSearchList().Labels
 	assert.Equal(t, searchDomains, searchLabels)
 }
 
@@ -56,7 +58,10 @@ func TestAddDomains6EmptyList(t *testing.T) {
 	resp, stop := handler6(req, stub)
 	require.NotNil(t, resp)
 	assert.False(t, stop)
-	assert.Empty(t, resp.(*dhcpv6.Message).Options.DomainSearchList().Labels)
+
+	msg, ok := resp.(*dhcpv6.Message)
+	require.True(t, ok)
+	assert.Empty(t, msg.Options.DomainSearchList().Labels)
 }
 
 func TestAddDomains4(t *testing.T) {

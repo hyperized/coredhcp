@@ -60,9 +60,13 @@ func TestSamePrefix(t *testing.T) {
 
 func TestRecordKey(t *testing.T) {
 	duid1 := &dhcpv6.DUIDLL{HWType: dhcpIana.HWTypeEthernet, LinkLayerAddr: net.HardwareAddr{0, 1, 2, 3, 4, 5}}
+	duid1Copy := &dhcpv6.DUIDLL{HWType: dhcpIana.HWTypeEthernet, LinkLayerAddr: net.HardwareAddr{0, 1, 2, 3, 4, 5}}
 	duid2 := &dhcpv6.DUIDLL{HWType: dhcpIana.HWTypeEthernet, LinkLayerAddr: net.HardwareAddr{0, 1, 2, 3, 4, 6}}
 
-	assert.Equal(t, recordKey(duid1), recordKey(duid1))
+	// recordKey is used as a map key across requests, so two distinct DUID
+	// objects with the same content must hash the same, not just the same
+	// pointer hashed against itself.
+	assert.Equal(t, recordKey(duid1), recordKey(duid1Copy))
 	assert.NotEqual(t, recordKey(duid1), recordKey(duid2))
 }
 
@@ -123,6 +127,15 @@ func newTestPlugin(t *testing.T, pool string) (*pluginState, *fakeClock) {
 	}, clock
 }
 
+// asMessage asserts that result is the concrete *dhcpv6.Message the plugin
+// chain hands back, failing the test immediately if it isn't.
+func asMessage(t *testing.T, result dhcpv6.DHCPv6) *dhcpv6.Message {
+	t.Helper()
+	msg, ok := result.(*dhcpv6.Message)
+	require.True(t, ok, "expected *dhcpv6.Message, got %T", result)
+	return msg
+}
+
 // duidFor builds a distinct client identifier per n, so a test can bring as
 // many clients to the pool as it needs.
 func duidFor(n byte) dhcpv6.DUID {
@@ -146,7 +159,7 @@ func solicit(t *testing.T, h *pluginState, duid dhcpv6.DUID, hints ...*dhcpv6.Op
 	require.NotNil(t, result)
 	require.False(t, stop)
 
-	iapds := result.(*dhcpv6.Message).Options.IAPD()
+	iapds := asMessage(t, result).Options.IAPD()
 	require.Len(t, iapds, 1)
 	return iapds[0].Options.Prefixes()
 }

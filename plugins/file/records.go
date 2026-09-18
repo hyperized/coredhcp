@@ -13,7 +13,7 @@ import (
 	"io"
 	"net/netip"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -142,7 +142,7 @@ func duplicatesWarning(ipAddresses map[string]int) {
 		}
 	}
 
-	sort.Strings(duplicates)
+	slices.Sort(duplicates)
 
 	for _, warning := range duplicates {
 		log.Warning(warning)

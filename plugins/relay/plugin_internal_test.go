@@ -194,7 +194,7 @@ func TestSetupState(t *testing.T) {
 				require.Error(t, err)
 				assert.Nil(t, p)
 				if tc.wantErr != nil {
-					assert.ErrorIs(t, err, tc.wantErr)
+					require.ErrorIs(t, err, tc.wantErr)
 				}
 				if tc.wantErrText != "" {
 					assert.Contains(t, err.Error(), tc.wantErrText)
@@ -370,13 +370,11 @@ func TestLogDropIsConcurrencySafe(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 16 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 64 {
 				p.logDrop(reasonPeerNotAllowed, "source %s", "fe80::1")
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

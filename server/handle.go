@@ -318,8 +318,10 @@ const MaxDatagram = 1 << 16
 func serve[M any](localAddr net.Addr, g *gate, readFrom func([]byte) (int, M, net.Addr, error), handle func([]byte, M, *net.UDPAddr)) error {
 	log.Printf("Listen %s", localAddr)
 	for {
-		b := *bufpool.Get().(*[]byte)
-		b = b[:MaxDatagram] // Reslice to max capacity in case the buffer in pool was resliced smaller
+		// bufpool's New and every Put in this package store a *[]byte and
+		// nothing else.
+		b := *bufpool.Get().(*[]byte) //nolint:forcetypeassert // bufpool only ever holds *[]byte
+		b = b[:MaxDatagram]           // Reslice to max capacity in case the buffer in pool was resliced smaller
 
 		n, oob, peer, err := readFrom(b)
 		if errors.Is(err, net.ErrClosed) {
@@ -329,7 +331,18 @@ func serve[M any](localAddr net.Addr, g *gate, readFrom func([]byte) (int, M, ne
 			log.Printf("Error reading from connection: %v", err)
 			return err
 		}
-		datagram, src := b[:n], peer.(*net.UDPAddr)
+		datagram := b[:n]
+		src, ok := peer.(*net.UDPAddr)
+		if !ok {
+			// readFrom is injected, so the address it reports is whatever
+			// the socket underneath it hands back. A UDP socket always says
+			// *net.UDPAddr; anything else has no port to answer on, so it is
+			// dropped like any other datagram this loop cannot use rather
+			// than taking the read loop down with a failed assertion.
+			log.Printf("Received datagram from a peer that is not a *net.UDPAddr (%T), dropping", peer)
+			bufpool.Put(&b)
+			continue
+		}
 		if !g.run(func() { handle(datagram, oob, src) }) {
 			// No handler ran, so nobody will hand the buffer back.
 			bufpool.Put(&b)

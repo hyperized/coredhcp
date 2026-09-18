@@ -214,6 +214,24 @@ func closedUDPConn(t *testing.T, network string, addr *net.UDPAddr) *net.UDPConn
 	return c
 }
 
+// asListener4 unwraps a listener into its *listener4 concrete type. A few
+// fields (observer, gate, relayChecked) are only reachable this way, since
+// Servers.listeners holds the listener interface.
+func asListener4(t *testing.T, l listener) *listener4 {
+	t.Helper()
+	l4, ok := l.(*listener4)
+	require.True(t, ok, "listener is not a *listener4: %T", l)
+	return l4
+}
+
+// asListener6 mirrors asListener4 for the DHCPv6 side.
+func asListener6(t *testing.T, l listener) *listener6 {
+	t.Helper()
+	l6, ok := l.(*listener6)
+	require.True(t, ok, "listener is not a *listener6: %T", l)
+	return l6
+}
+
 // countingConn is a socket that counts how often it was closed, so a test can
 // tell a leak from a close and a close from a double close. It embeds the
 // real *net.UDPConn because golang.org/x/net/ipv4.NewPacketConn asserts its
@@ -241,16 +259,22 @@ func (c *countingConn) Close() error {
 func TestNewUDPConnWrappersReturnANilInterfaceOnFailure(t *testing.T) {
 	const zone = "nonexistent-zzz-iface"
 
+	// assert.Nil is not the check to use here: it reaches through the
+	// interface with reflection and passes for a typed nil pointer too,
+	// which is the very thing these wrappers exist to prevent. Comparing
+	// against a bare nil looks at the interface value itself.
 	t.Run("v4", func(t *testing.T) {
 		c, err := newIPv4UDPConn(zone, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0, Zone: zone})
 		require.Error(t, err)
-		assert.True(t, c == nil, "want a nil interface, got %#v", c)
+		//nolint:testifylint // assert.Nil would pass for a typed nil pointer
+		assert.Equal(t, nil, c, "want a nil interface, got %#v", c)
 	})
 
 	t.Run("v6", func(t *testing.T) {
 		c, err := newIPv6UDPConn(zone, &net.UDPAddr{IP: net.ParseIP("::1"), Port: 0, Zone: zone})
 		require.Error(t, err)
-		assert.True(t, c == nil, "want a nil interface, got %#v", c)
+		//nolint:testifylint // assert.Nil would pass for a typed nil pointer
+		assert.Equal(t, nil, c, "want a nil interface, got %#v", c)
 	})
 }
 
@@ -682,16 +706,16 @@ func TestStartPassesObserverToListeners(t *testing.T) {
 	srv, err := Start(cfg, WithObserver(obs))
 	require.NoError(t, err)
 	require.Len(t, srv.listeners, 2)
-	assert.Same(t, obs, srv.listeners[0].(*listener6).observer)
-	assert.Same(t, obs, srv.listeners[1].(*listener4).observer)
+	assert.Same(t, obs, asListener6(t, srv.listeners[0]).observer)
+	assert.Same(t, obs, asListener4(t, srv.listeners[1]).observer)
 	srv.Close()
 	require.NoError(t, srv.Wait())
 
 	plain, err := Start(cfg)
 	require.NoError(t, err)
 	require.Len(t, plain.listeners, 2)
-	assert.Nil(t, plain.listeners[0].(*listener6).observer)
-	assert.Nil(t, plain.listeners[1].(*listener4).observer)
+	assert.Nil(t, asListener6(t, plain.listeners[0]).observer)
+	assert.Nil(t, asListener4(t, plain.listeners[1]).observer)
 	plain.Close()
 	require.NoError(t, plain.Wait())
 }
@@ -923,8 +947,8 @@ func TestStartSharesOneGateAcrossListeners(t *testing.T) {
 	require.Len(t, srv.listeners, 2)
 	require.NotNil(t, srv.gate)
 	assert.Equal(t, 5, cap(srv.gate.sem))
-	assert.Same(t, srv.gate, srv.listeners[0].(*listener6).gate)
-	assert.Same(t, srv.gate, srv.listeners[1].(*listener4).gate)
+	assert.Same(t, srv.gate, asListener6(t, srv.listeners[0]).gate)
+	assert.Same(t, srv.gate, asListener4(t, srv.listeners[1]).gate)
 	assert.Equal(t, Drops{}, srv.Drops())
 }
 
@@ -947,8 +971,8 @@ func TestStartWarnsOncePerFamilyWithoutRelayPlugin(t *testing.T) {
 	assert.Equal(t, 1, buf.count("DHCPv4: no `relay` plugin configured"))
 
 	require.Len(t, srv.listeners, 4)
-	assert.False(t, srv.listeners[0].(*listener6).relayChecked)
-	assert.False(t, srv.listeners[2].(*listener4).relayChecked)
+	assert.False(t, asListener6(t, srv.listeners[0]).relayChecked)
+	assert.False(t, asListener4(t, srv.listeners[2]).relayChecked)
 }
 
 // With the plugin in the chain there is nothing to warn about: the plugin
@@ -981,8 +1005,8 @@ func TestStartWithRelayPluginLeavesRelayedRequestsToIt(t *testing.T) {
 
 	assert.NotContains(t, buf.String(), "no `relay` plugin configured")
 	require.Len(t, srv.listeners, 2)
-	assert.True(t, srv.listeners[0].(*listener6).relayChecked)
-	assert.True(t, srv.listeners[1].(*listener4).relayChecked)
+	assert.True(t, asListener6(t, srv.listeners[0]).relayChecked)
+	assert.True(t, asListener4(t, srv.listeners[1]).relayChecked)
 }
 
 // hasRelay4 and hasRelay6 look for the plugin by name anywhere in the

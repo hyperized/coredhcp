@@ -141,7 +141,7 @@ func (p *respReader) readBulk(arg []byte) (any, error) {
 		return nil, protocolErrorf("malformed bulk length %q", arg)
 	}
 	if n == -1 {
-		return nil, nil
+		return nil, nil //nolint:nilnil // RESP2's nil bulk and nil array are an untyped nil
 	}
 	if n < 0 || n > maxBulkLen {
 		return nil, protocolErrorf("bulk length %d out of range", n)
@@ -166,7 +166,7 @@ func (p *respReader) readArray(arg []byte, depth int) (any, error) {
 		return nil, protocolErrorf("malformed array length %q", arg)
 	}
 	if n == -1 {
-		return nil, nil
+		return nil, nil //nolint:nilnil // RESP2's nil bulk and nil array are an untyped nil
 	}
 	if n < 0 || n > maxArrayLen {
 		return nil, protocolErrorf("array length %d out of range", n)

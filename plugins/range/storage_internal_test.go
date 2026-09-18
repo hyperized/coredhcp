@@ -35,18 +35,20 @@ func testDBSetup(ctx context.Context) (*sql.DB, error) {
 	return db, nil
 }
 
-var expire = time.Date(2000, 01, 01, 00, 00, 00, 00, time.UTC).Unix()
-var records = []struct {
-	mac string
-	ip  *Record
-}{
-	{"02:00:00:00:00:00", &Record{IP: net.IPv4(10, 0, 0, 0), expires: expire, hostname: "zero"}},
-	{"02:00:00:00:00:01", &Record{IP: net.IPv4(10, 0, 0, 1), expires: expire, hostname: "one"}},
-	{"02:00:00:00:00:02", &Record{IP: net.IPv4(10, 0, 0, 2), expires: expire, hostname: "two"}},
-	{"02:00:00:00:00:03", &Record{IP: net.IPv4(10, 0, 0, 3), expires: expire, hostname: "three"}},
-	{"02:00:00:00:00:04", &Record{IP: net.IPv4(10, 0, 0, 4), expires: expire, hostname: "four"}},
-	{"02:00:00:00:00:05", &Record{IP: net.IPv4(10, 0, 0, 5), expires: expire, hostname: "five"}},
-}
+var (
+	expire  = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
+	records = []struct {
+		mac string
+		ip  *Record
+	}{
+		{"02:00:00:00:00:00", &Record{IP: net.IPv4(10, 0, 0, 0), expires: expire, hostname: "zero"}},
+		{"02:00:00:00:00:01", &Record{IP: net.IPv4(10, 0, 0, 1), expires: expire, hostname: "one"}},
+		{"02:00:00:00:00:02", &Record{IP: net.IPv4(10, 0, 0, 2), expires: expire, hostname: "two"}},
+		{"02:00:00:00:00:03", &Record{IP: net.IPv4(10, 0, 0, 3), expires: expire, hostname: "three"}},
+		{"02:00:00:00:00:04", &Record{IP: net.IPv4(10, 0, 0, 4), expires: expire, hostname: "four"}},
+		{"02:00:00:00:00:05", &Record{IP: net.IPv4(10, 0, 0, 5), expires: expire, hostname: "five"}},
+	}
+)
 
 func TestLoadRecords(t *testing.T) {
 	db, err := testDBSetup(t.Context())
@@ -124,8 +126,8 @@ func TestFreeIPAddress(t *testing.T) {
 	assert.True(t, exists, "Record should exist before deletion")
 
 	// Now free the IP address
-	if err := pl.freeIPAddress(hwaddr.String(), record); err != nil {
-		t.Errorf("Failed to free IP address: %v", err)
+	if freeErr := pl.freeIPAddress(hwaddr.String(), record); freeErr != nil {
+		t.Errorf("Failed to free IP address: %v", freeErr)
 	}
 
 	parsedRecords, err = loadRecords(t.Context(), pl.leasedb)
@@ -154,7 +156,7 @@ func TestFreeIPAddressNonExistent(t *testing.T) {
 	}
 
 	err = pl.freeIPAddress(hwaddr.String(), record)
-	assert.NoError(t, err, "Freeing a non-existent IP address should not return an error")
+	require.NoError(t, err, "Freeing a non-existent IP address should not return an error")
 
 	parsedRecords, err := loadRecords(t.Context(), pl.leasedb)
 	if err != nil {
@@ -181,8 +183,8 @@ func TestFreeIPAddressVerifyDeletion(t *testing.T) {
 	hwaddrToDelete, _ := net.ParseMAC(records[2].mac)
 	recordToDelete := records[2].ip
 
-	if err := pl.freeIPAddress(hwaddrToDelete.String(), recordToDelete); err != nil {
-		t.Errorf("Failed to free IP address: %v", err)
+	if freeErr := pl.freeIPAddress(hwaddrToDelete.String(), recordToDelete); freeErr != nil {
+		t.Errorf("Failed to free IP address: %v", freeErr)
 	}
 
 	parsedRecords, err = loadRecords(t.Context(), pl.leasedb)
@@ -238,7 +240,7 @@ func TestFreeIPAddressExecutionError(t *testing.T) {
 
 	err = pl.freeIPAddress(hwaddr.String(), record)
 
-	assert.Error(t, err, "Should return error due to trigger preventing deletion")
+	require.Error(t, err, "Should return error due to trigger preventing deletion")
 	assert.Contains(t, err.Error(), "could not remove the lease", "Error should indicate record delete failure")
 	assert.Contains(t, err.Error(), triggerErrorMsg, "Error should contain trigger message")
 }
@@ -691,7 +693,8 @@ func TestQueuedRenewalFailureKeepsTheOldExpiry(t *testing.T) {
 
 	const mac = "02:00:00:00:21:00"
 	require.NotNil(t, request(t, pl, mac))
-	was := pl.Recordsv4[mac].expires
+	rec := pl.Recordsv4[mac]
+	was := rec.expires
 
 	blockInserts(t, pl.leasedb)
 	pl.startWriter()
@@ -700,7 +703,7 @@ func TestQueuedRenewalFailureKeepsTheOldExpiry(t *testing.T) {
 
 	assert.Nil(t, request(t, pl, mac))
 	assert.Equal(t, was, pl.Recordsv4[mac].expires, "the extension was rolled back")
-	assert.Same(t, pl.Recordsv4[mac], pl.Recordsv4[mac], "and the client keeps its record")
+	assert.Same(t, rec, pl.Recordsv4[mac], "and the client keeps its record")
 }
 
 // TestSettleTakesTheResultThatIsAlreadyThere covers the fast path in the

@@ -54,13 +54,13 @@ func runServer(readyCh chan<- struct{}, nsName string, desiredPlugins []*plugins
 	if err != nil {
 		log.Panicf("Netns `%s` not set up: %v", nsName, err)
 	}
-	if err := netns.Set(ns); err != nil {
-		log.Panicf("Failed to switch to netns `%s`: %v", nsName, err)
+	if setErr := netns.Set(ns); setErr != nil {
+		log.Panicf("Failed to switch to netns `%s`: %v", nsName, setErr)
 	}
 	// register plugins
 	for _, pl := range desiredPlugins {
-		if err := plugins.RegisterPlugin(pl); err != nil {
-			log.Panicf("Failed to register plugin `%s`: %v", pl.Name, err)
+		if regErr := plugins.RegisterPlugin(pl); regErr != nil {
+			log.Panicf("Failed to register plugin `%s`: %v", pl.Name, regErr)
 		}
 	}
 	// start DHCP server

@@ -105,7 +105,7 @@ func TestCompile(t *testing.T) {
 
 func TestSubnetError(t *testing.T) {
 	err := subnetError(0, "", errNoName)
-	assert.EqualError(t, err, `subnet #1: every subnet needs a name`)
+	require.EqualError(t, err, `subnet #1: every subnet needs a name`)
 
 	err = subnetError(2, "office", errNoLease)
 	assert.EqualError(t, err, `subnet "office": a subnet that hands out addresses needs a lease`)

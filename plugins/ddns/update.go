@@ -136,7 +136,8 @@ func withdrawChanges(j job) []change {
 // reverseChanges returns the update section for one address's reverse zone.
 func reverseChanges(j job, addr netip.Addr, ttl uint32) ([]change, error) {
 	owner := ptrName(addr)
-	changes := []change{deleteRRset(owner, dnsmessage.TypePTR)}
+	changes := make([]change, 0, 2)
+	changes = append(changes, deleteRRset(owner, dnsmessage.TypePTR))
 	if j.remove {
 		return changes, nil
 	}

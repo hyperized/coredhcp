@@ -157,10 +157,12 @@ func TestRelayedRequestIsDroppedWithoutRelayPlugin(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = client.Close() }()
 
+	localAddr, ok := client.LocalAddr().(*net.UDPAddr)
+	require.True(t, ok, "client socket must have a *net.UDPAddr local address")
 	req, err := dhcpv4.New(
 		dhcpv4.WithHwAddr(net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}),
 		dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover),
-		dhcpv4.WithGatewayIP(client.LocalAddr().(*net.UDPAddr).IP),
+		dhcpv4.WithGatewayIP(localAddr.IP),
 	)
 	require.NoError(t, err)
 	_, err = client.WriteToUDP(req.ToBytes(), serverAddr)

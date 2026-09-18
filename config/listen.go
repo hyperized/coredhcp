@@ -102,7 +102,7 @@ func expandLLMulticast(addr *net.UDPAddr) ([]net.UDPAddr, error) {
 	if addr.Zone != "" {
 		return nil, errors.New("address is already zoned")
 	}
-	var needFlags = net.FlagMulticast
+	needFlags := net.FlagMulticast
 	if addr.IP.To4() != nil {
 		// We need to be able to send broadcast responses in ipv4
 		needFlags |= net.FlagBroadcast

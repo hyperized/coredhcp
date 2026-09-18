@@ -139,7 +139,7 @@ func TestSetup6KnownMAC(t *testing.T) {
 
 	gotResp, stop := h6(context.Background(), req, resp)
 	assert.False(t, stop)
-	require.Equal(t, 1, len(gotResp.GetOption(dhcpv6.OptionIANA)))
+	require.Len(t, gotResp.GetOption(dhcpv6.OptionIANA), 1)
 	opt := gotResp.GetOneOption(dhcpv6.OptionIANA)
 	assert.Contains(t, opt.String(), "IP=2001:db8::10:5")
 }
@@ -222,7 +222,7 @@ func TestTokenArgument(t *testing.T) {
 
 		_, stop := h4(context.Background(), req, resp)
 		assert.True(t, stop)
-		assert.Greater(t, fake.requests.Load(), int32(0))
+		assert.Positive(t, fake.requests.Load())
 	})
 
 	t.Run("an nbt_ token authenticates as a bearer token", func(t *testing.T) {

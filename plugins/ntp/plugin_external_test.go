@@ -29,7 +29,7 @@ func TestSetup4Errors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h, err := ntp.Plugin.Setup4(tc.args...)
-			assert.Error(t, err)
+			require.Error(t, err)
 			assert.Nil(t, h)
 		})
 	}
@@ -48,7 +48,7 @@ func TestSetup6Errors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h, err := ntp.Plugin.Setup6(tc.args...)
-			assert.Error(t, err)
+			require.Error(t, err)
 			assert.Nil(t, h)
 		})
 	}

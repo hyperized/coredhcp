@@ -282,7 +282,7 @@ func TestHandler6(t *testing.T) {
 
 		result, stop := h6(req, resp)
 		assert.False(t, stop)
-		assert.Equal(t, 0, len(result.GetOption(dhcpv6.OptionIANA)))
+		assert.Empty(t, result.GetOption(dhcpv6.OptionIANA))
 	})
 
 	t.Run("known MAC", func(t *testing.T) {
@@ -294,7 +294,7 @@ func TestHandler6(t *testing.T) {
 
 		result, stop := h6(req, resp)
 		assert.False(t, stop)
-		if assert.Equal(t, 1, len(result.GetOption(dhcpv6.OptionIANA))) {
+		if assert.Len(t, result.GetOption(dhcpv6.OptionIANA), 1) {
 			opt := result.GetOneOption(dhcpv6.OptionIANA)
 			assert.Contains(t, opt.String(), "IP=2001:db8::10:1")
 		}
@@ -321,7 +321,7 @@ func TestHandler6(t *testing.T) {
 			result, stop := h6(req, resp)
 			assert.Same(t, resp, result)
 			assert.False(t, stop)
-			assert.Equal(t, 0, len(result.GetOption(dhcpv6.OptionIANA)))
+			assert.Empty(t, result.GetOption(dhcpv6.OptionIANA))
 		})
 	}
 
@@ -337,7 +337,7 @@ func TestHandler6(t *testing.T) {
 
 		result, stop := h6(req, resp)
 		assert.False(t, stop)
-		if assert.Equal(t, 1, len(result.GetOption(dhcpv6.OptionIANA))) {
+		if assert.Len(t, result.GetOption(dhcpv6.OptionIANA), 1) {
 			opt := result.GetOneOption(dhcpv6.OptionIANA)
 			assert.Contains(t, opt.String(), "IP=2001:db8::10:1")
 		}
@@ -377,7 +377,7 @@ func TestHandler6(t *testing.T) {
 		result, stop := h6(req, resp)
 		assert.Same(t, resp, result)
 		assert.False(t, stop)
-		assert.Equal(t, 0, len(result.GetOption(dhcpv6.OptionIANA)))
+		assert.Empty(t, result.GetOption(dhcpv6.OptionIANA))
 	})
 }
 
@@ -689,7 +689,7 @@ func TestHandler6KeyDUID(t *testing.T) {
 
 			result, stop := h6(newReq(t), resp)
 			assert.False(t, stop)
-			if assert.Equal(t, 1, len(result.GetOption(dhcpv6.OptionIANA))) {
+			if assert.Len(t, result.GetOption(dhcpv6.OptionIANA), 1) {
 				opt := result.GetOneOption(dhcpv6.OptionIANA)
 				assert.Contains(t, opt.String(), "IP=2001:db8::10:1")
 			}

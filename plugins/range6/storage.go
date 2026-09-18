@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"slices"
 	"strings"
 	"time"
 
@@ -234,6 +235,7 @@ type bindingWrite struct {
 	// cancel releases it once the writer is done with it. done carries the
 	// result back to the handler waiting on it, and is buffered so the
 	// writer never blocks on a caller that has already given up.
+	//nolint:containedctx // travels with the queued change to the writer
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan error
@@ -370,8 +372,8 @@ func (p *pluginState) settleAll(pending []pendingWrite) []error {
 	p.Lock()
 	defer p.Unlock()
 	// Backwards: the last change made is the first one put back.
-	for i := len(failed) - 1; i >= 0; i-- {
-		failed[i]()
+	for _, f := range slices.Backward(failed) {
+		f()
 	}
 	return results
 }

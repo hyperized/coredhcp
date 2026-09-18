@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"net"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -51,8 +52,7 @@ func closeAfter(t *testing.T, name string) {
 	t.Helper()
 	sources := leases.Sources()
 	// Newest first: two instances over one lease file report the same name.
-	for i := len(sources) - 1; i >= 0; i-- {
-		src := sources[i]
+	for _, src := range slices.Backward(sources) {
 		if src.Name() != name {
 			continue
 		}

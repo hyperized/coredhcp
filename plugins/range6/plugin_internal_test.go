@@ -52,7 +52,8 @@ type mockAllocator struct {
 }
 
 func (m *mockAllocator) Allocate(hint net.IPNet) (net.IPNet, error) {
-	return m.Called(hint).Get(0).(net.IPNet), nil
+	ipnet, _ := m.Called(hint).Get(0).(net.IPNet)
+	return ipnet, nil
 }
 
 func (m *mockAllocator) Free(ip net.IPNet) error {
@@ -69,7 +70,8 @@ type mockFailingAllocator struct {
 
 func (m *mockFailingAllocator) Allocate(hint net.IPNet) (net.IPNet, error) {
 	args := m.Called(hint)
-	return args.Get(0).(net.IPNet), args.Error(1)
+	ipnet, _ := args.Get(0).(net.IPNet)
+	return ipnet, args.Error(1)
 }
 
 func (m *mockFailingAllocator) Free(ip net.IPNet) error {
@@ -541,8 +543,8 @@ func TestSweepExpiredSkipsUndeletableRecordButReclaimsOthers(t *testing.T) {
 	reclaimable := &Record{DUID: duidB, IAID: [4]byte{0, 0, 0, 2}, IP: net.ParseIP("2001:db8:1::101"), expires: now.Add(-time.Hour).Unix()}
 
 	for _, rec := range []*Record{stuck, reclaimable} {
-		_, err := alloc.Allocate(net.IPNet{IP: rec.IP})
-		require.NoError(t, err)
+		_, allocErr := alloc.Allocate(net.IPNet{IP: rec.IP})
+		require.NoError(t, allocErr)
 		require.NoError(t, p.saveIPAddress(rec, nil))
 		p.Records6[rec.key()] = rec
 	}
@@ -1153,7 +1155,7 @@ func TestEnqueueQueueFull(t *testing.T) {
 
 	err := p.saveIPAddress(rec, nil)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrWriteQueueFull)
+	require.ErrorIs(t, err, ErrWriteQueueFull)
 
 	err = p.freeIPAddress(rec)
 	require.Error(t, err)

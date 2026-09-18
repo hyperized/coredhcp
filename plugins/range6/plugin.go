@@ -316,6 +316,7 @@ type pluginState struct {
 	// it once the writer has drained. It is the plugin's own lifetime and
 	// not a request's: the writer outlives the packet that queued a change,
 	// and a handler may not hold on to the context it was called with.
+	//nolint:containedctx // the plugin instance's own lifetime, not a request's
 	dbCtx    context.Context
 	dbCancel context.CancelFunc
 

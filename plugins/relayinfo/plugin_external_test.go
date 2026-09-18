@@ -199,8 +199,10 @@ func TestHandler4(t *testing.T) {
 			wantLease: time.Hour,
 		},
 		{name: "no relay agent information at all"},
-		{name: "relay agent information without a circuit-id",
-			subs: []dhcpv4.Option{dhcpv4.OptGeneric(dhcpv4.AgentRemoteIDSubOption, []byte("rack4-sw1:eth3"))}},
+		{
+			name: "relay agent information without a circuit-id",
+			subs: []dhcpv4.Option{dhcpv4.OptGeneric(dhcpv4.AgentRemoteIDSubOption, []byte("rack4-sw1:eth3"))},
+		},
 		{name: "circuit-id that is not mapped", subs: []dhcpv4.Option{circuit([]byte("rack9-sw1:eth1"))}},
 		{name: "empty circuit-id", subs: []dhcpv4.Option{circuit(nil)}},
 	} {
@@ -388,16 +390,20 @@ func TestHandler6InterfaceID(t *testing.T) {
 			wantLease: time.Hour,
 		},
 		{name: "no interface-id"},
-		{name: "interface-id that is not mapped",
-			opts: []dhcpv6.Option{dhcpv6.OptInterfaceID([]byte("rack9-sw1:eth1"))}},
+		{
+			name: "interface-id that is not mapped",
+			opts: []dhcpv6.Option{dhcpv6.OptInterfaceID([]byte("rack9-sw1:eth1"))},
+		},
 		{
 			// A relay is free to send an interface-id this long. It cannot be
 			// written in a mapping file, so it is passed on without a lookup.
 			name: "interface-id over the 255 byte limit",
 			opts: []dhcpv6.Option{dhcpv6.OptInterfaceID([]byte(strings.Repeat("a", 256)))},
 		},
-		{name: "a remote-id is not an interface-id",
-			opts: []dhcpv6.Option{&dhcpv6.OptRemoteID{EnterpriseNumber: 9, RemoteID: []byte("rack4-sw1:eth3")}}},
+		{
+			name: "a remote-id is not an interface-id",
+			opts: []dhcpv6.Option{&dhcpv6.OptRemoteID{EnterpriseNumber: 9, RemoteID: []byte("rack4-sw1:eth3")}},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req, resp := relayed6(t, tc.opts...)
@@ -444,8 +450,10 @@ func TestHandler6RemoteID(t *testing.T) {
 			wantAddr: "2001:db8::41",
 		},
 		{name: "no remote-id", opts: []dhcpv6.Option{dhcpv6.OptInterfaceID([]byte("eth3"))}},
-		{name: "remote-id that is not mapped",
-			opts: []dhcpv6.Option{&dhcpv6.OptRemoteID{EnterpriseNumber: 4491, RemoteID: []byte{0x00}}}},
+		{
+			name: "remote-id that is not mapped",
+			opts: []dhcpv6.Option{&dhcpv6.OptRemoteID{EnterpriseNumber: 4491, RemoteID: []byte{0x00}}},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req, resp := relayed6(t, tc.opts...)
@@ -600,25 +608,39 @@ func TestSetupErrors(t *testing.T) {
 	}{
 		{name: "no arguments", errText: "need a mapping file"},
 		{name: "no key", args: []string{"file:ports.txt"}, errText: "need a key to match on"},
-		{name: "unknown argument", args: []string{"file:ports.txt", "key:circuit-id", "reload"},
-			errText: "unexpected argument `reload`"},
-		{name: "no allow list", args: []string{"file:ports.txt", "key:circuit-id"},
-			errText: "need a relay allow list"},
-		{name: "allow list has no entry of this family",
+		{
+			name: "unknown argument", args: []string{"file:ports.txt", "key:circuit-id", "reload"},
+			errText: "unexpected argument `reload`",
+		},
+		{
+			name: "no allow list", args: []string{"file:ports.txt", "key:circuit-id"},
+			errText: "need a relay allow list",
+		},
+		{
+			name:    "allow list has no entry of this family",
 			args:    []string{"file:ports.txt", "key:circuit-id", "allow", "::1"},
-			errText: "need at least one address or prefix after `allow` for DHCPv4"},
-		{name: "malformed address after allow",
+			errText: "need at least one address or prefix after `allow` for DHCPv4",
+		},
+		{
+			name:    "malformed address after allow",
 			args:    []string{"file:ports.txt", "key:circuit-id", "allow", "not-an-address"},
-			errText: `invalid address "not-an-address"`},
-		{name: "a DHCPv6 key in a server4 section",
+			errText: `invalid address "not-an-address"`,
+		},
+		{
+			name:    "a DHCPv6 key in a server4 section",
 			args:    []string{"file:ports.txt", "key:interface-id", "allow", "10.0.1.1"},
-			errText: "unknown DHCPv4 key `interface-id`"},
-		{name: "misspelled key",
+			errText: "unknown DHCPv4 key `interface-id`",
+		},
+		{
+			name:    "misspelled key",
 			args:    []string{"file:ports.txt", "key:circuitid", "allow", "10.0.1.1"},
-			errText: "unknown DHCPv4 key `circuitid`"},
-		{name: "missing file",
+			errText: "unknown DHCPv4 key `circuitid`",
+		},
+		{
+			name:    "missing file",
 			args:    []string{"file:/nonexistent/ports.txt", "key:circuit-id", "allow", "10.0.1.1"},
-			errText: "no such file or directory"},
+			errText: "no such file or directory",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, err := relayinfo.Plugin.Setup4Ctx(tc.args...)

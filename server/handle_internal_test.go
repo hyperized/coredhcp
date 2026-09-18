@@ -646,7 +646,9 @@ func TestHandleMsg4BroadcastWriteSuccess(t *testing.T) {
 	l.Index = 5 // bound interface, so the broadcast reply carries a control message
 	l.HandleMsg4(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("192.0.2.1")})
 	require.Len(t, conn.writes, 1)
-	assert.True(t, net.IPv4bcast.Equal(conn.writes[0].dst.(*net.UDPAddr).IP))
+	dst, ok := conn.writes[0].dst.(*net.UDPAddr)
+	require.True(t, ok, "write destination must be a *net.UDPAddr")
+	assert.True(t, net.IPv4bcast.Equal(dst.IP))
 	require.NotNil(t, conn.writes[0].cm)
 	assert.Equal(t, 5, conn.writes[0].cm.IfIndex)
 }
@@ -658,7 +660,9 @@ func TestHandleMsg4LinkLocalUnicastNoEthernet(t *testing.T) {
 	l.Index = 5
 	l.HandleMsg4(datagramBuf(req.ToBytes()), nil, &net.UDPAddr{IP: net.ParseIP("192.0.2.1")})
 	require.Len(t, conn.writes, 1)
-	assert.True(t, net.ParseIP("169.254.1.2").Equal(conn.writes[0].dst.(*net.UDPAddr).IP))
+	dst, ok := conn.writes[0].dst.(*net.UDPAddr)
+	require.True(t, ok, "write destination must be a *net.UDPAddr")
+	assert.True(t, net.ParseIP("169.254.1.2").Equal(dst.IP))
 	require.NotNil(t, conn.writes[0].cm)
 	assert.Equal(t, 5, conn.writes[0].cm.IfIndex)
 }

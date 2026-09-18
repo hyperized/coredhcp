@@ -52,9 +52,7 @@ func newFakeRedis(t *testing.T) *fakeRedis {
 
 	f := &fakeRedis{addr: ln.Addr().String(), hashes: map[string]map[string]string{}}
 	var accepting, serving sync.WaitGroup
-	accepting.Add(1)
-	go func() {
-		defer accepting.Done()
+	accepting.Go(func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
@@ -63,13 +61,11 @@ func newFakeRedis(t *testing.T) *fakeRedis {
 			f.mu.Lock()
 			f.conns = append(f.conns, conn)
 			f.mu.Unlock()
-			serving.Add(1)
-			go func() {
-				defer serving.Done()
+			serving.Go(func() {
 				f.serve(conn)
-			}()
+			})
 		}
-	}()
+	})
 	t.Cleanup(func() {
 		// Wait for the accept loop to stop before walking the connection
 		// list, otherwise a connection accepted at just the wrong moment is
@@ -279,7 +275,7 @@ func TestSetupErrors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := redis.Plugin.Setup4(tc.args...)
-			assert.Error(t, err)
+			require.Error(t, err)
 
 			_, err = redis.Plugin.Setup6(tc.args...)
 			assert.Error(t, err)

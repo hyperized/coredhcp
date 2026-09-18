@@ -13,7 +13,7 @@ import (
 	"log"
 	"os"
 	"path"
-	"sort"
+	"slices"
 	"strings"
 	"text/template"
 
@@ -93,8 +93,8 @@ func run() error {
 // sorted.
 func collectPlugins() ([]string, error) {
 	plugins := make(map[string]bool)
-	for _, pl := range flag.Args() {
-		pl := strings.TrimSpace(pl)
+	for _, rawPl := range flag.Args() {
+		pl := strings.TrimSpace(rawPl)
 		if pl == "" {
 			continue
 		}
@@ -120,7 +120,7 @@ func collectPlugins() ([]string, error) {
 	for pl := range plugins {
 		pluginList = append(pluginList, pl)
 	}
-	sort.Strings(pluginList)
+	slices.Sort(pluginList)
 	return pluginList, nil
 }
 

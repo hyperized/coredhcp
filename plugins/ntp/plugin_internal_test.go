@@ -32,7 +32,7 @@ func TestSetup4(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h, err := setup4(tc.args...)
 			if tc.wantErr {
-				assert.Error(t, err)
+				require.Error(t, err)
 				assert.Nil(t, h)
 				return
 			}
@@ -60,7 +60,7 @@ func TestSetup6(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h, err := setup6(tc.args...)
 			if tc.wantErr {
-				assert.Error(t, err)
+				require.Error(t, err)
 				assert.Nil(t, h)
 				return
 			}
@@ -112,7 +112,10 @@ func TestPluginStateHandler6(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.False(t, stop)
 
-	found := resp.(*dhcpv6.Message).Options.NTPServers()
+	msg, ok := resp.(*dhcpv6.Message)
+	require.True(t, ok)
+
+	found := msg.Options.NTPServers()
 	require.Len(t, found, len(servers))
 	for i, srv := range servers {
 		assert.True(t, srv.Equal(found[i]))
@@ -130,5 +133,8 @@ func TestPluginStateHandler6NoServers(t *testing.T) {
 	resp, stop := p.Handler6(req, stub)
 	require.NotNil(t, resp)
 	assert.False(t, stop)
-	assert.Empty(t, resp.(*dhcpv6.Message).Options.NTPServers())
+
+	msg, ok := resp.(*dhcpv6.Message)
+	require.True(t, ok)
+	assert.Empty(t, msg.Options.NTPServers())
 }

@@ -99,7 +99,8 @@ func (c *ifaceCache) name(idx int) string {
 		return ""
 	}
 	if cached, ok := c.names.Load(idx); ok {
-		return cached.(string)
+		// The one Store below is the only writer and it writes a string.
+		return cached.(string) //nolint:forcetypeassert // c.names only ever holds strings
 	}
 	var name string
 	if ifi, err := net.InterfaceByIndex(idx); err == nil {
@@ -476,11 +477,9 @@ func warnNoRelayPlugin(family events.Family, relayChecked bool) {
 // serve runs one listener's read loop until its socket closes and reports how
 // it ended.
 func (s *Servers) serve(l listener) {
-	s.running.Add(1)
-	go func() {
-		defer s.running.Done()
+	s.running.Go(func() {
 		s.errors <- l.Serve()
-	}()
+	})
 }
 
 // shutdown closes every listener and returns once all their read loops have.

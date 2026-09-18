@@ -67,7 +67,7 @@ func SetStreamThreshold(t *testing.T, n int) {
 // long subtest name under /var/folders reaches on its own.
 func socketPath(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "cdhcp")
+	dir, err := os.MkdirTemp("", "cdhcp") //nolint:usetesting // t.TempDir() path is too long for a unix socket
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	path := filepath.Join(dir, "a.sock")
@@ -145,7 +145,7 @@ func TestParseFilter(t *testing.T) {
 
 			got, err := parseFilter(q)
 			if tc.wantErr != nil {
-				assert.ErrorIs(t, err, tc.wantErr)
+				require.ErrorIs(t, err, tc.wantErr)
 				assert.Equal(t, filter{}, got)
 				return
 			}

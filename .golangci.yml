@@ -7,21 +7,64 @@ run:
 linters:
   default: standard
   enable:
+    - bodyclose
+    - containedctx
     - copyloopvar
+    - durationcheck
+    - errchkjson
+    - errname
     - errorlint
+    - exhaustive
+    - exptostd
+    - fatcontext
+    - forcetypeassert
+    - gocheckcompilerdirectives
     - gocritic
     - gosec
+    - iface
+    - intrange
+    - makezero
+    - mirror
     - misspell
+    - modernize
+    - musttag
+    - nakedret
     - nilerr
+    - nilnesserr
+    - nilnil
     - nolintlint
+    - perfsprint
+    - prealloc
     - predeclared
+    - reassign
+    - recvcheck
     - revive
+    - sloglint
+    - testifylint
     - thelper
     - tparallel
     - unconvert
     - unparam
     - usestdlibvars
+    - usetesting
     - wastedassign
+  settings:
+    exhaustive:
+      # A switch that handles the constants it cares about and sends the rest
+      # to a default is complete as written. The key: and per: modes fall back
+      # to their zero value that way on purpose, and tcell.Key runs to a couple
+      # of hundred constants that the terminal UI's key handlers have no reason
+      # to name one by one.
+      default-signifies-exhaustive: true
+      # DHCP message types are an open IANA registry, not a closed enum: the
+      # dhcp library gains a constant whenever a new message type is assigned.
+      # A handler names the few types it acts on and lets the rest fall
+      # through to the code after the switch, which is the point of dispatching
+      # on the type at all.
+      ignore-enum-types: '^github\.com/insomniacslk/dhcp/dhcpv[46]\.MessageType$'
+    govet:
+      enable:
+        - shadow
   exclusions:
     generated: lax
     presets:
@@ -31,10 +74,29 @@ linters:
       - path: _test\.go$
         linters:
           - gosec
+      # A table case holding the context under test, and a stub recording the
+      # context it was called with, are fixtures rather than a request-scoped
+      # context smuggled into a long-lived struct.
+      - path: _test\.go$
+        linters:
+          - containedctx
+      # A stub that exists only to be compared by func identity returns
+      # nil, nil because nothing ever calls it.
+      - path: _test\.go$
+        linters:
+          - nilnil
+
+issues:
+  # Report everything. The defaults stop at 50 per linter and 3 per distinct
+  # message, which turns one lint run into several and hides how much of a
+  # finding there really is.
+  max-issues-per-linter: 0
+  max-same-issues: 0
 
 formatters:
   enable:
     - gofmt
+    - gofumpt
     - goimports
   settings:
     goimports:

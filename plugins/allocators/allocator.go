@@ -35,6 +35,8 @@ type Allocator interface {
 
 // ErrDoubleFree is an error type returned by Allocator.Free() when a
 // non-allocated block is passed
+//
+//nolint:errname // upstream's exported name, renaming it would break importers
 type ErrDoubleFree struct {
 	Loc net.IPNet
 }

@@ -398,8 +398,7 @@ func parseAddress(arg string, s *settings) error {
 func parseURL(arg string, s *settings) error {
 	u, err := url.Parse(arg)
 	if err != nil {
-		var uerr *url.Error
-		if errors.As(err, &uerr) {
+		if uerr, ok := errors.AsType[*url.Error](err); ok {
 			err = uerr.Err
 		}
 		return fmt.Errorf("invalid redis URL: %w", err)
@@ -415,7 +414,7 @@ func parseURL(arg string, s *settings) error {
 	if port == "" {
 		port = defaultPort
 	}
-	if err := validPort(port); err != nil {
+	if err = validPort(port); err != nil {
 		return err
 	}
 	s.client.addr = net.JoinHostPort(host, port)
@@ -520,9 +519,9 @@ func (p *pluginState) addressField(fields map[string]string, name, ident string)
 // length was given.
 func splitAddr(value string) (addr netip.Addr, bits int, err error) {
 	if strings.Contains(value, "/") {
-		pfx, err := netip.ParsePrefix(value)
-		if err != nil {
-			return netip.Addr{}, 0, fmt.Errorf("invalid CIDR %q: %w", value, err)
+		pfx, prefixErr := netip.ParsePrefix(value)
+		if prefixErr != nil {
+			return netip.Addr{}, 0, fmt.Errorf("invalid CIDR %q: %w", value, prefixErr)
 		}
 		return pfx.Addr(), pfx.Bits(), nil
 	}

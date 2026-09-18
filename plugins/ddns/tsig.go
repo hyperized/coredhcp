@@ -14,7 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
-	"sort"
+	"slices"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -96,7 +96,7 @@ func algorithmNames() []string {
 	for name := range algorithms {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	return names
 }
 

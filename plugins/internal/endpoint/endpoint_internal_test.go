@@ -27,7 +27,7 @@ const testPlugin = "someplugin"
 // long subtest name under /var/folders reaches on its own.
 func socketPath(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "cdhcp")
+	dir, err := os.MkdirTemp("", "cdhcp") //nolint:usetesting // t.TempDir() path is too long for a unix socket
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	path := filepath.Join(dir, "a.sock")
@@ -181,7 +181,9 @@ func TestClearStaleSocket(t *testing.T) {
 		// leaves the file behind the way a killed process does.
 		stale, err := net.Listen("unix", path)
 		require.NoError(t, err)
-		stale.(*net.UnixListener).SetUnlinkOnClose(false)
+		unixStale, ok := stale.(*net.UnixListener)
+		require.True(t, ok, "unix listener must be a *net.UnixListener")
+		unixStale.SetUnlinkOnClose(false)
 		require.NoError(t, stale.Close())
 		require.FileExists(t, path)
 
@@ -282,7 +284,9 @@ func TestStaleSocketIsKeptWhenTheProbeCannotFinish(t *testing.T) {
 	// connect and the file would be unlinked as stale.
 	stale, err := net.Listen("unix", path)
 	require.NoError(t, err)
-	stale.(*net.UnixListener).SetUnlinkOnClose(false)
+	unixStale, ok := stale.(*net.UnixListener)
+	require.True(t, ok, "unix listener must be a *net.UnixListener")
+	unixStale.SetUnlinkOnClose(false)
 	require.NoError(t, stale.Close())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -291,6 +295,6 @@ func TestStaleSocketIsKeptWhenTheProbeCannotFinish(t *testing.T) {
 	e := Endpoint{plugin: testPlugin, network: NetworkUnix, address: path, mode: 0o600}
 	_, err = e.Listen(ctx)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, context.Canceled)
 	assert.FileExists(t, path, "a probe that did not finish says nothing about whether the socket is in use")
 }

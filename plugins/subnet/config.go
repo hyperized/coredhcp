@@ -124,12 +124,12 @@ func parseFile(path string) ([]*scope, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var cfg fileConfig
-	switch err := dec.Decode(&cfg); {
-	case errors.Is(err, io.EOF):
+	switch decodeErr := dec.Decode(&cfg); {
+	case errors.Is(decodeErr, io.EOF):
 		// An empty document decodes to EOF rather than to an empty struct.
 		return nil, fmt.Errorf("%s: %w", path, errNoSubnets)
-	case err != nil:
-		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	case decodeErr != nil:
+		return nil, fmt.Errorf("parsing %s: %w", path, decodeErr)
 	}
 	scopes, err := compile(cfg.Subnets)
 	if err != nil {

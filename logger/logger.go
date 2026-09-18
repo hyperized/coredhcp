@@ -12,7 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -184,7 +184,7 @@ func Levels() []string {
 	for name := range levels {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	return names
 }
 

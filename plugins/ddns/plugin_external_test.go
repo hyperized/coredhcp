@@ -141,9 +141,13 @@ func answerTo(req []byte) []byte {
 	if !ok {
 		return nil
 	}
-	resp := make([]byte, headerLen) // a header and nothing else
-	copy(resp, req[:2])             // the same ID
-	binary.BigEndian.PutUint16(resp[2:4], updateResponseFlags)
+	resp := make([]byte, 0, headerLen) // the header, built up below, then the record
+	resp = append(resp, req[:2]...)    // the same ID
+	resp = binary.BigEndian.AppendUint16(resp, updateResponseFlags)
+	resp = binary.BigEndian.AppendUint16(resp, 0) // QDCOUNT
+	resp = binary.BigEndian.AppendUint16(resp, 0) // ANCOUNT
+	resp = binary.BigEndian.AppendUint16(resp, 0) // NSCOUNT
+	resp = binary.BigEndian.AppendUint16(resp, 0) // ARCOUNT, set below once the TSIG is appended
 
 	h := hmac.New(sha256.New, secret)
 	h.Write(binary.BigEndian.AppendUint16(nil, uint16(len(reqMAC))))
@@ -226,7 +230,7 @@ func macOf(rdata []byte) ([]byte, bool) {
 // wireName is a fully qualified name in uncompressed wire form.
 func wireName(name string) []byte {
 	var out []byte
-	for _, label := range strings.Split(strings.TrimSuffix(name, "."), ".") {
+	for label := range strings.SplitSeq(strings.TrimSuffix(name, "."), ".") {
 		out = append(out, byte(len(label)))
 		out = append(out, label...)
 	}
@@ -308,12 +312,12 @@ func parseUpdate(t *testing.T, msg []byte) update {
 
 	// The answer section of an update holds the prerequisites.
 	for {
-		rh, err := parser.AnswerHeader()
-		if err != nil {
+		rh, hdrErr := parser.AnswerHeader()
+		if hdrErr != nil {
 			break
 		}
-		body, err := parser.UnknownResource()
-		require.NoError(t, err)
+		body, bodyErr := parser.UnknownResource()
+		require.NoError(t, bodyErr)
 		u.prereqs = append(u.prereqs, record{
 			name: rh.Name.String(), rtype: rh.Type, class: rh.Class, ttl: rh.TTL, data: body.Data,
 		})
@@ -321,12 +325,12 @@ func parseUpdate(t *testing.T, msg []byte) update {
 	require.NoError(t, parser.SkipAllAnswers())
 
 	for {
-		rh, err := parser.AuthorityHeader()
-		if err != nil {
+		rh, hdrErr := parser.AuthorityHeader()
+		if hdrErr != nil {
 			break
 		}
-		body, err := parser.UnknownResource()
-		require.NoError(t, err)
+		body, bodyErr := parser.UnknownResource()
+		require.NoError(t, bodyErr)
 		u.records = append(u.records, record{
 			name: rh.Name.String(), rtype: rh.Type, class: rh.Class, ttl: rh.TTL, data: body.Data,
 		})
@@ -374,7 +378,7 @@ func TestPluginIsRegisterable(t *testing.T) {
 	require.NotNil(t, ddns.Plugin.Setup6)
 	assert.Nil(t, ddns.Plugin.Setup4Ctx, "this plugin reads the packet, not where it came from")
 	assert.Nil(t, ddns.Plugin.Setup6Ctx)
-	assert.NoError(t, plugins.RegisterPlugin(&ddns.Plugin))
+	require.NoError(t, plugins.RegisterPlugin(&ddns.Plugin))
 }
 
 func TestSetupRejectsBadConfiguration(t *testing.T) {
@@ -618,10 +622,10 @@ func TestHandlersNeverStopTheChain(t *testing.T) {
 		dhcpv4.MessageTypeInform,
 	} {
 		t.Run(mtype.String(), func(t *testing.T) {
-			req, err := dhcpv4.New(dhcpv4.WithHwAddr(clientMAC), dhcpv4.WithMessageType(mtype))
-			require.NoError(t, err)
-			resp, err := dhcpv4.NewReplyFromRequest(req)
-			require.NoError(t, err)
+			req, reqErr := dhcpv4.New(dhcpv4.WithHwAddr(clientMAC), dhcpv4.WithMessageType(mtype))
+			require.NoError(t, reqErr)
+			resp, respErr := dhcpv4.NewReplyFromRequest(req)
+			require.NoError(t, respErr)
 			got, stop := h4(req, resp)
 			assert.Same(t, resp, got)
 			assert.False(t, stop)

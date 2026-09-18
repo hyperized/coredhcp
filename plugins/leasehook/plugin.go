@@ -289,8 +289,7 @@ func validate(s *settings) error {
 func applyURL(s *settings, raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
-		var uerr *url.Error
-		if errors.As(err, &uerr) {
+		if uerr, ok := errors.AsType[*url.Error](err); ok {
 			err = uerr.Err
 		}
 		return fmt.Errorf("invalid webhook URL: %w", err)

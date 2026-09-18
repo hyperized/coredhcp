@@ -30,11 +30,17 @@ func TestIPv6ToOffsetSentinelErrors(t *testing.T) {
 	alloc, err := NewIPv6Allocator(net.ParseIP("2001:db8::"), net.ParseIP("2001:db8::ff"))
 	require.NoError(t, err)
 
-	_, err = alloc.toOffset(net.IPv4(192, 0, 2, 1))
-	assert.ErrorIs(t, err, errInvalidIPv6)
+	// Each of these checks an independent input, so it runs as its own
+	// subtest: a require inside one must not skip the others.
+	t.Run("wrong IP family", func(t *testing.T) {
+		_, offsetErr := alloc.toOffset(net.IPv4(192, 0, 2, 1))
+		require.ErrorIs(t, offsetErr, errInvalidIPv6)
+	})
 
-	_, err = alloc.toOffset(net.ParseIP("2001:db8::1:0"))
-	assert.ErrorIs(t, err, errIPv6NotInRange)
+	t.Run("outside pool range", func(t *testing.T) {
+		_, offsetErr := alloc.toOffset(net.ParseIP("2001:db8::1:0"))
+		require.ErrorIs(t, offsetErr, errIPv6NotInRange)
+	})
 
 	off, err := alloc.toOffset(net.ParseIP("2001:db8::10"))
 	require.NoError(t, err)

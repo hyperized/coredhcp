@@ -964,13 +964,13 @@ func TestChildEnv(t *testing.T) {
 	})
 
 	t.Run("an allow-listed variable the parent does not have is left out", func(t *testing.T) {
-		old, had := os.LookupEnv("LANG")
+		if old, had := os.LookupEnv("LANG"); had {
+			// t.Setenv already restores whatever was there before the test,
+			// so piggybacking on it here means the unset below only lasts
+			// for this subtest.
+			t.Setenv("LANG", old)
+		}
 		require.NoError(t, os.Unsetenv("LANG"))
-		t.Cleanup(func() {
-			if had {
-				require.NoError(t, os.Setenv("LANG", old))
-			}
-		})
 
 		for _, kv := range childEnv(nil) {
 			assert.False(t, strings.HasPrefix(kv, "LANG="))

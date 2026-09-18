@@ -384,7 +384,7 @@ func TestRegisterPluginConflictingSetup(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			err := plugins.RegisterPlugin(tc.plugin)
 			require.Error(t, err)
-			assert.ErrorIs(t, err, plugins.ErrConflictingSetup)
+			require.ErrorIs(t, err, plugins.ErrConflictingSetup)
 			assert.Contains(t, err.Error(), tc.plugin.Name)
 			assert.Contains(t, err.Error(), tc.family)
 

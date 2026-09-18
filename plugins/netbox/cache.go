@@ -89,7 +89,10 @@ func (c *cache) get(key string, now time.Time) (lookupResult, bool) {
 	if !ok {
 		return lookupResult{}, false
 	}
-	ent := el.Value.(*cacheEntry)
+	// put is the only thing that ever pushes onto c.order and it always
+	// pushes a *cacheEntry, so the assertion holds by construction. Both are
+	// unexported and in this file.
+	ent := el.Value.(*cacheEntry) //nolint:forcetypeassert // c.order only ever holds *cacheEntry
 	if !now.Before(ent.expires) {
 		c.drop(el)
 		return lookupResult{}, false
@@ -105,7 +108,7 @@ func (c *cache) put(key string, result lookupResult, expires time.Time) {
 	defer c.mu.Unlock()
 
 	if el, ok := c.entries[key]; ok {
-		ent := el.Value.(*cacheEntry)
+		ent := el.Value.(*cacheEntry) //nolint:forcetypeassert // c.order only ever holds *cacheEntry
 		ent.result = result
 		ent.expires = expires
 		c.order.MoveToFront(el)
@@ -120,7 +123,7 @@ func (c *cache) put(key string, result lookupResult, expires time.Time) {
 
 // drop removes el from both the list and the map. The caller must hold c.mu.
 func (c *cache) drop(el *list.Element) {
-	delete(c.entries, el.Value.(*cacheEntry).key)
+	delete(c.entries, el.Value.(*cacheEntry).key) //nolint:forcetypeassert // c.order only ever holds *cacheEntry
 	c.order.Remove(el)
 }
 

@@ -198,7 +198,7 @@ func stripComment(line string) string {
 // lines go through it so that a binary circuit-id can be pasted straight into
 // the file.
 func keyText(key string) string {
-	for i := 0; i < len(key); i++ {
+	for i := range len(key) {
 		if key[i] < '!' || key[i] > '~' {
 			return hexPrefix + hex.EncodeToString([]byte(key))
 		}

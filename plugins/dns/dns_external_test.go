@@ -44,7 +44,9 @@ func TestSetup6(t *testing.T) {
 		resp, stop := h6(req, stub)
 		require.NotNil(t, resp)
 		assert.False(t, stop)
-		assert.Len(t, resp.(*dhcpv6.Message).Options.DNS(), 2)
+		msg, ok := resp.(*dhcpv6.Message)
+		require.True(t, ok, "response must be a *dhcpv6.Message")
+		assert.Len(t, msg.Options.DNS(), 2)
 	})
 }
 

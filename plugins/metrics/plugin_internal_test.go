@@ -103,7 +103,7 @@ func TestObtain(t *testing.T) {
 		assert.Contains(t, err.Error(), "127.0.0.2:9754")
 		// The conflicting address is rejected before anything is bound.
 		assert.Len(t, registry.listeners, 1)
-		assert.NotEqual(t, running, "127.0.0.2:9754")
+		assert.NotEqual(t, "127.0.0.2:9754", running)
 	})
 
 	t.Run("bind failure is a setup error", func(t *testing.T) {

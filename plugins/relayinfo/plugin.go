@@ -583,7 +583,7 @@ func (a *pluginArgs) addAllowEntry(arg string) error {
 // allowFor returns the allow list entries of the family being set up. The
 // other family's entries are dropped rather than refused, so one line can be
 // copied between the two server sections and still mean what it reads as.
-func (a pluginArgs) allowFor(v6 bool) []netip.Prefix {
+func (a *pluginArgs) allowFor(v6 bool) []netip.Prefix {
 	if v6 {
 		return a.allow6
 	}

@@ -31,7 +31,8 @@ type mockAllocator struct {
 }
 
 func (m *mockAllocator) Allocate(hint net.IPNet) (net.IPNet, error) {
-	return m.Called(hint).Get(0).(net.IPNet), nil
+	ipnet, _ := m.Called(hint).Get(0).(net.IPNet)
+	return ipnet, nil
 }
 
 func (m *mockAllocator) Free(ip net.IPNet) error {
@@ -45,7 +46,8 @@ type mockFailingAllocator struct {
 
 func (m *mockFailingAllocator) Allocate(hint net.IPNet) (net.IPNet, error) {
 	args := m.Called(hint)
-	return args.Get(0).(net.IPNet), args.Error(1)
+	ipnet, _ := args.Get(0).(net.IPNet)
+	return ipnet, args.Error(1)
 }
 
 func (m *mockFailingAllocator) Free(ip net.IPNet) error {
@@ -161,7 +163,7 @@ func TestHandler4NewAllocationAllocateError(t *testing.T) {
 
 	hwaddr, err := net.ParseMAC("02:00:00:00:00:11")
 	require.NoError(t, err)
-	mockAlloc.On("Allocate", net.IPNet{}).Return(net.IPNet{}, fmt.Errorf("no addresses left"))
+	mockAlloc.On("Allocate", net.IPNet{}).Return(net.IPNet{}, errors.New("no addresses left"))
 
 	req := &dhcpv4.DHCPv4{ClientHWAddr: hwaddr}
 	resp := &dhcpv4.DHCPv4{Options: make(dhcpv4.Options)}
@@ -398,7 +400,7 @@ func TestHandler4ReleaseAllocatorError(t *testing.T) {
 
 	expectedIPNet := net.IPNet{IP: record.IP}
 
-	expectedError := fmt.Errorf("mock allocator free failure")
+	expectedError := errors.New("mock allocator free failure")
 	mockAlloc.On("Free", expectedIPNet).Return(expectedError)
 
 	// Call Handler4 - this should fail on allocator.Free()

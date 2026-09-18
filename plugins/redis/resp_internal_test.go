@@ -93,12 +93,10 @@ func (s *fakeServer) acceptLoop() {
 		s.accepts++
 		s.conns = append(s.conns, nc)
 		s.mu.Unlock()
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
+		s.wg.Go(func() {
 			defer func() { _ = nc.Close() }()
 			s.serve(nc)
-		}()
+		})
 	}
 }
 
@@ -389,7 +387,7 @@ func TestRespReaderErrorReplyType(t *testing.T) {
 	var rerr respError
 	require.ErrorAs(t, err, &rerr)
 	assert.Equal(t, "WRONGTYPE not a hash", string(rerr))
-	assert.False(t, errors.Is(err, errProtocol))
+	assert.NotErrorIs(t, err, errProtocol)
 }
 
 // FuzzRespReader checks that no input makes the parser panic, and that a
@@ -673,12 +671,10 @@ func TestClientPoolCap(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range inFlight {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, err := c.hgetall("mac:aa:bb:cc:dd:ee:ff")
 			assert.NoError(t, err)
-		}()
+		})
 	}
 	wg.Wait()
 

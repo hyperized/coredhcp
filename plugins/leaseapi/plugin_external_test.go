@@ -101,9 +101,13 @@ func register(t *testing.T, s leases.Source) {
 
 // socketPath returns a path for a unix socket in a directory of its own, short
 // enough to bind: a socket path is capped at 104 bytes on darwin.
+//
+// t.TempDir() names the directory after the test (and any subtest), which
+// several callers here run under names long enough to blow that limit on its
+// own, so this keeps its own short directory instead.
 func socketPath(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "cdhcp")
+	dir, err := os.MkdirTemp("", "cdhcp") //nolint:usetesting // t.TempDir() path is too long for a unix socket
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return filepath.Join(dir, "a.sock")
@@ -131,9 +135,17 @@ func unixClient(path string) *http.Client {
 	}}
 }
 
+// response is what get() hands back: the parts of an http.Response that
+// outlive its body. Returning this rather than the *http.Response keeps a
+// caller from reading a body that get already drained and closed.
+type response struct {
+	StatusCode int
+	Header     http.Header
+}
+
 // get performs one request and returns the response with its body read and
 // closed.
-func get(t *testing.T, client *http.Client, method, url string) (*http.Response, string) {
+func get(t *testing.T, client *http.Client, method, url string) (response, string) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(t.Context(), method, url, nil)
 	require.NoError(t, err)
@@ -142,7 +154,7 @@ func get(t *testing.T, client *http.Client, method, url string) (*http.Response,
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	return resp, string(body)
+	return response{StatusCode: resp.StatusCode, Header: resp.Header.Clone()}, string(body)
 }
 
 // serveOnSocket starts the plugin on a fresh unix socket and returns a client
@@ -421,7 +433,9 @@ func TestStaleSocketIsReplaced(t *testing.T) {
 	// behind. Starting again must not need an operator to remove it.
 	stale, err := net.Listen("unix", path)
 	require.NoError(t, err)
-	stale.(*net.UnixListener).SetUnlinkOnClose(false)
+	unixStale, ok := stale.(*net.UnixListener)
+	require.True(t, ok, "unix listener must be a *net.UnixListener")
+	unixStale.SetUnlinkOnClose(false)
 	require.NoError(t, stale.Close())
 	require.FileExists(t, path)
 

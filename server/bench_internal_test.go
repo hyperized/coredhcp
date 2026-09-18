@@ -11,6 +11,7 @@ import (
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 
@@ -66,8 +67,9 @@ func BenchmarkHandleMsg4Discover(b *testing.B) {
 	peer := &net.UDPAddr{IP: net.ParseIP("192.0.2.1")}
 
 	for b.Loop() {
-		buf := *bufpool.Get().(*[]byte)
-		buf = buf[:MaxDatagram]
+		bp, ok := bufpool.Get().(*[]byte)
+		require.True(b, ok, "bufpool must hold *[]byte values")
+		buf := (*bp)[:MaxDatagram]
 		n := copy(buf, data)
 		l.HandleMsg4(buf[:n], nil, peer)
 	}
@@ -104,8 +106,9 @@ func BenchmarkHandleMsg4DiscoverWithContext(b *testing.B) {
 	peer := &net.UDPAddr{IP: net.ParseIP("192.0.2.1")}
 
 	for b.Loop() {
-		buf := *bufpool.Get().(*[]byte)
-		buf = buf[:MaxDatagram]
+		bp, ok := bufpool.Get().(*[]byte)
+		require.True(b, ok, "bufpool must hold *[]byte values")
+		buf := (*bp)[:MaxDatagram]
 		n := copy(buf, data)
 		l.HandleMsg4(buf[:n], nil, peer)
 	}
@@ -127,8 +130,9 @@ func BenchmarkHandleMsg6Solicit(b *testing.B) {
 	peer := &net.UDPAddr{IP: net.ParseIP("2001:db8::1")}
 
 	for b.Loop() {
-		buf := *bufpool.Get().(*[]byte)
-		buf = buf[:MaxDatagram]
+		bp, ok := bufpool.Get().(*[]byte)
+		require.True(b, ok, "bufpool must hold *[]byte values")
+		buf := (*bp)[:MaxDatagram]
 		n := copy(buf, data)
 		l.HandleMsg6(buf[:n], nil, peer)
 	}

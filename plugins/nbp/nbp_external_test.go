@@ -44,8 +44,10 @@ func TestHandler6NotRequested(t *testing.T) {
 	resp, stop := handler(req, stub)
 	require.NotNil(t, resp)
 	assert.True(t, stop)
-	assert.Nil(t, resp.(*dhcpv6.Message).Options.GetOne(dhcpv6.OptionBootfileURL))
-	assert.Nil(t, resp.(*dhcpv6.Message).Options.GetOne(dhcpv6.OptionBootfileParam))
+	msg, ok := resp.(*dhcpv6.Message)
+	require.True(t, ok, "response must be a *dhcpv6.Message")
+	assert.Nil(t, msg.Options.GetOne(dhcpv6.OptionBootfileURL))
+	assert.Nil(t, msg.Options.GetOne(dhcpv6.OptionBootfileParam))
 }
 
 func TestHandler6URLRequestedNoParams(t *testing.T) {
@@ -62,12 +64,14 @@ func TestHandler6URLRequestedNoParams(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.True(t, stop)
 
-	urlOpt := resp.(*dhcpv6.Message).Options.GetOne(dhcpv6.OptionBootfileURL)
+	msg, ok := resp.(*dhcpv6.Message)
+	require.True(t, ok, "response must be a *dhcpv6.Message")
+	urlOpt := msg.Options.GetOne(dhcpv6.OptionBootfileURL)
 	require.NotNil(t, urlOpt)
 	assert.Equal(t, "http://[2001:db8::1]/nbp", string(urlOpt.ToBytes()))
 	// No params were configured, so opt60 must not be added even though it
 	// was requested.
-	assert.Nil(t, resp.(*dhcpv6.Message).Options.GetOne(dhcpv6.OptionBootfileParam))
+	assert.Nil(t, msg.Options.GetOne(dhcpv6.OptionBootfileParam))
 }
 
 func TestHandler6ParamsRequestedAndConfigured(t *testing.T) {
@@ -84,7 +88,9 @@ func TestHandler6ParamsRequestedAndConfigured(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.True(t, stop)
 
-	paramOpt := resp.(*dhcpv6.Message).Options.GetOne(dhcpv6.OptionBootfileParam)
+	msg, ok := resp.(*dhcpv6.Message)
+	require.True(t, ok, "response must be a *dhcpv6.Message")
+	paramOpt := msg.Options.GetOne(dhcpv6.OptionBootfileParam)
 	require.NotNil(t, paramOpt)
 	assert.Equal(t, "console=ttyS0", string(paramOpt.ToBytes()))
 }
@@ -99,7 +105,7 @@ func TestHandler6RepeatedORODoesNotDuplicateOptions(t *testing.T) {
 
 	const repeats = 4000
 	codes := make([]dhcpv6.OptionCode, 0, repeats*2)
-	for i := 0; i < repeats; i++ {
+	for range repeats {
 		codes = append(codes, dhcpv6.OptionBootfileURL, dhcpv6.OptionBootfileParam)
 	}
 
@@ -113,10 +119,12 @@ func TestHandler6RepeatedORODoesNotDuplicateOptions(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.True(t, stop)
 
+	msg, ok := resp.(*dhcpv6.Message)
+	require.True(t, ok, "response must be a *dhcpv6.Message")
 	// Get, not GetOne: a duplicate would still pass GetOne since it only
 	// looks at the first match.
-	assert.Len(t, resp.(*dhcpv6.Message).Options.Get(dhcpv6.OptionBootfileURL), 1)
-	assert.Len(t, resp.(*dhcpv6.Message).Options.Get(dhcpv6.OptionBootfileParam), 1)
+	assert.Len(t, msg.Options.Get(dhcpv6.OptionBootfileURL), 1)
+	assert.Len(t, msg.Options.Get(dhcpv6.OptionBootfileParam), 1)
 }
 
 func TestHandler6DecapsulateError(t *testing.T) {

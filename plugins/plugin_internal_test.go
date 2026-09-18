@@ -175,7 +175,7 @@ func TestCheckSetupFuncs(t *testing.T) {
 				return
 			}
 			require.Error(t, err)
-			assert.EqualError(t, err, tc.wantErr)
+			require.EqualError(t, err, tc.wantErr)
 			assert.ErrorIs(t, err, ErrConflictingSetup)
 		})
 	}
@@ -230,7 +230,7 @@ func TestSetup4OfPlainFormAdapts(t *testing.T) {
 
 		setupFn, _ := setup4Of(p)
 		h, err := setupFn()
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.Nil(t, h)
 	})
 
@@ -299,7 +299,7 @@ func TestSetup6OfPlainFormAdapts(t *testing.T) {
 
 		setupFn, _ := setup6Of(p)
 		h, err := setupFn()
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.Nil(t, h)
 	})
 

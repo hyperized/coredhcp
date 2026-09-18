@@ -114,7 +114,7 @@ func TestParseArgs(t *testing.T) {
 			got, err := parseArgs(tc.args)
 			switch {
 			case tc.wantErr != nil:
-				assert.ErrorIs(t, err, tc.wantErr)
+				require.ErrorIs(t, err, tc.wantErr)
 			case tc.errText != "":
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.errText)
@@ -194,7 +194,7 @@ func TestParseAllowEntry(t *testing.T) {
 			if tc.wantErr != nil || tc.errText != "" {
 				require.Error(t, err)
 				if tc.wantErr != nil {
-					assert.ErrorIs(t, err, tc.wantErr)
+					require.ErrorIs(t, err, tc.wantErr)
 				}
 				if tc.errText != "" {
 					assert.Contains(t, err.Error(), tc.errText)
@@ -456,7 +456,7 @@ func TestSetupStateNoAllowEntriesForFamily(t *testing.T) {
 
 	_, err := setupState(true, "file:"+path, "key:interface-id", "allow", "10.0.1.1")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errNoAllowEntries)
+	require.ErrorIs(t, err, errNoAllowEntries)
 	assert.Contains(t, err.Error(), "DHCPv6")
 }
 

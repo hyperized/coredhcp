@@ -184,20 +184,20 @@ func TestErrorUnwrap(t *testing.T) {
 func TestErrorIs(t *testing.T) {
 	sentinel := errors.New("sentinel")
 	e := config.ErrorFromError(fmt.Errorf("wrapped: %w", sentinel))
-	assert.True(t, errors.Is(e, sentinel))
+	assert.ErrorIs(t, e, sentinel)
 }
 
-// wrappedErr is a concrete error type used to prove that errors.As can see
+// wrappedError is a concrete error type used to prove that errors.As can see
 // through config.Error via its Unwrap method.
-type wrappedErr struct{ msg string }
+type wrappedError struct{ msg string }
 
-func (w *wrappedErr) Error() string { return w.msg }
+func (w *wrappedError) Error() string { return w.msg }
 
 func TestErrorAs(t *testing.T) {
-	inner := &wrappedErr{msg: "inner"}
+	inner := &wrappedError{msg: "inner"}
 	e := config.ErrorFromError(fmt.Errorf("wrapped: %w", inner))
 
-	var target *wrappedErr
-	require.True(t, errors.As(e, &target))
+	var target *wrappedError
+	require.ErrorAs(t, e, &target)
 	assert.Same(t, inner, target)
 }

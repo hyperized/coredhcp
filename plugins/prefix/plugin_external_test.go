@@ -23,6 +23,15 @@ func testDUID() dhcpv6.DUID {
 	}
 }
 
+// asMessage asserts that result is the concrete *dhcpv6.Message the plugin
+// chain hands back, failing the test immediately if it isn't.
+func asMessage(t *testing.T, result dhcpv6.DHCPv6) *dhcpv6.Message {
+	t.Helper()
+	msg, ok := result.(*dhcpv6.Message)
+	require.True(t, ok, "expected *dhcpv6.Message, got %T", result)
+	return msg
+}
+
 // solicitWith runs one SOLICIT, carrying a single IA_PD (IAID 1,2,3,4) with
 // the given prefix hints, through an already set-up handler. Reusing the same
 // handler across calls lets scenarios exercise several sequential exchanges
@@ -37,7 +46,7 @@ func solicitWith(t *testing.T, handle func(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCP
 	require.NoError(t, err)
 
 	result, _ := handle(req, resp)
-	return result.(*dhcpv6.Message)
+	return asMessage(t, result)
 }
 
 // solicitManyIAPDs runs one SOLICIT carrying n distinct IA_PDs, one per IAID
@@ -57,7 +66,7 @@ func solicitManyIAPDs(t *testing.T, handle func(req, resp dhcpv6.DHCPv6) (dhcpv6
 	require.NoError(t, err)
 
 	result, _ := handle(req, resp)
-	return result.(*dhcpv6.Message)
+	return asMessage(t, result)
 }
 
 // releaseManyIAPDs runs one RELEASE carrying n distinct, empty IA_PDs, one per
@@ -79,7 +88,7 @@ func releaseManyIAPDs(t *testing.T, handle func(req, resp dhcpv6.DHCPv6) (dhcpv6
 	resp.MessageType = dhcpv6.MessageTypeReply
 
 	result, _ := handle(req, resp)
-	return result.(*dhcpv6.Message)
+	return asMessage(t, result)
 }
 
 // duidOfLength returns a client DUID whose wire form (ToBytes) is exactly n
@@ -132,12 +141,12 @@ func TestRoundTrip(t *testing.T) {
 		require.Equal(t, dhcpIana.StatusSuccess, mo.Status().StatusCode)
 	}
 
-	iapds := result.(*dhcpv6.Message).Options.IAPD()
+	iapds := asMessage(t, result).Options.IAPD()
 	require.Len(t, iapds, 1, "expected exactly 1 IAPD")
 	iapd := iapds[0]
 	assert.Equal(t, reqIAID, iapd.IaId)
 
-	if status := result.(*dhcpv6.Message).Options.Status(); status != nil {
+	if status := asMessage(t, result).Options.Status(); status != nil {
 		assert.Equal(t, dhcpIana.StatusSuccess, status.StatusCode)
 	}
 
@@ -220,7 +229,7 @@ func TestHandlePrefixNilOptionDefaultsToEmptyHint(t *testing.T) {
 	require.NoError(t, err)
 
 	result, _ := h(req, resp)
-	msg := result.(*dhcpv6.Message)
+	msg := asMessage(t, result)
 	iapds := msg.Options.IAPD()
 	require.Len(t, iapds, 1)
 	assert.Len(t, iapds[0].Options.Prefixes(), 1)
@@ -433,7 +442,7 @@ func releaseWith(t *testing.T, handle func(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCP
 	result, stop := handle(req, resp)
 	require.NotNil(t, result, "later plugins must still see the release")
 	assert.False(t, stop)
-	return result.(*dhcpv6.Message)
+	return asMessage(t, result)
 }
 
 // iapdStatus reads the status code option of the IA_PD answering iaid.
@@ -539,7 +548,7 @@ func TestHandleDeclineIsIgnored(t *testing.T) {
 	result, stop := h(req, resp)
 	require.NotNil(t, result)
 	assert.False(t, stop)
-	assert.Empty(t, result.(*dhcpv6.Message).Options.IAPD(), "a decline is not about prefixes")
+	assert.Empty(t, asMessage(t, result).Options.IAPD(), "a decline is not about prefixes")
 }
 
 // TestHandleCapsIAPDsAnsweredPerMessage pins the per-message IA_PD cap: a

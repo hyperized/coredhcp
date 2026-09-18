@@ -20,10 +20,7 @@ import (
 // short enough for the 104 byte limit darwin puts on a socket path.
 func tempSocket(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "cdhcp")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return filepath.Join(dir, "a.sock")
+	return filepath.Join(t.TempDir(), "a.sock")
 }
 
 func TestParseRefusesARoutableAddress(t *testing.T) {

@@ -254,14 +254,9 @@ func TestTCPSchemeAndBareAddressAreTheSameEndpoint(t *testing.T) {
 func TestUnixSocketEndpoint(t *testing.T) {
 	metrics.ResetRegistry(t)
 
-	// Not t.TempDir: it names the directory after the test, and a unix
-	// socket path is limited to 104 bytes on darwin.
-	dir, err := os.MkdirTemp("", "cdhcp")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	path := filepath.Join(dir, "m.sock")
+	path := filepath.Join(t.TempDir(), "m.sock")
 
-	_, err = metrics.Plugin.Setup4("unix:"+path, "mode:0660")
+	_, err := metrics.Plugin.Setup4("unix:"+path, "mode:0660")
 	require.NoError(t, err)
 
 	info, err := os.Stat(path)

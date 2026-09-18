@@ -58,7 +58,7 @@ func serverAddr(t *testing.T) string {
 	if err != nil {
 		host, port = server, "53"
 	}
-	if _, err := netip.ParseAddr(host); err == nil {
+	if _, parseErr := netip.ParseAddr(host); parseErr == nil {
 		return net.JoinHostPort(host, port)
 	}
 	ips, err := net.LookupIP(host)

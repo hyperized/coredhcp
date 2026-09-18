@@ -302,7 +302,10 @@ type pluginState struct {
 
 	// ctx is this instance's lifetime rather than one update's. It is
 	// cancelled when the worker stops, which lets a dial or a retry already
-	// in flight give up instead of running its own timeout out first.
+	// in flight give up instead of running its own timeout out first. There
+	// is no call to hang it off: the plugin API hands a handler no context of
+	// the instance's lifetime, only one per request.
+	//nolint:containedctx // scoped to the instance, not to a request
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -465,7 +468,7 @@ func (s *settings) finish() error {
 // only known once every argument has been read.
 func protectedNames(raw []string, zone string) (map[string]bool, error) {
 	if len(raw) == 0 {
-		return nil, nil
+		return nil, nil //nolint:nilnil // a nil map is the empty set of protected names
 	}
 	out := make(map[string]bool, len(raw))
 	for _, entry := range raw {
@@ -608,7 +611,7 @@ func applyQueue(s *settings, raw string) error {
 // they are only split and emptiness-checked: a stray comma is a typo worth
 // refusing rather than a name worth guessing at.
 func applyProtect(s *settings, raw string) error {
-	for _, name := range strings.Split(raw, ",") {
+	for name := range strings.SplitSeq(raw, ",") {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			return fmt.Errorf("invalid %s%s, want one name or several separated by commas", protectArg, raw)

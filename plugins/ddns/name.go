@@ -97,7 +97,7 @@ func validName(name string) error {
 	if len(name) > maxName {
 		return fmt.Errorf("%w: %q is %d octets, the limit is %d", ErrInvalidHostname, name, len(name), maxName)
 	}
-	for _, label := range strings.Split(name, ".") {
+	for label := range strings.SplitSeq(name, ".") {
 		if err := validLabel(label); err != nil {
 			return err
 		}
@@ -124,7 +124,7 @@ func validLabel(label string) error {
 // permits: these names go into a zone from packets anyone on the segment can
 // send, so anything that is not an unambiguous host name is refused.
 func onlyNameBytes(label string) bool {
-	for i := 0; i < len(label); i++ {
+	for i := range len(label) {
 		c := label[i]
 		if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' {
 			continue
@@ -210,7 +210,7 @@ func packName(name string) ([]byte, error) {
 	if body == "" {
 		return append(out, 0), nil
 	}
-	for _, label := range strings.Split(body, ".") {
+	for label := range strings.SplitSeq(body, ".") {
 		if label == "" || len(label) > maxLabel {
 			return nil, fmt.Errorf("%w: label %q in %q has to be 1 to %d octets", ErrBadName, label, name, maxLabel)
 		}

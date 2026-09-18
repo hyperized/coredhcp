@@ -55,7 +55,6 @@ func (a *Allocator) toPrefix(idx uint) (net.IP, error) {
 // Allocate reserves a maxsize-sized block and returns a block of size
 // min(maxsize, hint.size)
 func (a *Allocator) Allocate(hint net.IPNet) (ret net.IPNet, err error) {
-
 	// Ensure size is max(maxsize, hint.size)
 	reqSize, hintErr := hint.Mask.Size()
 	if reqSize < a.page || hintErr != 128 {
@@ -71,7 +70,7 @@ func (a *Allocator) Allocate(hint net.IPNet) (ret net.IPNet, err error) {
 		if hintErr == nil && !a.bitmap.Test(idx) {
 			a.bitmap.Set(idx)
 			ret.IP, err = a.toPrefix(idx)
-			return
+			return ret, err
 		}
 	}
 
@@ -79,7 +78,7 @@ func (a *Allocator) Allocate(hint net.IPNet) (ret net.IPNet, err error) {
 	next, ok := a.bitmap.NextClear(0)
 	if !ok {
 		err = allocators.ErrNoAddrAvail
-		return
+		return ret, err
 	}
 	a.bitmap.Set(next)
 	ret.IP, err = a.toPrefix(next)
@@ -88,7 +87,7 @@ func (a *Allocator) Allocate(hint net.IPNet) (ret net.IPNet, err error) {
 		err = fmt.Errorf("BUG: could not get prefix from allocation: %w", err)
 		a.bitmap.Clear(next)
 	}
-	return
+	return ret, err
 }
 
 // Free returns the given prefix to the available pool if it was taken.
@@ -111,7 +110,6 @@ func (a *Allocator) Free(prefix net.IPNet) error {
 // NewBitmapAllocator creates a new allocator, allocating /`size` prefixes
 // carved out of the given `pool` prefix
 func NewBitmapAllocator(pool net.IPNet, size int) (*Allocator, error) {
-
 	poolSize, _ := pool.Mask.Size()
 	allocOrder := size - poolSize
 

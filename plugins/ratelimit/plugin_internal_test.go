@@ -159,10 +159,14 @@ func TestParseArgsErrors(t *testing.T) {
 	}{
 		{name: "no arguments", args: nil, want: "need a rate as the first argument, for example 20/s or 600/m"},
 		{name: "bad rate", args: []string{"fast"}, want: `invalid rate "fast", want <n>/s or <n>/m`},
-		{name: "unknown argument", args: []string{"20/s", "nope:1"},
-			want: `unknown argument "nope:1", want one of burst:<n>, per:mac|source|both, max:<n> or global:<rate>`},
-		{name: "bare argument", args: []string{"20/s", "both"},
-			want: `unknown argument "both", want one of burst:<n>, per:mac|source|both, max:<n> or global:<rate>`},
+		{
+			name: "unknown argument", args: []string{"20/s", "nope:1"},
+			want: `unknown argument "nope:1", want one of burst:<n>, per:mac|source|both, max:<n> or global:<rate>`,
+		},
+		{
+			name: "bare argument", args: []string{"20/s", "both"},
+			want: `unknown argument "both", want one of burst:<n>, per:mac|source|both, max:<n> or global:<rate>`,
+		},
 		{name: "burst not a number", args: []string{"20/s", "burst:x"}, want: `invalid burst "x", want a whole number`},
 		{name: "burst zero", args: []string{"20/s", "burst:0"}, want: "burst 0 out of range, want 1 to 10000000"},
 		{name: "burst too large", args: []string{"20/s", "burst:10000001"}, want: "burst 10000001 out of range, want 1 to 10000000"},
@@ -475,10 +479,14 @@ func TestKey(t *testing.T) {
 		{name: "both", mode: modeBoth, peer: peer, id: id, want: withAddr(id, peer)},
 		{name: "source falls back without request info", mode: modeSource, id: id, want: id},
 		{name: "both falls back without request info", mode: modeBoth, id: id, want: id},
-		{name: "identifier is clamped", mode: modeBoth, peer: peer, id: long,
-			want: withAddr(long[:maxIDLen], peer)},
-		{name: "no identifier at all", mode: modeSource, peer: "[2001:db8::1]:547",
-			want: addr16("[2001:db8::1]:547")},
+		{
+			name: "identifier is clamped", mode: modeBoth, peer: peer, id: long,
+			want: withAddr(long[:maxIDLen], peer),
+		},
+		{
+			name: "no identifier at all", mode: modeSource, peer: "[2001:db8::1]:547",
+			want: addr16("[2001:db8::1]:547"),
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &state{mode: tc.mode}

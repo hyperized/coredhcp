@@ -127,7 +127,7 @@ func TestRunFullHappyPath(t *testing.T) {
 
 	select {
 	case err := <-errCh:
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("run() did not return after SIGTERM")
 	}

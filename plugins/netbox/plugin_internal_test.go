@@ -253,9 +253,9 @@ func TestPluginStateLookup(t *testing.T) {
 		p := &pluginState{backend: stub, cache: newCache(16), opts: defaultOptions(), now: func() time.Time { return now }}
 
 		_, err := p.lookup(context.Background(), mac)
-		assert.Error(t, err)
+		require.Error(t, err)
 		_, err = p.lookup(context.Background(), mac)
-		assert.Error(t, err)
+		require.Error(t, err)
 		assert.Equal(t, 2, stub.calls)
 	})
 
@@ -570,7 +570,7 @@ func TestHandler6(t *testing.T) {
 		gotResp, stop := p.Handler6(context.Background(), req, resp)
 		assert.Same(t, resp, gotResp)
 		assert.False(t, stop)
-		assert.Equal(t, 0, len(gotResp.GetOption(dhcpv6.OptionIANA)))
+		assert.Empty(t, gotResp.GetOption(dhcpv6.OptionIANA))
 	})
 
 	t.Run("found but the interface has no IPv6 address", func(t *testing.T) {
@@ -586,7 +586,7 @@ func TestHandler6(t *testing.T) {
 		gotResp, stop := p.Handler6(context.Background(), req, resp)
 		assert.Same(t, resp, gotResp)
 		assert.False(t, stop)
-		assert.Equal(t, 0, len(gotResp.GetOption(dhcpv6.OptionIANA)))
+		assert.Empty(t, gotResp.GetOption(dhcpv6.OptionIANA))
 	})
 
 	t.Run("found with an IPv6 address", func(t *testing.T) {

@@ -10,6 +10,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -88,8 +90,7 @@ func closeAfter(t *testing.T, name string) {
 	t.Helper()
 	sources := leases.Sources()
 	// Newest first: two instances over one lease file report the same name.
-	for i := len(sources) - 1; i >= 0; i-- {
-		src := sources[i]
+	for _, src := range slices.Backward(sources) {
 		if src.Name() != name {
 			continue
 		}
@@ -256,7 +257,7 @@ func TestSetupAcceptsOptionsInAnyOrder(t *testing.T) {
 		{"sweep:90s", "decline-max:4", "decline-probation:1h"},
 	}
 	for _, extra := range cases {
-		t.Run(strings(extra), func(t *testing.T) {
+		t.Run(optionNames(extra), func(t *testing.T) {
 			dbPath := filepath.Join(t.TempDir(), "leases6.sqlite3")
 			args := append([]string{dbPath, poolFirst, poolLast, leaseTime}, extra...)
 			h, err := range6.Plugin.Setup6(args...)
@@ -267,19 +268,12 @@ func TestSetupAcceptsOptionsInAnyOrder(t *testing.T) {
 	}
 }
 
-// strings names a subtest after the arguments it passes.
-func strings(args []string) string {
+// optionNames names a subtest after the arguments it passes.
+func optionNames(args []string) string {
 	if len(args) == 0 {
 		return "no options"
 	}
-	name := ""
-	for i, a := range args {
-		if i > 0 {
-			name += " "
-		}
-		name += a
-	}
-	return name
+	return strings.Join(args, " ")
 }
 
 func TestSolicitAllocatesAnAddress(t *testing.T) {
@@ -398,13 +392,13 @@ func TestConfirm(t *testing.T) {
 		addresses  []net.IP
 		wantStatus *dhcpIana.StatusCode
 	}{
-		{"address from the pool", []net.IP{net.ParseIP("2001:db8:1::150")}, status(dhcpIana.StatusSuccess)},
-		{"first address of the pool", []net.IP{net.ParseIP(poolFirst)}, status(dhcpIana.StatusSuccess)},
-		{"last address of the pool", []net.IP{net.ParseIP(poolLast)}, status(dhcpIana.StatusSuccess)},
-		{"address below the pool", []net.IP{net.ParseIP("2001:db8:1::ff")}, status(dhcpIana.StatusNotOnLink)},
-		{"address above the pool", []net.IP{net.ParseIP("2001:db8:1::200")}, status(dhcpIana.StatusNotOnLink)},
-		{"address from another link", []net.IP{net.ParseIP("2001:db8:2::150")}, status(dhcpIana.StatusNotOnLink)},
-		{"one of two is off link", []net.IP{net.ParseIP("2001:db8:1::150"), net.ParseIP("2001:db8:2::1")}, status(dhcpIana.StatusNotOnLink)},
+		{"address from the pool", []net.IP{net.ParseIP("2001:db8:1::150")}, new(dhcpIana.StatusSuccess)},
+		{"first address of the pool", []net.IP{net.ParseIP(poolFirst)}, new(dhcpIana.StatusSuccess)},
+		{"last address of the pool", []net.IP{net.ParseIP(poolLast)}, new(dhcpIana.StatusSuccess)},
+		{"address below the pool", []net.IP{net.ParseIP("2001:db8:1::ff")}, new(dhcpIana.StatusNotOnLink)},
+		{"address above the pool", []net.IP{net.ParseIP("2001:db8:1::200")}, new(dhcpIana.StatusNotOnLink)},
+		{"address from another link", []net.IP{net.ParseIP("2001:db8:2::150")}, new(dhcpIana.StatusNotOnLink)},
+		{"one of two is off link", []net.IP{net.ParseIP("2001:db8:1::150"), net.ParseIP("2001:db8:2::1")}, new(dhcpIana.StatusNotOnLink)},
 		{"no address at all", nil, nil},
 	}
 	for _, tc := range cases {
@@ -425,8 +419,6 @@ func TestConfirm(t *testing.T) {
 		})
 	}
 }
-
-func status(c dhcpIana.StatusCode) *dhcpIana.StatusCode { return &c }
 
 // TestConfirmChangesNoBinding pins that a CONFIRM neither allocates nor frees:
 // the client keeps whatever it had, and the pool is untouched.
@@ -558,7 +550,7 @@ func TestQuarantineIsBounded(t *testing.T) {
 	h := setupPool(t, "2001:db8:1::103", "decline-max:1")
 	duid := testDUID(1)
 
-	var declined []string
+	declined := make([]string, 0, 4)
 	for i := range 4 {
 		held := solicit(t, h, duid, [4]byte{0, 0, 0, byte(i)})
 		declined = append(declined, held.String())
@@ -618,7 +610,7 @@ func TestTwoIANAsGetTwoAddresses(t *testing.T) {
 func TestIANAsPerMessageAreCapped(t *testing.T) {
 	h := setupPlugin(t)
 
-	var ianas []*dhcpv6.OptIANA
+	ianas := make([]*dhcpv6.OptIANA, 0, 9)
 	for i := range 9 {
 		ianas = append(ianas, newIANA([4]byte{0, 0, 0, byte(i)}))
 	}

@@ -144,6 +144,9 @@ func encapsulateRelay6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, error) {
 		log.Warningf("DHCPv6: response is a relayed message, not reencapsulating")
 		return resp, nil
 	}
+	// IsRelay was checked by the caller and *dhcpv6.RelayMessage is the only
+	// type in the dhcp library that answers it with true.
+	//nolint:forcetypeassert // guarded by the IsRelay check on the way in
 	return dhcpv6.NewRelayReplFromRelayForw(req.(*dhcpv6.RelayMessage), rmsg)
 }
 

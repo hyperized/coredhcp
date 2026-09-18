@@ -239,7 +239,7 @@ func TestHostFQDN(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := hostFQDN(tc.in, testZone)
 			if tc.wantErr != nil {
-				assert.ErrorIs(t, err, tc.wantErr)
+				require.ErrorIs(t, err, tc.wantErr)
 				assert.Empty(t, got)
 				return
 			}
@@ -613,7 +613,7 @@ func TestVerify(t *testing.T) {
 		rec := good
 		rec.rcode = 18
 		err := key.verify(signed, rec, nil)
-		assert.ErrorIs(t, err, ErrTSIGError)
+		require.ErrorIs(t, err, ErrTSIGError)
 		assert.Contains(t, err.Error(), "BADTIME")
 	})
 	t.Run("a MAC that does not verify", func(t *testing.T) {
@@ -908,7 +908,7 @@ func TestUpdateRetriesOnce(t *testing.T) {
 func TestUpdateBuildFailure(t *testing.T) {
 	f := startFakeDNS(t, newTestKey(t))
 	p := newTestPlugin(t, f)
-	assert.Error(t, p.update(t.Context(), "home.lan", nil, nil), "a zone without a trailing dot cannot be encoded")
+	require.Error(t, p.update(t.Context(), "home.lan", nil, nil), "a zone without a trailing dot cannot be encoded")
 	assert.Empty(t, f.received())
 }
 
@@ -950,7 +950,7 @@ func TestRoundTripConnFailures(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := p.roundTrip(t.Context(), tc.conn, []byte{0})
-			assert.ErrorContains(t, err, tc.want)
+			require.ErrorContains(t, err, tc.want)
 			assert.ErrorIs(t, err, boom)
 		})
 	}
@@ -1902,11 +1902,11 @@ func (z *zoneServer) messages() int {
 // into the shape this package builds them from.
 func readUpdate(req []byte) (prereqs, changes []change, err error) {
 	var p dnsmessage.Parser
-	if _, err := p.Start(req); err != nil {
-		return nil, nil, err
+	if _, startErr := p.Start(req); startErr != nil {
+		return nil, nil, startErr
 	}
-	if err := p.SkipAllQuestions(); err != nil {
-		return nil, nil, err
+	if skipErr := p.SkipAllQuestions(); skipErr != nil {
+		return nil, nil, skipErr
 	}
 	if prereqs, err = readSection(p.AnswerHeader, p.UnknownResource); err != nil {
 		return nil, nil, err
@@ -2292,7 +2292,7 @@ func TestRefusalNamesPrerequisiteFailures(t *testing.T) {
 		t.Run(rcodeName(code), func(t *testing.T) {
 			err := refusal(code)
 			assert.True(t, prereqFailed(err))
-			assert.ErrorIs(t, err, ErrRCode, "a prerequisite that did not hold is still a refusal")
+			require.ErrorIs(t, err, ErrRCode, "a prerequisite that did not hold is still a refusal")
 			assert.Contains(t, err.Error(), rcodeName(code))
 		})
 	}

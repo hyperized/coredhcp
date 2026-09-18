@@ -6,10 +6,9 @@ package allocators_test
 
 import (
 	"fmt"
+	"math/rand"
 	"net"
 	"testing"
-
-	"math/rand"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -70,7 +69,7 @@ func BenchmarkOffset(b *testing.B) {
 		b.Fatalf("Could not generate random addresses: %v", err)
 	}
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		// The arrays will be in cache, so this should amortize to measure mostly just the offset
 		// computation itself
 		_, _ = allocators.Offset(

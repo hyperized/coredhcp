@@ -314,9 +314,9 @@ func (s *selector) Close() {
 // delegate we are after.
 func registeredDelegate(name string) leases.Source {
 	sources := leases.Sources()
-	for i := len(sources) - 1; i >= 0; i-- {
-		if sources[i].Name() == name {
-			return sources[i]
+	for _, source := range slices.Backward(sources) {
+		if source.Name() == name {
+			return source
 		}
 	}
 	return nil
