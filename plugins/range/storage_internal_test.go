@@ -5,11 +5,13 @@
 package rangeplugin
 
 import (
+	"context"
 	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -17,8 +19,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func testDBSetup() (*sql.DB, error) {
-	db, err := loadDB(":memory:")
+func testDBSetup(ctx context.Context) (*sql.DB, error) {
+	db, err := loadDB(ctx, ":memory:")
 	if err != nil {
 		return nil, err
 	}
@@ -33,7 +35,7 @@ func testDBSetup() (*sql.DB, error) {
 	return db, nil
 }
 
-var expire = int(time.Date(2000, 01, 01, 00, 00, 00, 00, time.UTC).Unix())
+var expire = time.Date(2000, 01, 01, 00, 00, 00, 00, time.UTC).Unix()
 var records = []struct {
 	mac string
 	ip  *Record
@@ -47,12 +49,12 @@ var records = []struct {
 }
 
 func TestLoadRecords(t *testing.T) {
-	db, err := testDBSetup()
+	db, err := testDBSetup(t.Context())
 	if err != nil {
 		t.Fatalf("Failed to set up test DB: %v", err)
 	}
 
-	parsedRec, err := loadRecords(db)
+	parsedRec, err := loadRecords(t.Context(), db)
 	if err != nil {
 		t.Fatalf("Failed to load records from file: %v", err)
 	}
@@ -61,7 +63,7 @@ func TestLoadRecords(t *testing.T) {
 	for _, rec := range records {
 		var (
 			ip, mac, hostname string
-			expiry            int
+			expiry            int64
 		)
 		if err := db.QueryRow("select mac, ip, expiry, hostname from leases4 where mac = ?", rec.mac).Scan(&mac, &ip, &expiry, &hostname); err != nil {
 			t.Fatalf("record not found for mac=%s: %v", rec.mac, err)
@@ -74,7 +76,7 @@ func TestLoadRecords(t *testing.T) {
 
 func TestWriteRecords(t *testing.T) {
 	pl := pluginState{}
-	if err := pl.registerBackingDB(":memory:"); err != nil {
+	if err := pl.registerBackingDB(t.Context(), ":memory:"); err != nil {
 		t.Fatalf("Could not setup file")
 	}
 
@@ -91,7 +93,7 @@ func TestWriteRecords(t *testing.T) {
 		mapRec[hwaddr.String()] = &Record{IP: rec.ip.IP, expires: rec.ip.expires, hostname: rec.ip.hostname}
 	}
 
-	parsedRec, err := loadRecords(pl.leasedb)
+	parsedRec, err := loadRecords(t.Context(), pl.leasedb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +102,7 @@ func TestWriteRecords(t *testing.T) {
 }
 
 func TestFreeIPAddress(t *testing.T) {
-	db, err := testDBSetup()
+	db, err := testDBSetup(t.Context())
 	if err != nil {
 		t.Fatalf("Failed to set up test DB: %v", err)
 	}
@@ -114,7 +116,7 @@ func TestFreeIPAddress(t *testing.T) {
 
 	record := records[1].ip
 
-	parsedRecords, err := loadRecords(pl.leasedb)
+	parsedRecords, err := loadRecords(t.Context(), pl.leasedb)
 	if err != nil {
 		t.Fatalf("Failed to load records: %v", err)
 	}
@@ -126,7 +128,7 @@ func TestFreeIPAddress(t *testing.T) {
 		t.Errorf("Failed to free IP address: %v", err)
 	}
 
-	parsedRecords, err = loadRecords(pl.leasedb)
+	parsedRecords, err = loadRecords(t.Context(), pl.leasedb)
 	if err != nil {
 		t.Fatalf("Failed to load records after deletion: %v", err)
 	}
@@ -136,7 +138,7 @@ func TestFreeIPAddress(t *testing.T) {
 
 func TestFreeIPAddressNonExistent(t *testing.T) {
 	pl := pluginState{}
-	if err := pl.registerBackingDB(":memory:"); err != nil {
+	if err := pl.registerBackingDB(t.Context(), ":memory:"); err != nil {
 		t.Fatalf("Could not setup file")
 	}
 
@@ -154,7 +156,7 @@ func TestFreeIPAddressNonExistent(t *testing.T) {
 	err = pl.freeIPAddress(hwaddr.String(), record)
 	assert.NoError(t, err, "Freeing a non-existent IP address should not return an error")
 
-	parsedRecords, err := loadRecords(pl.leasedb)
+	parsedRecords, err := loadRecords(t.Context(), pl.leasedb)
 	if err != nil {
 		t.Fatalf("Failed to load records: %v", err)
 	}
@@ -162,14 +164,14 @@ func TestFreeIPAddressNonExistent(t *testing.T) {
 }
 
 func TestFreeIPAddressVerifyDeletion(t *testing.T) {
-	db, err := testDBSetup()
+	db, err := testDBSetup(t.Context())
 	if err != nil {
 		t.Fatalf("Failed to set up test DB: %v", err)
 	}
 
 	pl := pluginState{leasedb: db}
 
-	parsedRecords, err := loadRecords(pl.leasedb)
+	parsedRecords, err := loadRecords(t.Context(), pl.leasedb)
 	if err != nil {
 		t.Fatalf("Failed to load records: %v", err)
 	}
@@ -183,7 +185,7 @@ func TestFreeIPAddressVerifyDeletion(t *testing.T) {
 		t.Errorf("Failed to free IP address: %v", err)
 	}
 
-	parsedRecords, err = loadRecords(pl.leasedb)
+	parsedRecords, err = loadRecords(t.Context(), pl.leasedb)
 	if err != nil {
 		t.Fatalf("Failed to load records after deletion: %v", err)
 	}
@@ -204,7 +206,7 @@ func TestFreeIPAddressExecutionError(t *testing.T) {
 	// This test triggers a statement execution failure using a SQLite trigger
 	// that aborts DELETE operations for records[0]
 
-	db, err := testDBSetup()
+	db, err := testDBSetup(t.Context())
 	if err != nil {
 		t.Fatalf("Failed to set up test database: %v", err)
 	}
@@ -237,7 +239,7 @@ func TestFreeIPAddressExecutionError(t *testing.T) {
 	err = pl.freeIPAddress(hwaddr.String(), record)
 
 	assert.Error(t, err, "Should return error due to trigger preventing deletion")
-	assert.Contains(t, err.Error(), "record delete failed", "Error should indicate record delete failure")
+	assert.Contains(t, err.Error(), "could not remove the lease", "Error should indicate record delete failure")
 	assert.Contains(t, err.Error(), triggerErrorMsg, "Error should contain trigger message")
 }
 
@@ -259,7 +261,7 @@ func TestLoadRecordsMalformedRows(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			db, err := loadDB(":memory:")
+			db, err := loadDB(t.Context(), ":memory:")
 			require.NoError(t, err)
 			_, err = db.Exec(
 				"insert into leases4(mac, ip, expiry, hostname) values (?, ?, ?, ?)",
@@ -267,7 +269,7 @@ func TestLoadRecordsMalformedRows(t *testing.T) {
 			)
 			require.NoError(t, err)
 
-			_, err = loadRecords(db)
+			_, err = loadRecords(t.Context(), db)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErrSub)
 		})
@@ -275,11 +277,11 @@ func TestLoadRecordsMalformedRows(t *testing.T) {
 }
 
 func TestLoadRecordsQueryError(t *testing.T) {
-	db, err := loadDB(":memory:")
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
-	_, err = loadRecords(db)
+	_, err = loadRecords(t.Context(), db)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to query leases database")
 }
@@ -323,7 +325,7 @@ func TestLoadRecordsRowsIterationError(t *testing.T) {
 	db, err := sql.Open(driverName, "irrelevant")
 	require.NoError(t, err)
 
-	_, err = loadRecords(db)
+	_, err = loadRecords(t.Context(), db)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed lease database row scanning")
 	assert.Contains(t, err.Error(), "simulated row iteration failure")
@@ -336,16 +338,16 @@ func TestLoadDBOpenError(t *testing.T) {
 		return nil, errors.New("simulated open failure")
 	}
 
-	_, err := loadDB("irrelevant")
+	_, err := loadDB(t.Context(), "irrelevant")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to open database")
 }
 
 func TestRegisterBackingDBDoubleRegistration(t *testing.T) {
 	pl := pluginState{}
-	require.NoError(t, pl.registerBackingDB(":memory:"))
+	require.NoError(t, pl.registerBackingDB(t.Context(), ":memory:"))
 
-	err := pl.registerBackingDB(":memory:")
+	err := pl.registerBackingDB(t.Context(), ":memory:")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot swap out a lease database")
 }
@@ -386,7 +388,257 @@ func TestLoadDBRejectsURIPathBeforeOpen(t *testing.T) {
 		return nil, errors.New("unreachable")
 	}
 
-	_, err := loadDB("leases.db?mode=memory")
+	_, err := loadDB(t.Context(), "leases.db?mode=memory")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "may not contain")
+}
+
+// holdWriteLock opens its own connection to the database at path, starts a
+// write transaction and leaves it open, so any other connection's write
+// against the same file fails with SQLITE_BUSY for as long as the calling
+// test runs. The transaction is rolled back and the connection closed in
+// t.Cleanup.
+func holdWriteLock(t *testing.T, path string) {
+	t.Helper()
+	db, err := loadDB(t.Context(), path)
+	require.NoError(t, err)
+	tx, err := db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	_, err = tx.ExecContext(t.Context(),
+		"insert into leases4(mac, ip, expiry, hostname) values (?, ?, ?, ?)",
+		"ff:ff:ff:ff:ff:ff", "10.255.255.255", 1, "lock-holder")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = tx.Rollback()
+		_ = db.Close()
+	})
+}
+
+// TestIsBusy pins telling a locked database apart from every other kind of
+// failure: a plain error and a non-busy sqlite error both read as not busy,
+// only SQLITE_BUSY or SQLITE_LOCKED does.
+func TestIsBusy(t *testing.T) {
+	t.Run("a plain error is never busy", func(t *testing.T) {
+		assert.False(t, isBusy(errors.New("boom")))
+	})
+
+	t.Run("a non-busy sqlite error is not busy either", func(t *testing.T) {
+		// Reuses the constraint-failure shape from
+		// TestFreeIPAddressExecutionError: a BEFORE DELETE trigger raising
+		// ABORT is a real sqlite error, just not a busy one.
+		db, err := loadDB(t.Context(), ":memory:")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+
+		_, err = db.Exec(`
+			CREATE TRIGGER prevent_delete
+			BEFORE DELETE ON leases4
+			BEGIN
+				SELECT RAISE(ABORT, 'blocked');
+			END
+		`)
+		require.NoError(t, err)
+		_, err = db.Exec(
+			"insert into leases4(mac, ip, expiry, hostname) values (?, ?, ?, ?)",
+			"aa:bb:cc:dd:ee:ff", "10.0.0.1", 1, "host",
+		)
+		require.NoError(t, err)
+
+		_, err = db.Exec("delete from leases4 where mac = ?", "aa:bb:cc:dd:ee:ff")
+		require.Error(t, err)
+		assert.False(t, isBusy(err))
+	})
+
+	t.Run("a locked database is busy", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "leases.db")
+		holdWriteLock(t, path)
+
+		db2, err := loadDB(t.Context(), path)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db2.Close() })
+
+		_, err = db2.ExecContext(t.Context(),
+			"insert into leases4(mac, ip, expiry, hostname) values (?, ?, ?, ?)",
+			"11:22:33:44:55:66", "10.0.0.2", 1, "host2")
+		require.Error(t, err)
+		assert.True(t, isBusy(err))
+	})
+}
+
+// TestStoreErrorBusy pins that storeError wraps a locked-database failure in
+// ErrBusy, which is what lets a caller retry that and only that.
+func TestStoreErrorBusy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "leases.db")
+	holdWriteLock(t, path)
+
+	db2, err := loadDB(t.Context(), path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db2.Close() })
+
+	_, err = db2.ExecContext(t.Context(),
+		"insert into leases4(mac, ip, expiry, hostname) values (?, ?, ?, ?)",
+		"22:33:44:55:66:77", "10.0.0.3", 1, "host3")
+	require.Error(t, err)
+	assert.ErrorIs(t, storeError("op", err), ErrBusy)
+}
+
+// TestEnqueueQueueFull pins that a lease change is refused rather than
+// waited on when the writer is too far behind to keep up: the caller has the
+// plugin lock in hand, so blocking on the channel is not an option.
+func TestEnqueueQueueFull(t *testing.T) {
+	pl := &pluginState{writes: make(chan leaseWrite, 1)}
+	// Nothing ever drains this, so one write is enough to fill it; its
+	// contents do not matter.
+	pl.writes <- leaseWrite{}
+
+	rec := &Record{IP: net.IPv4(10, 0, 0, 90), expires: time.Now().Add(time.Hour).Unix()}
+	err := pl.saveIPAddress("aa:bb:cc:dd:ee:90", rec)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrWriteQueueFull)
+}
+
+// TestApplyWriteNotFound pins the ErrNotFound sentinel applyWrite returns for
+// a delete that matched no row. enqueue's inline path treats this as
+// success, so this calls applyWrite directly to reach the sentinel itself.
+func TestApplyWriteNotFound(t *testing.T) {
+	pl := &pluginState{}
+	require.NoError(t, pl.registerBackingDB(t.Context(), ":memory:"))
+
+	err := pl.applyWrite(leaseWrite{
+		op:    "remove",
+		mac:   "aa:bb:cc:dd:ee:ff",
+		ip:    "10.0.0.1",
+		query: `delete from leases4 where mac = ? and ip = ?`,
+		args:  []any{"aa:bb:cc:dd:ee:ff", "10.0.0.1"},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+// TestWriterAppliesQueuedWritesInOrder pins the invariant startWriter exists
+// for: queued changes are applied in the order they were made. Queuing the
+// delete after the insert and finding the row gone once the writer has
+// drained is what proves the order held; applied the other way around, the
+// row would still be there.
+func TestWriterAppliesQueuedWritesInOrder(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "leases.db")
+	pl := &pluginState{}
+	require.NoError(t, pl.registerBackingDB(t.Context(), dbPath))
+	pl.dbCtx, pl.dbCancel = context.WithCancel(t.Context())
+	pl.startWriter()
+
+	rec := &Record{IP: net.IPv4(10, 0, 0, 91), expires: time.Now().Add(time.Hour).Unix(), hostname: "h"}
+	require.NoError(t, pl.saveIPAddress("aa:bb:cc:dd:ee:91", rec))
+	require.NoError(t, pl.freeIPAddress("aa:bb:cc:dd:ee:91", rec))
+	pl.stopWriter()
+
+	recs, err := loadRecords(t.Context(), pl.leasedb)
+	require.NoError(t, err)
+	assert.Empty(t, recs, "the delete queued after the insert must win")
+}
+
+// TestDrainWritesAppliesEverythingQueued pins that shutting the writer down
+// does not throw away whatever is still queued: every row handed to it must
+// be on disk once it returns. Calling drainWrites directly, rather than
+// racing it against the writer goroutine, is what makes the queued items
+// still be there deterministically.
+func TestDrainWritesAppliesEverythingQueued(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "leases.db")
+	pl := &pluginState{}
+	require.NoError(t, pl.registerBackingDB(t.Context(), dbPath))
+	pl.writes = make(chan leaseWrite, 8)
+
+	macs := []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02", "aa:bb:cc:dd:ee:03"}
+	for i, mac := range macs {
+		rec := &Record{IP: net.IPv4(10, 0, 0, byte(92+i)), expires: time.Now().Add(time.Hour).Unix(), hostname: "h"}
+		pl.writes <- leaseWrite{
+			op:    "store",
+			mac:   mac,
+			ip:    rec.IP.String(),
+			query: `insert or replace into leases4(mac, ip, expiry, hostname) values (?, ?, ?, ?)`,
+			args:  []any{mac, rec.IP.String(), rec.expires, rec.hostname},
+		}
+	}
+
+	pl.drainWrites()
+
+	recs, err := loadRecords(t.Context(), pl.leasedb)
+	require.NoError(t, err)
+	assert.Len(t, recs, len(macs), "every queued write must be on disk")
+}
+
+// TestWriteSwallowsNotFound pins that a queued delete for a row that is
+// already gone does not upset the writer: it is logged at debug level and
+// the writer shuts down cleanly, same as for any other change.
+func TestWriteSwallowsNotFound(t *testing.T) {
+	pl := &pluginState{}
+	require.NoError(t, pl.registerBackingDB(t.Context(), ":memory:"))
+	pl.startWriter()
+
+	require.NoError(t, pl.freeIPAddress("aa:bb:cc:dd:ee:ff", &Record{IP: net.IPv4(10, 0, 0, 1)}))
+	pl.stopWriter()
+
+	recs, err := loadRecords(t.Context(), pl.leasedb)
+	require.NoError(t, err)
+	assert.Empty(t, recs, "nothing was there to begin with, and nothing must appear")
+}
+
+// TestWriteFailureIsLoggedNotFatal pins that a write the database itself
+// cannot take is logged rather than treated as fatal: nothing is waiting on
+// the result, so the writer's only job is to say so and move on.
+func TestWriteFailureIsLoggedNotFatal(t *testing.T) {
+	pl := &pluginState{}
+	require.NoError(t, pl.registerBackingDB(t.Context(), ":memory:"))
+	pl.startWriter()
+
+	// A closed database fails every statement with "sql: database is
+	// closed", which is not a busy error, so this does not retry either.
+	require.NoError(t, pl.leasedb.Close())
+
+	rec := &Record{IP: net.IPv4(10, 0, 0, 93), expires: time.Now().Add(time.Hour).Unix(), hostname: "h"}
+	require.NoError(t, pl.saveIPAddress("aa:bb:cc:dd:ee:93", rec))
+	pl.stopWriter()
+}
+
+// TestWriteBusyRetry pins that write's busy-retry loop gives up after
+// busyRetries attempts instead of blocking the writer forever: with the
+// write lock held by another transaction for the whole test, the queued
+// write exhausts its retries and stopWriter still returns quickly.
+// busyRetries is 3 and busyBackoff 20ms, so this comfortably finishes well
+// under a second.
+func TestWriteBusyRetry(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "leases.db")
+	pl := &pluginState{}
+	require.NoError(t, pl.registerBackingDB(t.Context(), dbPath))
+	holdWriteLock(t, dbPath)
+	pl.startWriter()
+
+	rec := &Record{IP: net.IPv4(10, 0, 0, 94), expires: time.Now().Add(time.Hour).Unix(), hostname: "h"}
+	require.NoError(t, pl.saveIPAddress("aa:bb:cc:dd:ee:94", rec))
+
+	start := time.Now()
+	pl.stopWriter()
+	assert.Less(t, time.Since(start), 500*time.Millisecond, "the retries must not hang past their backoff budget")
+}
+
+// TestSaveIPAddressSurvives2038 is the regression test for a 32-bit build
+// storing the lease expiry as a 32-bit value: a lease expiring after the
+// 2038 Unix-time rollover must round-trip through storage exactly and must
+// not read as already expired.
+func TestSaveIPAddressSurvives2038(t *testing.T) {
+	pl := &pluginState{}
+	require.NoError(t, pl.registerBackingDB(t.Context(), ":memory:"))
+
+	expires := time.Date(2100, time.January, 1, 0, 0, 0, 0, time.UTC).Unix()
+	rec := &Record{IP: net.IPv4(10, 0, 0, 99), expires: expires, hostname: "future"}
+	require.NoError(t, pl.saveIPAddress("aa:bb:cc:dd:ee:99", rec))
+
+	recs, err := loadRecords(t.Context(), pl.leasedb)
+	require.NoError(t, err)
+	got, ok := recs["aa:bb:cc:dd:ee:99"]
+	require.True(t, ok)
+	assert.Equal(t, expires, got.expires, "the expiry must round-trip exactly")
+
+	at2099 := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
+	assert.False(t, got.expired(at2099), "a lease this far out must not read as already expired")
 }

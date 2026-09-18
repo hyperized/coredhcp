@@ -14,6 +14,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/coredhcp/coredhcp/leases"
+
 	// The "sqlite" driver is registered by rangeplugin's own storage.go
 	// import, which is already pulled in below.
 	rangeplugin "github.com/coredhcp/coredhcp/plugins/range"
@@ -35,6 +37,34 @@ func seedDB(t *testing.T, path string, rows [][4]any) {
 		_, err := db.Exec("insert into leases4(mac, ip, expiry, hostname) values (?, ?, ?, ?)", r[0], r[1], r[2], r[3])
 		require.NoError(t, err)
 	}
+}
+
+// closeAfter shuts down the instance setup just registered, at the end of the
+// test.
+//
+// Setup leaves a sweeper and a writer running and nothing in the public API
+// returns the instance, so a test reaches it the way any consumer does,
+// through the leases registry. Without this the writer is still touching the
+// lease file when the framework removes the temp directory around it, which
+// fails the test over a directory that would not empty.
+func closeAfter(t *testing.T, name string) {
+	t.Helper()
+	sources := leases.Sources()
+	// Newest first: two instances over one lease file report the same name.
+	for i := len(sources) - 1; i >= 0; i-- {
+		src := sources[i]
+		if src.Name() != name {
+			continue
+		}
+		closer, ok := src.(interface{ Close() })
+		require.True(t, ok, "the registered source must be the plugin instance")
+		t.Cleanup(func() {
+			leases.Unregister(src)
+			closer.Close()
+		})
+		return
+	}
+	t.Fatalf("no source registered as %q", name)
 }
 
 func TestPluginSetupArgValidation(t *testing.T) {
@@ -78,6 +108,7 @@ func TestPluginSetupAndHandler4NewAllocationThenRenewal(t *testing.T) {
 	h4, err := rangeplugin.Plugin.Setup4(dbPath, "10.0.0.1", "10.0.0.5", "1h")
 	require.NoError(t, err)
 	require.NotNil(t, h4)
+	closeAfter(t, "range "+dbPath)
 
 	hwaddr, err := net.ParseMAC("02:00:00:00:01:00")
 	require.NoError(t, err)
@@ -103,6 +134,7 @@ func TestPluginSetupReloadsExistingLeases(t *testing.T) {
 
 	h4, err := rangeplugin.Plugin.Setup4(dbPath, "10.0.1.1", "10.0.1.2", "1h")
 	require.NoError(t, err)
+	closeAfter(t, "range "+dbPath)
 
 	// The first address was already re-allocated to the record loaded from
 	// storage, so a new client must get the second one.
@@ -180,6 +212,7 @@ func TestPluginSetupSweepArgument(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.NotNil(t, h4)
+			closeAfter(t, "range "+args[0])
 		})
 	}
 }
@@ -228,6 +261,7 @@ func TestPluginSetupDeclineProbationArgument(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.NotNil(t, h4)
+			closeAfter(t, "range "+args[0])
 		})
 	}
 }
@@ -257,6 +291,7 @@ func TestPluginSetupDeclineMaxArgument(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.NotNil(t, h4)
+			closeAfter(t, "range "+args[0])
 		})
 	}
 }

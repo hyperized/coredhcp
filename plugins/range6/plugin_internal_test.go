@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/insomniacslk/dhcp/dhcpv6"
@@ -109,7 +110,7 @@ func (c *fakeClock) Advance(d time.Duration) {
 func newTestPluginState(t *testing.T, first, last net.IP) (*pluginState, *fakeClock) {
 	t.Helper()
 
-	db, err := loadDB(":memory:")
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -209,7 +210,7 @@ func TestOnLink(t *testing.T) {
 // give the client back, which the allocator itself can't be made to do
 // through a real bitmap without a lot of setup, so a failing mock stands in.
 func TestExtendReturnsNoAddrsAvailWhenNothingCanBeReclaimed(t *testing.T) {
-	db, err := loadDB(":memory:")
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -218,7 +219,7 @@ func TestExtendReturnsNoAddrsAvailWhenNothingCanBeReclaimed(t *testing.T) {
 	mockAlloc.On("Allocate", mock.Anything).Return(net.IPNet{}, errors.New("no addresses left"))
 
 	now := time.Now()
-	rec := &Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::100"), expires: int(now.Add(-time.Hour).Unix())}
+	rec := &Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::100"), expires: now.Add(-time.Hour).Unix()}
 	p := &pluginState{
 		leasedb:   db,
 		Records6:  map[string]*Record{rec.key(): rec},
@@ -247,14 +248,14 @@ func TestReallocateExpiredKeepsAddressForLateClient(t *testing.T) {
 	rec := p.allocateLease(key, duidA, iaidX, net.IPNet{}, "old-name", clock.Now())
 	require.NotNil(t, rec)
 	originalIP := rec.IP
-	rec.expires = int(clock.Now().Add(-time.Second).Unix())
+	rec.expires = clock.Now().Add(-time.Second).Unix()
 
 	got, found := p.renewKnown(key, "new-name", clock.Now())
 	require.True(t, found)
 	require.NotNil(t, got)
 	assert.True(t, got.IP.Equal(originalIP), "the same address must come back")
 	assert.Equal(t, "new-name", got.hostname)
-	assert.Equal(t, int(clock.Now().Add(testLeaseTime).Unix()), got.expires)
+	assert.Equal(t, clock.Now().Add(testLeaseTime).Unix(), got.expires)
 }
 
 // TestReallocateExpiredReleaseLeaseFailureKeepsClientOnOldRecord covers the
@@ -267,21 +268,22 @@ func TestReallocateExpiredReleaseLeaseFailureKeepsClientOnOldRecord(t *testing.T
 
 	rec := p.allocateLease(key, duidA, iaidX, net.IPNet{}, "old-name", clock.Now())
 	require.NotNil(t, rec)
-	rec.expires = int(clock.Now().Add(-time.Second).Unix())
+	rec.expires = clock.Now().Add(-time.Second).Unix()
 	require.NoError(t, p.leasedb.Close()) // every statement now fails
 
 	got, found := p.renewKnown(key, "new-name", clock.Now())
 	require.True(t, found)
 	require.Same(t, rec, got, "the client must be left on its old record")
-	assert.Equal(t, int(clock.Now().Add(testLeaseTime).Unix()), got.expires, "it is renewed in place instead")
+	assert.Equal(t, clock.Now().Add(testLeaseTime).Unix(), got.expires, "it is renewed in place instead")
 	assert.Same(t, rec, p.Records6[key])
 }
 
-// TestAllocateLeaseSaveIPAddressFailureStillServesLease covers a storage
-// failure on the new-lease path: the client still gets an address for this
-// session, and only the log records that it wasn't persisted.
-func TestAllocateLeaseSaveIPAddressFailureStillServesLease(t *testing.T) {
-	db, err := loadDB(":memory:")
+// TestAllocateLeaseSaveIPAddressFailureRefusesTheBinding covers a storage
+// failure on the new-binding path. The client gets nothing: an address we
+// could not write down reads as free after a restart, and the next client to
+// ask would be handed the one this client thinks it holds.
+func TestAllocateLeaseSaveIPAddressFailureRefusesTheBinding(t *testing.T) {
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, db.Close()) // force saveIPAddress to fail
 
@@ -291,9 +293,13 @@ func TestAllocateLeaseSaveIPAddressFailureStillServesLease(t *testing.T) {
 	p := &pluginState{leasedb: db, Records6: make(map[string]*Record), allocator: alloc, LeaseTime: testLeaseTime}
 	key := leaseKey(duidA, iaidX)
 
-	rec := p.allocateLease(key, duidA, iaidX, net.IPNet{}, "client-a", time.Now())
-	require.NotNil(t, rec, "a storage failure while allocating must not cost the client its lease")
-	assert.Same(t, rec, p.Records6[key])
+	assert.Nil(t, p.allocateLease(key, duidA, iaidX, net.IPNet{}, "client-a", time.Now()))
+	assert.Empty(t, p.Records6, "an unrecorded binding must not be tracked in memory either")
+
+	// The address went back, so the whole pool is still there to hand out.
+	first, err := alloc.Allocate(net.IPNet{})
+	require.NoError(t, err)
+	assert.Equal(t, poolFirst, first.IP.String())
 }
 
 // TestAllocateRetrySucceedsAfterReclaimingExpired covers allocate's first
@@ -308,7 +314,7 @@ func TestAllocateRetrySucceedsAfterReclaimingExpired(t *testing.T) {
 	require.NotNil(t, rec2)
 
 	// Only the first binding has lapsed; the second is untouched.
-	rec1.expires = int(clock.Now().Add(-time.Second).Unix())
+	rec1.expires = clock.Now().Add(-time.Second).Unix()
 
 	ip, err := p.allocate(net.IPNet{})
 	require.NoError(t, err)
@@ -355,17 +361,17 @@ func TestAllocateGivesUpWhenNothingCanBeReclaimed(t *testing.T) {
 // failure: the in-memory binding is extended and handed to the client
 // regardless, with only the log recording that it wasn't persisted.
 func TestRenewSaveIPAddressFailureStillExtendsInMemory(t *testing.T) {
-	db, err := loadDB(":memory:")
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
 	p := &pluginState{leasedb: db, LeaseTime: testLeaseTime}
 	now := time.Now()
-	rec := &Record{expires: int(now.Add(time.Minute).Unix()), hostname: "old-name"}
+	rec := &Record{expires: now.Add(time.Minute).Unix(), hostname: "old-name"}
 
 	p.renew(rec, "new-name", now)
 	assert.Equal(t, "new-name", rec.hostname)
-	assert.Equal(t, int(now.Add(testLeaseTime).Round(time.Second).Unix()), rec.expires)
+	assert.Equal(t, now.Add(testLeaseTime).Round(time.Second).Unix(), rec.expires)
 }
 
 // TestRenewLeavesFullTermBindingUntouched pins renew's no-op branch: a
@@ -375,17 +381,17 @@ func TestRenewSaveIPAddressFailureStillExtendsInMemory(t *testing.T) {
 // following renewal call lands in this branch or the update one depends on
 // which way the previous expiry happened to round.
 func TestRenewLeavesFullTermBindingUntouched(t *testing.T) {
-	db, err := loadDB(":memory:")
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
 	p := &pluginState{leasedb: db, LeaseTime: testLeaseTime}
 	now := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
-	rec := &Record{expires: int(now.Add(2 * testLeaseTime).Unix()), hostname: "old-name"}
+	rec := &Record{expires: now.Add(2 * testLeaseTime).Unix(), hostname: "old-name"}
 
 	p.renew(rec, "new-name", now)
 	assert.Equal(t, "old-name", rec.hostname, "a binding that already outlives the new term must not be rewritten")
-	assert.Equal(t, int(now.Add(2*testLeaseTime).Unix()), rec.expires)
+	assert.Equal(t, now.Add(2*testLeaseTime).Unix(), rec.expires)
 }
 
 // TestReleaseLeaseFailureBranches covers releaseLease's two error returns.
@@ -395,7 +401,7 @@ func TestRenewLeavesFullTermBindingUntouched(t *testing.T) {
 // whether it succeeds, since the row is already gone by then.
 func TestReleaseLeaseFailureBranches(t *testing.T) {
 	t.Run("storage delete fails", func(t *testing.T) {
-		db, err := loadDB(":memory:")
+		db, err := loadDB(t.Context(), ":memory:")
 		require.NoError(t, err)
 		require.NoError(t, db.Close())
 
@@ -410,7 +416,7 @@ func TestReleaseLeaseFailureBranches(t *testing.T) {
 	})
 
 	t.Run("allocator free fails", func(t *testing.T) {
-		db, err := loadDB(":memory:")
+		db, err := loadDB(t.Context(), ":memory:")
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = db.Close() })
 
@@ -432,7 +438,7 @@ func TestReleaseLeaseFailureBranches(t *testing.T) {
 // branch: a release that names a real binding but can't be persisted answers
 // with StatusUnspecFail instead of Success.
 func TestReleaseIANAStorageFailureReturnsUnspecFail(t *testing.T) {
-	db, err := loadDB(":memory:")
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
@@ -452,7 +458,7 @@ func TestReleaseIANAStorageFailureReturnsUnspecFail(t *testing.T) {
 // TestDeclineIANAStorageFailureReturnsUnspecFail mirrors
 // TestReleaseIANAStorageFailureReturnsUnspecFail for the decline path.
 func TestDeclineIANAStorageFailureReturnsUnspecFail(t *testing.T) {
-	db, err := loadDB(":memory:")
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
@@ -478,7 +484,7 @@ func TestDeclineIANAStorageFailureReturnsUnspecFail(t *testing.T) {
 // TestQuarantineFreeIPAddressFailure covers quarantine's own storage error,
 // reached only when probation and the quarantine bound are both non-zero.
 func TestQuarantineFreeIPAddressFailure(t *testing.T) {
-	db, err := loadDB(":memory:")
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
@@ -515,7 +521,7 @@ func TestFreeDeclinedDropsEntryEvenOnAllocatorError(t *testing.T) {
 // sweepExpired's outcomes in one pass: a record whose row a trigger refuses
 // to delete stays tracked, while a normal lapsed record is reclaimed.
 func TestSweepExpiredSkipsUndeletableRecordButReclaimsOthers(t *testing.T) {
-	db, err := loadDB(":memory:")
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -525,8 +531,8 @@ func TestSweepExpiredSkipsUndeletableRecordButReclaimsOthers(t *testing.T) {
 	p := &pluginState{leasedb: db, Records6: make(map[string]*Record), allocator: alloc, LeaseTime: testLeaseTime}
 	now := time.Now()
 
-	stuck := &Record{DUID: duidA, IAID: [4]byte{0, 0, 0, 1}, IP: net.ParseIP("2001:db8:1::100"), expires: int(now.Add(-time.Hour).Unix())}
-	reclaimable := &Record{DUID: duidB, IAID: [4]byte{0, 0, 0, 2}, IP: net.ParseIP("2001:db8:1::101"), expires: int(now.Add(-time.Hour).Unix())}
+	stuck := &Record{DUID: duidA, IAID: [4]byte{0, 0, 0, 1}, IP: net.ParseIP("2001:db8:1::100"), expires: now.Add(-time.Hour).Unix()}
+	reclaimable := &Record{DUID: duidB, IAID: [4]byte{0, 0, 0, 2}, IP: net.ParseIP("2001:db8:1::101"), expires: now.Add(-time.Hour).Unix()}
 
 	for _, rec := range []*Record{stuck, reclaimable} {
 		_, err := alloc.Allocate(net.IPNet{IP: rec.IP})
@@ -600,24 +606,32 @@ func TestDefaultSweepInterval(t *testing.T) {
 	}
 }
 
-// TestSweeperReclaimsInBackground drives the real ticker at a very short
-// interval: without any client asking for an address, an expired binding
-// must disappear from the map on its own.
+// TestSweeperReclaimsInBackground drives the real ticker: without any client
+// asking for an address, an expired binding must disappear from the map on
+// its own.
+//
+// The whole instance is built inside the bubble, ticker and stop channel
+// included, which is what lets the sweep happen on bubble time instead of
+// being waited out on the wall clock.
 func TestSweeperReclaimsInBackground(t *testing.T) {
-	p, clock := newTestPluginState(t, net.ParseIP("2001:db8:1::100"), net.ParseIP("2001:db8:1::100"))
+	synctest.Test(t, func(t *testing.T) {
+		p, clock := newTestPluginState(t, net.ParseIP("2001:db8:1::100"), net.ParseIP("2001:db8:1::100"))
 
-	rec := p.allocateLease(leaseKey(duidA, iaidX), duidA, iaidX, net.IPNet{}, "", clock.Now())
-	require.NotNil(t, rec)
-	rec.expires = int(clock.Now().Add(-time.Second).Unix())
+		rec := p.allocateLease(leaseKey(duidA, iaidX), duidA, iaidX, net.IPNet{}, "", clock.Now())
+		require.NotNil(t, rec)
+		rec.expires = clock.Now().Add(-time.Second).Unix()
 
-	p.startSweeper(time.Millisecond)
-	t.Cleanup(p.stopSweeper)
+		p.startSweeper(time.Minute)
+		defer p.stopSweeper()
 
-	require.Eventually(t, func() bool {
+		// One tick, then wait for the sweep it starts to finish.
+		time.Sleep(time.Minute + time.Second)
+		synctest.Wait()
+
 		p.Lock()
 		defer p.Unlock()
-		return len(p.Records6) == 0
-	}, 5*time.Second, 2*time.Millisecond, "the background sweeper must reclaim the expired binding")
+		assert.Empty(t, p.Records6, "the background sweeper must reclaim the expired binding")
+	})
 }
 
 // TestStopSweeperHaltsTheLoopImmediately covers the select's stop branch: a
@@ -637,12 +651,12 @@ func TestStopSweeperHaltsTheLoopImmediately(t *testing.T) {
 // TestRestoreRefusesToSwapRunningDB covers restore's own failure branch: a
 // pluginState whose leasedb is already set must not silently swap it out.
 func TestRestoreRefusesToSwapRunningDB(t *testing.T) {
-	db, err := loadDB(":memory:")
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
 	p := &pluginState{leasedb: db}
-	err = p.restore("irrelevant.db")
+	err = p.restore(t.Context(), "irrelevant.db")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "could not setup lease storage")
 	assert.Contains(t, err.Error(), "cannot swap out a lease database while running")
@@ -684,7 +698,7 @@ func TestLoadDBOpenErrorSeam(t *testing.T) {
 		return nil, errors.New("simulated open failure")
 	}
 
-	_, err := loadDB(filepath.Join(t.TempDir(), "leases6.sqlite3"))
+	_, err := loadDB(t.Context(), filepath.Join(t.TempDir(), "leases6.sqlite3"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to open database")
 }
@@ -693,17 +707,17 @@ func TestLoadDBOpenErrorSeam(t *testing.T) {
 // database can fail: the path exists but isn't a usable sqlite file. A
 // directory can never be opened as one.
 func TestLoadDBTableCreationFailure(t *testing.T) {
-	_, err := loadDB(t.TempDir())
+	_, err := loadDB(t.Context(), t.TempDir())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "table creation failed")
 }
 
 func TestLoadRecordsQueryError(t *testing.T) {
-	db, err := loadDB(":memory:")
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
-	_, err = loadRecords(db)
+	_, err = loadRecords(t.Context(), db)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to query leases database")
 }
@@ -713,7 +727,7 @@ func TestLoadRecordsQueryError(t *testing.T) {
 // straight into a mismatched type: a row written through saveIPAddress
 // could never carry one.
 func TestLoadRecordsScanFailure(t *testing.T) {
-	db, err := loadDB(":memory:")
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 
 	_, err = db.Exec(
@@ -722,7 +736,7 @@ func TestLoadRecordsScanFailure(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	_, err = loadRecords(db)
+	_, err = loadRecords(t.Context(), db)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to scan row")
 }
@@ -766,7 +780,7 @@ func TestLoadRecordsRowsIterationError(t *testing.T) {
 	db, err := sql.Open(driverName, "irrelevant")
 	require.NoError(t, err)
 
-	_, err = loadRecords(db)
+	_, err = loadRecords(t.Context(), db)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed lease database row scanning")
 	assert.Contains(t, err.Error(), "simulated row iteration failure")
@@ -781,7 +795,7 @@ func TestLoadRecordsRowsIterationError(t *testing.T) {
 // covers).
 func TestRestoreFailsWhenReallocationExhaustsThePool(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "leases6.sqlite3")
-	db, err := loadDB(dbPath)
+	db, err := loadDB(t.Context(), dbPath)
 	require.NoError(t, err)
 
 	const sameIP = "2001:db8:1::100"
@@ -799,33 +813,33 @@ func TestRestoreFailsWhenReallocationExhaustsThePool(t *testing.T) {
 }
 
 func TestSaveIPAddressExecFailure(t *testing.T) {
-	db, err := loadDB(":memory:")
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
 	p := &pluginState{leasedb: db}
 	err = p.saveIPAddress(&Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::100")})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "record insert/update failed")
+	assert.Contains(t, err.Error(), "could not store the binding")
 }
 
 func TestFreeIPAddressExecFailure(t *testing.T) {
-	db, err := loadDB(":memory:")
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
 	p := &pluginState{leasedb: db}
 	err = p.freeIPAddress(&Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::100")})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "record delete failed")
+	assert.Contains(t, err.Error(), "could not remove the binding")
 }
 
 func TestRegisterBackingDBDoubleRegistration(t *testing.T) {
 	p := &pluginState{}
-	require.NoError(t, p.registerBackingDB(":memory:"))
+	require.NoError(t, p.registerBackingDB(t.Context(), ":memory:"))
 	t.Cleanup(func() { _ = p.leasedb.Close() })
 
-	err := p.registerBackingDB(":memory:")
+	err := p.registerBackingDB(t.Context(), ":memory:")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot swap out a lease database")
 }
@@ -863,7 +877,338 @@ func TestRecordFromRow(t *testing.T) {
 		assert.Equal(t, validDUID, rec.DUID)
 		assert.Equal(t, [4]byte{0, 0, 0, 1}, rec.IAID)
 		assert.Equal(t, net.ParseIP("2001:db8:1::1").To16(), rec.IP)
-		assert.Equal(t, 42, rec.expires)
+		assert.Equal(t, int64(42), rec.expires)
 		assert.Equal(t, "host", rec.hostname)
 	})
+}
+
+// TestLogThrottleReady drives a throttle through a full cycle: the first call
+// always gets through, calls inside the window are suppressed and counted,
+// and the first call past the window gets through again carrying how many
+// were held back. It runs the cycle at two different window lengths, since
+// the window is whatever the caller chooses and not a fixed constant of the
+// throttle itself.
+func TestLogThrottleReady(t *testing.T) {
+	start := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+	t.Run("a one-minute window", func(t *testing.T) {
+		var throttle logThrottle
+		const window = time.Minute
+
+		skipped, ok := throttle.ready(start, window)
+		assert.True(t, ok, "the first call always gets through")
+		assert.Zero(t, skipped)
+
+		skipped, ok = throttle.ready(start.Add(30*time.Second), window)
+		assert.False(t, ok, "a call inside the window is suppressed")
+		assert.Zero(t, skipped, "a suppressed call reports nothing yet, the count comes back on the next one that gets through")
+
+		skipped, ok = throttle.ready(start.Add(45*time.Second), window)
+		assert.False(t, ok, "a second call inside the window keeps counting")
+		assert.Zero(t, skipped)
+
+		skipped, ok = throttle.ready(start.Add(61*time.Second), window)
+		assert.True(t, ok, "a call past the window gets through again")
+		assert.Equal(t, uint64(2), skipped, "carrying how many were held back")
+	})
+
+	t.Run("a 200-millisecond window", func(t *testing.T) {
+		var throttle logThrottle
+		const window = 200 * time.Millisecond
+
+		skipped, ok := throttle.ready(start, window)
+		assert.True(t, ok)
+		assert.Zero(t, skipped)
+
+		skipped, ok = throttle.ready(start.Add(100*time.Millisecond), window)
+		assert.False(t, ok)
+		assert.Zero(t, skipped)
+
+		skipped, ok = throttle.ready(start.Add(300*time.Millisecond), window)
+		assert.True(t, ok)
+		assert.Equal(t, uint64(1), skipped)
+	})
+}
+
+// TestAtLeaseLimit covers the three shapes of the bound: turned off, exactly
+// full, and still under it.
+func TestAtLeaseLimit(t *testing.T) {
+	now := time.Now()
+	// The bindings have to be live: one that has lapsed is reclaimed rather
+	// than counted against the bound, which is the case after this table.
+	records := func(n int) map[string]*Record {
+		recs := make(map[string]*Record, n)
+		for i := range n {
+			recs[fmt.Sprintf("rec-%d", i)] = &Record{expires: now.Add(time.Hour).Unix()}
+		}
+		return recs
+	}
+
+	for _, tc := range []struct {
+		name      string
+		maxLeases int
+		records   int
+		want      bool
+	}{
+		{"a bound of zero is off, whatever the map holds", 0, 5, false},
+		{"exactly at the bound is full", 3, 3, true},
+		{"below the bound is not full", 3, 2, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &pluginState{maxLeases: tc.maxLeases, Records6: records(tc.records), declined: map[string]time.Time{}}
+			assert.Equal(t, tc.want, p.atLeaseLimit(now))
+		})
+	}
+
+	// A full table of bindings nobody holds any more must not turn a client
+	// away: the background sweeper would return them, but only at the next
+	// tick, and the client is asking now.
+	t.Run("a lapsed binding is reclaimed rather than counted against the bound", func(t *testing.T) {
+		p, clock := newTestPluginState(t, net.ParseIP(poolFirst), net.ParseIP("2001:db8:1::101"))
+		p.maxLeases = 1
+		require.NotNil(t, p.allocateLease(leaseKey(duidA, iaidX), duidA, iaidX, net.IPNet{}, "", clock.Now()))
+
+		clock.Advance(testLeaseTime + time.Second)
+		assert.False(t, p.atLeaseLimit(clock.Now()))
+		assert.Empty(t, p.Records6, "the lapsed binding went back to the pool")
+	})
+}
+
+// TestAllocateLeaseRefusesAtLeaseLimit covers allocateLease's own refusal
+// branch: once the table already holds max-leases bindings, a new DUID and
+// IAID pair gets nothing, the table does not grow, and the allocator is never
+// even asked.
+func TestAllocateLeaseRefusesAtLeaseLimit(t *testing.T) {
+	existing := &Record{
+		DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::100"),
+		// Live, so the bound is what refuses the next client rather than
+		// the reclaim atLeaseLimit runs first.
+		expires: time.Now().Add(time.Hour).Unix(),
+	}
+	mockAlloc := &mockAllocator{}
+	p := &pluginState{
+		maxLeases: 1,
+		Records6:  map[string]*Record{existing.key(): existing},
+		declined:  map[string]time.Time{},
+		allocator: mockAlloc,
+	}
+
+	key := leaseKey(duidB, iaidX)
+	rec := p.allocateLease(key, duidB, iaidX, net.IPNet{}, "new-client", time.Now())
+
+	assert.Nil(t, rec)
+	assert.Len(t, p.Records6, 1, "the table must not grow past the bound")
+	_, added := p.Records6[key]
+	assert.False(t, added)
+	mockAlloc.AssertNotCalled(t, "Allocate", mock.Anything)
+}
+
+// TestAllocateLeaseSaveFailureAndFreeFailureAreBothLogged covers the doubly
+// unlucky path inside allocateLease: the binding could not be persisted, and
+// returning the freshly allocated address to the pool then fails too. Both
+// failures are logged and the caller still gets nothing.
+func TestAllocateLeaseSaveFailureAndFreeFailureAreBothLogged(t *testing.T) {
+	db, err := loadDB(t.Context(), ":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Close()) // force saveIPAddress to fail
+
+	mockAlloc := &mockFailingAllocator{}
+	mockAlloc.On("Allocate", mock.Anything).Return(net.IPNet{IP: net.ParseIP(poolFirst)}, nil)
+	mockAlloc.On("Free", mock.Anything).Return(errors.New("double free"))
+
+	p := &pluginState{leasedb: db, Records6: make(map[string]*Record), allocator: mockAlloc, LeaseTime: testLeaseTime}
+	key := leaseKey(duidA, iaidX)
+
+	assert.Nil(t, p.allocateLease(key, duidA, iaidX, net.IPNet{}, "client-a", time.Now()))
+	assert.Empty(t, p.Records6)
+	mockAlloc.AssertExpectations(t)
+}
+
+// TestWriteLogsNotFoundWithoutTreatingItAsAFailure covers write's ErrNotFound
+// case directly: a delete that matched nothing is not a failure, so the
+// writer logs it at debug and moves on without retrying.
+func TestWriteLogsNotFoundWithoutTreatingItAsAFailure(t *testing.T) {
+	db, err := loadDB(t.Context(), ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	p := &pluginState{leasedb: db}
+	rec := &Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::100")}
+	w := bindingWrite{
+		op:    "remove",
+		duid:  rec.DUID,
+		iaid:  rec.IAID,
+		ip:    rec.IP.String(),
+		query: `delete from leases6 where duid = ? and iaid = ? and ip = ?`,
+		args:  []any{rec.DUID, iaidValue(rec.IAID), rec.IP.String()},
+	}
+
+	p.write(w) // the row was never there; this must not panic or retry
+}
+
+// TestParseOptions covers parseOptions and the parsers it dispatches to for
+// max-leases, which nothing else in this file reaches directly.
+func TestParseOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		extra         []string
+		wantErrSub    string
+		wantMaxLeases int
+	}{
+		{
+			name:          "no extra arguments keeps the default",
+			wantMaxLeases: defaultMaxLeases,
+		},
+		{
+			name:          "max-leases is accepted",
+			extra:         []string{"max-leases:4096"},
+			wantMaxLeases: 4096,
+		},
+		{
+			name:          "max-leases of zero turns the bound off",
+			extra:         []string{"max-leases:0"},
+			wantMaxLeases: 0,
+		},
+		{
+			name:       "a negative max-leases is rejected",
+			extra:      []string{"max-leases:-1"},
+			wantErrSub: "cannot be negative",
+		},
+		{
+			name:       "a non-numeric max-leases is rejected",
+			extra:      []string{"max-leases:lots"},
+			wantErrSub: "invalid lease maximum",
+		},
+		{
+			name:       "max-leases given twice is rejected",
+			extra:      []string{"max-leases:10", "max-leases:20"},
+			wantErrSub: "max-leases given more than once",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseOptions(testLeaseTime, 100, tc.extra)
+			if tc.wantErrSub != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErrSub)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantMaxLeases, opts.maxLeases)
+		})
+	}
+}
+
+// TestBindingExpiryPast2038 is the regression test for a 32-bit build
+// truncating the expiry: a binding expiring well past 2038 must round-trip
+// through storage unchanged and must not read as expired before it actually
+// is.
+func TestBindingExpiryPast2038(t *testing.T) {
+	db, err := loadDB(t.Context(), ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	future := time.Date(2100, time.January, 1, 0, 0, 0, 0, time.UTC).Unix()
+	rec := &Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::100"), expires: future}
+
+	p := &pluginState{leasedb: db}
+	require.NoError(t, p.saveIPAddress(rec))
+
+	records, err := loadRecords(t.Context(), db)
+	require.NoError(t, err)
+	got, ok := records[rec.key()]
+	require.True(t, ok)
+	assert.Equal(t, future, got.expires)
+
+	clockIn2099 := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
+	assert.False(t, got.expired(clockIn2099), "a binding expiring in 2100 must not read as expired in 2099")
+}
+
+// TestEnqueueQueueFull covers enqueue's queue-full branch: the plugin lock is
+// held by the caller, so a slow writer must be reported back rather than
+// waited on.
+func TestEnqueueQueueFull(t *testing.T) {
+	p := &pluginState{writes: make(chan bindingWrite, 1)}
+	rec := &Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::100")}
+
+	require.NoError(t, p.saveIPAddress(rec), "the first write fills the one-deep queue")
+
+	err := p.saveIPAddress(rec)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrWriteQueueFull)
+
+	err = p.freeIPAddress(rec)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrWriteQueueFull)
+}
+
+// TestApplyWriteNotFound covers applyWrite's own ErrNotFound branch directly:
+// enqueue's inline path deliberately swallows that sentinel, so the sentinel
+// itself has to be pinned one level down.
+func TestApplyWriteNotFound(t *testing.T) {
+	db, err := loadDB(t.Context(), ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	p := &pluginState{leasedb: db}
+	rec := &Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::100")}
+	w := bindingWrite{
+		op:    "remove",
+		duid:  rec.DUID,
+		iaid:  rec.IAID,
+		ip:    rec.IP.String(),
+		query: `delete from leases6 where duid = ? and iaid = ? and ip = ?`,
+		args:  []any{rec.DUID, iaidValue(rec.IAID), rec.IP.String()},
+	}
+
+	err = p.applyWrite(w)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+// TestWriterFailureIsLoggedWithoutRetrying covers write's non-busy failure
+// path: a closed database fails every attempt with something other than
+// ErrBusy, so the writer logs it once and moves on instead of retrying.
+func TestWriterFailureIsLoggedWithoutRetrying(t *testing.T) {
+	db, err := loadDB(t.Context(), ":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	p := &pluginState{leasedb: db}
+	p.startWriter()
+
+	rec := &Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::100")}
+	require.NoError(t, p.saveIPAddress(rec))
+
+	p.stopWriter()
+}
+
+// TestWriterRetriesOnBusyThenGivesUp holds the write lock on a file through a
+// second connection so the writer's own write gets a real SQLITE_BUSY, and
+// checks it retries busyRetries times before giving up rather than hanging.
+func TestWriterRetriesOnBusyThenGivesUp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "leases6.db")
+	db1, err := loadDB(t.Context(), path) // holds the write lock
+	require.NoError(t, err)
+	db2, err := loadDB(t.Context(), path) // what the writer uses, and finds locked
+	require.NoError(t, err)
+
+	tx, err := db1.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	_, err = tx.ExecContext(t.Context(),
+		"insert into leases6(duid, iaid, ip, expiry, hostname) values (?, ?, ?, ?, ?)",
+		[]byte{0x01}, 1, "2001:db8:1::1", 0, "")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = tx.Rollback()
+		_ = db1.Close()
+		_ = db2.Close()
+	})
+
+	p := &pluginState{leasedb: db2}
+	p.startWriter()
+
+	rec := &Record{DUID: duidB, IAID: iaidX, IP: net.ParseIP("2001:db8:1::101")}
+	require.NoError(t, p.saveIPAddress(rec))
+
+	p.stopWriter()
 }

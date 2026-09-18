@@ -378,6 +378,21 @@ the next client into the same conflict. That quarantine is bounded by
 unauthenticated as a RELEASE: holding addresses back without a limit let two
 forged packets per address park an entire pool for the day.
 
+Both `range` and `range6` take `max-leases`, 65536 by default, which bounds
+how many leases one instance holds in memory and in its lease file. It
+matters most on DHCPv6, where a pool can be a /96 and a client can rotate its
+DUID for free: without a bound, every fresh DUID and IAID pair costs a map
+entry and a database row until it expires. A pool with room for more than the
+bound needs it raised, and `max-leases:0` turns it off.
+
+Both plugins write their lease file through a goroutine of their own, so the
+plugin lock is not held across a sqlite write: a slow disk costs queue depth
+instead of blocking every other client and the lease API behind one insert. A
+lease reaches the file a moment after the packet it answered, which is what a
+reader of that file has to expect. The hostname a client sends is filtered
+and cut to 255 bytes before it is stored, because option 12 can arrive as
+tens of kilobytes.
+
 The `file` plugin no longer stamps its static reservation onto a RELEASE or
 DECLINE, and `server_id` decides whether a DHCPv4 request is addressed to
 this server by option 54 rather than by `siaddr`, so two servers on one

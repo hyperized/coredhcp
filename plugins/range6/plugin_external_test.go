@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/coredhcp/coredhcp/handler"
+	"github.com/coredhcp/coredhcp/leases"
 	"github.com/coredhcp/coredhcp/logger"
 
 	// The "sqlite" driver is registered by range6's own storage.go import,
@@ -47,10 +48,10 @@ func TestMain(m *testing.M) {
 // setupPlugin builds a plugin instance over a fresh database in the test's
 // temp dir.
 //
-// Every instance gets a sweep interval far longer than a test run. Setup6
-// starts the background sweeper and nothing in the public API can stop it, so
-// the black-box tests rely on it never ticking; the timing of reclamation
-// itself is tested against the clock seam in plugin_internal_test.go.
+// Every instance gets a sweep interval far longer than a test run, so the
+// black-box tests rely on the sweeper never ticking; the timing of
+// reclamation itself is tested against the clock seam in
+// plugin_internal_test.go.
 func setupPlugin(t *testing.T) handler.Handler6 {
 	t.Helper()
 	return setupPool(t, poolLast)
@@ -71,7 +72,36 @@ func setupPoolAt(t *testing.T, db, last string, opts ...string) handler.Handler6
 	h, err := range6.Plugin.Setup6(args...)
 	require.NoError(t, err)
 	require.NotNil(t, h)
+	closeAfter(t, "range6 "+db)
 	return h
+}
+
+// closeAfter shuts down the instance setup just registered, at the end of the
+// test.
+//
+// Setup leaves a sweeper and a writer running and nothing in the public API
+// returns the instance, so a test reaches it the way any consumer does,
+// through the leases registry. Without this the writer is still touching the
+// lease file when the framework removes the temp directory around it, which
+// fails the test over a directory that would not empty.
+func closeAfter(t *testing.T, name string) {
+	t.Helper()
+	sources := leases.Sources()
+	// Newest first: two instances over one lease file report the same name.
+	for i := len(sources) - 1; i >= 0; i-- {
+		src := sources[i]
+		if src.Name() != name {
+			continue
+		}
+		closer, ok := src.(interface{ Close() })
+		require.True(t, ok, "the registered source must be the plugin instance")
+		t.Cleanup(func() {
+			leases.Unregister(src)
+			closer.Close()
+		})
+		return
+	}
+	t.Fatalf("no source registered as %q", name)
 }
 
 // testDUID builds a link-layer DUID, distinct per id so one test can drive
@@ -227,10 +257,12 @@ func TestSetupAcceptsOptionsInAnyOrder(t *testing.T) {
 	}
 	for _, extra := range cases {
 		t.Run(strings(extra), func(t *testing.T) {
-			args := append([]string{filepath.Join(t.TempDir(), "leases6.sqlite3"), poolFirst, poolLast, leaseTime}, extra...)
+			dbPath := filepath.Join(t.TempDir(), "leases6.sqlite3")
+			args := append([]string{dbPath, poolFirst, poolLast, leaseTime}, extra...)
 			h, err := range6.Plugin.Setup6(args...)
 			require.NoError(t, err)
 			assert.NotNil(t, h)
+			closeAfter(t, "range6 "+dbPath)
 		})
 	}
 }
@@ -654,6 +686,7 @@ func TestBindingsSurviveARestart(t *testing.T) {
 
 	first := setupPoolAt(t, dbPath, "2001:db8:1::101")
 	held := solicit(t, first, duid, iaid1)
+	waitForRows(t, dbPath, 1)
 
 	second := setupPoolAt(t, dbPath, "2001:db8:1::101")
 	assert.Equal(t, held.String(), solicit(t, second, duid, iaid1).String())
@@ -671,6 +704,7 @@ func TestStoredHostnameIsSanitised(t *testing.T) {
 	dhcpv6.WithFQDN(0, "lap top;drop\x00.example")(req)
 	resp, _ := exchange(t, h, req)
 	require.NotNil(t, resp)
+	waitForRows(t, dbPath, 1)
 
 	db, err := sql.Open("sqlite", "file:"+dbPath)
 	require.NoError(t, err)
@@ -680,6 +714,27 @@ func TestStoredHostnameIsSanitised(t *testing.T) {
 	require.NoError(t, db.QueryRow("select ip, hostname from leases6").Scan(&ip, &hostname))
 	assert.Equal(t, leasedAddress(t, resp, iaid1).String(), ip)
 	assert.Equal(t, "laptopdrop.example", hostname)
+}
+
+// waitForRows blocks until the lease table holds want rows.
+//
+// The plugin writes through a goroutine of its own, so the row for a binding
+// it has already answered lands a moment later. A test reading the file, and
+// an operator doing the same, has to wait for the writer rather than assume
+// the disk is in step with the packet it just saw answered.
+func waitForRows(t *testing.T, path string, want int) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	require.Eventually(t, func() bool {
+		var n int
+		if err := db.QueryRow("select count(*) from leases6").Scan(&n); err != nil {
+			return false
+		}
+		return n == want
+	}, 5*time.Second, time.Millisecond, "the writer must put %d binding(s) on disk", want)
 }
 
 // seedDB writes rows straight into the lease table, bypassing every check the
@@ -734,4 +789,33 @@ func TestSetupRestoresAStoredBinding(t *testing.T) {
 
 	h := setupPoolAt(t, dbPath, poolLast)
 	assert.Equal(t, "2001:db8:1::110", solicit(t, h, duid, iaid1).String())
+}
+
+// TestSetupWarnsWhenPoolExceedsMaxLeases drives setup6's over-sized-pool
+// warning: a pool wider than max-leases still has to set up successfully, it
+// simply never hands out more bindings than the bound allows.
+func TestSetupWarnsWhenPoolExceedsMaxLeases(t *testing.T) {
+	h := setupPool(t, poolLast, "max-leases:4")
+	assert.NotNil(t, h)
+}
+
+// TestMaxLeasesBoundsNewClientsButKeepsRenewing is the regression test for the
+// audit finding that max-leases did nothing: once the bound is reached a
+// fresh DUID gets NoAddrsAvail, while a DUID that already holds a binding
+// keeps renewing it.
+func TestMaxLeasesBoundsNewClientsButKeepsRenewing(t *testing.T) {
+	h := setupPool(t, poolLast, "max-leases:2")
+
+	first := solicit(t, h, testDUID(1), iaid1)
+	second := solicit(t, h, testDUID(2), iaid1)
+	assert.NotEqual(t, first.String(), second.String())
+
+	resp, _ := exchange(t, h, newRequest(t, dhcpv6.MessageTypeSolicit, testDUID(3), newIANA(iaid1)))
+	require.NotNil(t, resp)
+	assertStatus(t, resp, iaid1, dhcpIana.StatusNoAddrsAvail)
+
+	renewed, _ := exchange(t, h, newRequest(t, dhcpv6.MessageTypeRenew, testDUID(1), newIANA(iaid1, first)))
+	require.NotNil(t, renewed)
+	assert.Equal(t, first.String(), leasedAddress(t, renewed, iaid1).String(),
+		"a binding that already exists must keep renewing once the table is full")
 }
