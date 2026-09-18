@@ -8,11 +8,15 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/coredhcp/coredhcp/logger"
 )
 
 // These two cases substitute the fsnotifyNewWatcher/watcherAdd seams to
@@ -49,6 +53,154 @@ func TestSetupFileWatcherAddError(t *testing.T) {
 	_, _, err := setupFile(false, path, autoRefreshArg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to watch")
+}
+
+// newWatchLoopHarness starts s.watchLoop against a bare fsnotify.Watcher
+// value that holds only its own Events and Errors channels, with no real
+// backend goroutine running behind it: the test drives the loop entirely by
+// sending into those two exported fields itself. A real watcher's own
+// backend goroutine can also write to them (fsnotify's macOS backend does,
+// even against a directory the test never touches), which races with our
+// sends on the same channel, so the fields are built directly instead of
+// going through fsnotify.NewWatcher. watchLoop only ever reads these two
+// channels, so it cannot tell the difference. The goroutine's exit is
+// checked during cleanup so no test leaves it running.
+func newWatchLoopHarness(t *testing.T, s *pluginState, filename string) *fsnotify.Watcher {
+	t.Helper()
+	w := &fsnotify.Watcher{Events: make(chan fsnotify.Event), Errors: make(chan error)}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.watchLoop(false, filename, w)
+	}()
+
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("watchLoop goroutine did not return after its channels closed")
+		}
+	})
+	t.Cleanup(func() {
+		close(w.Events)
+		close(w.Errors)
+	})
+
+	return w
+}
+
+// TestWatchLoop drives watchLoop directly through a fsnotify.Watcher's
+// exported channels, giving deterministic tests with no filesystem races.
+func TestWatchLoop(t *testing.T) {
+	// Regression test for defect (a): the old loop only ranged over
+	// watcher.Events and never read watcher.Errors. Errors is unbuffered, so
+	// the first error would then block fsnotify's own writer forever and
+	// autorefresh would stop dead with no warning at all. Here the send on
+	// Errors must complete promptly, and a later event must still cause a
+	// reload.
+	t.Run("an error is drained without blocking and a later event still reloads", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "leases.txt")
+		require.NoError(t, os.WriteFile(path, []byte("aa:11:22:33:44:55 192.0.2.1\n"), 0o600))
+
+		logPath := filepath.Join(dir, "watchloop.log")
+		require.NoError(t, logger.WithFile(logPath))
+		t.Cleanup(func() { _ = logger.WithFile(os.DevNull) })
+
+		s := &pluginState{mode: keyMAC}
+		w := newWatchLoopHarness(t, s, path)
+
+		sent := make(chan struct{})
+		go func() {
+			w.Errors <- errors.New("simulated queue overflow")
+			close(sent)
+		}()
+		select {
+		case <-sent:
+		case <-time.After(2 * time.Second):
+			t.Fatal("send on watcher.Errors blocked: the loop is not draining the error channel")
+		}
+
+		require.Eventually(t, func() bool {
+			data, err := os.ReadFile(logPath)
+			return err == nil && strings.Contains(string(data), "watcher error for")
+		}, time.Second, 10*time.Millisecond, "expected the watcher error to be logged")
+		require.Eventually(t, func() bool { return s.numRecords() == 1 }, time.Second, 10*time.Millisecond,
+			"an error must also trigger a reload")
+
+		// Rewrite the file and confirm a later event reloads it too, rather
+		// than the loop having gotten stuck after handling the error.
+		require.NoError(t, os.WriteFile(path,
+			[]byte("aa:11:22:33:44:55 192.0.2.1\naa:11:22:33:44:66 192.0.2.2\n"), 0o600))
+		w.Events <- fsnotify.Event{Name: path, Op: fsnotify.Write}
+		require.Eventually(t, func() bool { return s.numRecords() == 2 }, time.Second, 10*time.Millisecond,
+			"an event delivered after the error must still cause a reload")
+	})
+
+	// Watching the directory means every file in it is reported, so an event
+	// for anything other than the watched name must be filtered out.
+	t.Run("an event for a different file in the same directory is ignored", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "leases.txt")
+		require.NoError(t, os.WriteFile(path, []byte("aa:11:22:33:44:55 192.0.2.1\n"), 0o600))
+
+		s := &pluginState{mode: keyMAC}
+		w := newWatchLoopHarness(t, s, path)
+
+		w.Events <- fsnotify.Event{Name: filepath.Join(dir, "other.txt"), Op: fsnotify.Write}
+		require.Never(t, func() bool { return s.numRecords() != 0 }, 200*time.Millisecond, 10*time.Millisecond,
+			"an event for another file must not trigger a reload")
+
+		w.Events <- fsnotify.Event{Name: path, Op: fsnotify.Write}
+		require.Eventually(t, func() bool { return s.numRecords() == 1 }, time.Second, 10*time.Millisecond,
+			"the loop must still react to the watched file after ignoring another one")
+	})
+
+	t.Run("an event for the watched file causes a reload", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "leases.txt")
+		require.NoError(t, os.WriteFile(path, []byte("aa:11:22:33:44:55 192.0.2.1\n"), 0o600))
+
+		s := &pluginState{mode: keyMAC}
+		w := newWatchLoopHarness(t, s, path)
+
+		w.Events <- fsnotify.Event{Name: path, Op: fsnotify.Write}
+		require.Eventually(t, func() bool { return s.numRecords() == 1 }, time.Second, 10*time.Millisecond,
+			"an event for the watched file must trigger a reload")
+	})
+
+	// fsnotify closes both channels when the watcher shuts down. Without the
+	// two-value receive form, a select on a closed channel spins at 100% CPU
+	// instead of returning, leaking the goroutine. Each channel is closed on
+	// its own here (rather than both at once) so the select can't skip
+	// either return by picking the other ready case.
+	for _, tc := range []struct {
+		name  string
+		close func(w *fsnotify.Watcher)
+	}{
+		{"closing Events makes the loop return", func(w *fsnotify.Watcher) { close(w.Events) }},
+		{"closing Errors makes the loop return", func(w *fsnotify.Watcher) { close(w.Errors) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &pluginState{mode: keyMAC}
+			path := filepath.Join(t.TempDir(), "leases.txt")
+			w := &fsnotify.Watcher{Events: make(chan fsnotify.Event), Errors: make(chan error)}
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				s.watchLoop(false, path, w)
+			}()
+
+			tc.close(w)
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("watchLoop did not return after its channel closed")
+			}
+		})
+	}
 }
 
 // TestParseArgs covers the config-line grammar directly: the required file

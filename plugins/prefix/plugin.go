@@ -41,6 +41,11 @@
 // datagram, at which point the reply grew too large to send and the sender
 // paid nothing at all.
 //
+// The same cap applies inside one IA_PD, to the IAPrefix hints it carries.
+// A hint that matches a lease the client already holds is renewed and
+// answered with a prefix, so one IA_PD repeating the same hint enough times
+// grew the reply the same way, one level down.
+//
 // One client, meaning one DUID, holds at most max-prefixes delegations. An
 // IA_PD that would take it past that is answered with NoPrefixAvail rather
 // than served, which is the same answer an exhausted pool gives.
@@ -111,6 +116,13 @@ const (
 	// for. Eight is more than any client legitimately asks for in one go, and
 	// low enough that the reply still fits in a datagram.
 	maxIAPDsPerMessage = 8
+
+	// maxHintsPerIAPD caps how many IAPrefix hints inside one IA_PD are
+	// considered. It is deliberately the same number as maxIAPDsPerMessage:
+	// a hint matching a lease the client already holds gets renewed and
+	// added to the reply, so an uncapped IA_PD could be made to grow the
+	// reply the same way an uncapped message could, just one option deeper.
+	maxHintsPerIAPD = maxIAPDsPerMessage
 
 	// maxDUIDLength is the longest client DUID this plugin will key its lease
 	// map on: the 128 octets RFC 8415 §11.1 allows, plus the two-octet type
@@ -434,7 +446,8 @@ func (h *pluginState) respondToIAPD(client dhcpv6.DUID, iapd *dhcpv6.OptIAPD) *d
 	return iapdResp
 }
 
-// requestedPrefixes returns the prefixes the client hints at in one IA_PD.
+// requestedPrefixes returns the prefixes the client hints at in one IA_PD, at
+// most maxHintsPerIAPD of them.
 // An IA_PD without any IAPrefix is still a valid request (just unspecified) and
 // we must attempt to allocate a prefix for it, so it gets a single empty hint,
 // which is equivalent to no hint. A hint whose prefix is absent on the wire
@@ -445,6 +458,10 @@ func requestedPrefixes(iapd *dhcpv6.OptIAPD) []*dhcpv6.OptIAPrefix {
 	hints := iapd.Options.Prefixes()
 	if len(hints) == 0 {
 		return []*dhcpv6.OptIAPrefix{{Prefix: &net.IPNet{}}}
+	}
+	if len(hints) > maxHintsPerIAPD {
+		log.Debugf("Ignoring %d IAPrefix hint(s) past the first %d in IA_PD %x", len(hints)-maxHintsPerIAPD, maxHintsPerIAPD, iapd.IaId)
+		hints = hints[:maxHintsPerIAPD]
 	}
 	for _, hint := range hints {
 		if hint.Prefix == nil {

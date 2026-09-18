@@ -89,6 +89,36 @@ func TestHandler6ParamsRequestedAndConfigured(t *testing.T) {
 	assert.Equal(t, "console=ttyS0", string(paramOpt.ToBytes()))
 }
 
+// TestHandler6RepeatedORODoesNotDuplicateOptions pins a regression: the ORO
+// is written by the client, and a Solicit that repeated a requested code
+// thousands of times used to add that many copies of the option to the
+// response, turning a small request into a multi-megabyte reply.
+func TestHandler6RepeatedORODoesNotDuplicateOptions(t *testing.T) {
+	handler, err := nbp.Plugin.Setup6("http://[2001:db8::1]/nbp?params=console=ttyS0")
+	require.NoError(t, err)
+
+	const repeats = 4000
+	codes := make([]dhcpv6.OptionCode, 0, repeats*2)
+	for i := 0; i < repeats; i++ {
+		codes = append(codes, dhcpv6.OptionBootfileURL, dhcpv6.OptionBootfileParam)
+	}
+
+	req, err := dhcpv6.NewMessage()
+	require.NoError(t, err)
+	req.AddOption(dhcpv6.OptRequestedOption(codes...))
+	stub, err := dhcpv6.NewMessage()
+	require.NoError(t, err)
+
+	resp, stop := handler(req, stub)
+	require.NotNil(t, resp)
+	assert.True(t, stop)
+
+	// Get, not GetOne: a duplicate would still pass GetOne since it only
+	// looks at the first match.
+	assert.Len(t, resp.(*dhcpv6.Message).Options.Get(dhcpv6.OptionBootfileURL), 1)
+	assert.Len(t, resp.(*dhcpv6.Message).Options.Get(dhcpv6.OptionBootfileParam), 1)
+}
+
 func TestHandler6DecapsulateError(t *testing.T) {
 	handler, err := nbp.Plugin.Setup6("http://[2001:db8::1]/nbp")
 	require.NoError(t, err)

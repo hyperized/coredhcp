@@ -310,8 +310,9 @@ This fork adds fifteen plugins upstream does not have built in:
   came in on rather than by the client that sent it, keyed on the circuit-id,
   remote-id or subscriber-id in option 82 or on the DHCPv6 relay's
   interface-id or remote-id, from a file the operator can have reloaded on
-  change; the package doc is blunt that it needs a relay allow list in front
-  of it
+  change; a required `allow` list of relay addresses, spelled the way the
+  `relay` plugin spells it, decides whose relay information is believed, and
+  a request from any other source is dropped before the mapping is read
 * [bootfile](plugins/bootfile/) serves a different network boot program per
   client architecture, so BIOS, UEFI and HTTP boot machines on one network
   each get a file they can run, with an `ipxe=` entry for clients that have

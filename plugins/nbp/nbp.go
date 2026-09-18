@@ -115,19 +115,20 @@ func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 		// drop the request, this is probably a critical error in the packet.
 		return nil, true
 	}
-	for _, code := range decap.Options.RequestedOptions() {
-		switch code {
-		case dhcpv6.OptionBootfileURL:
-			// bootfile URL is requested
-			resp.AddOption(p.opt59)
-		case dhcpv6.OptionBootfileParam:
-			// optionally add opt60, bootfile params, if requested
-			if p.opt60 != nil {
-				resp.AddOption(p.opt60)
-			}
-		}
+	// Read the ORO once: a client can repeat a code in it, and checking
+	// Contains per code (rather than looping over every entry) means a
+	// repeated code still adds the option once instead of once per repeat.
+	requested := decap.Options.RequestedOptions()
+	if requested.Contains(dhcpv6.OptionBootfileURL) {
+		// bootfile URL is requested
+		resp.UpdateOption(p.opt59)
+		log.Debugf("Added NBP %s to request", p.opt59)
 	}
-	log.Debugf("Added NBP %s to request", p.opt59)
+	if p.opt60 != nil && requested.Contains(dhcpv6.OptionBootfileParam) {
+		// bootfile params are requested and configured
+		resp.UpdateOption(p.opt60)
+		log.Debugf("Added NBP %s to request", p.opt60)
+	}
 	return resp, true
 }
 
