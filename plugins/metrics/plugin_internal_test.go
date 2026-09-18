@@ -19,6 +19,8 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/coredhcp/coredhcp/plugins/internal/endpoint"
 )
 
 // ResetRegistry stops every listener started so far and empties the
@@ -67,42 +69,22 @@ func TestSanitizeLabelValue(t *testing.T) {
 	}
 }
 
-func TestListenAddr(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		args    []string
-		want    string
-		wantErr string
-	}{
-		{name: "no args", args: nil, wantErr: "expected exactly one argument"},
-		{name: "two args", args: []string{"127.0.0.1:9754", "extra"}, wantErr: "expected exactly one argument"},
-		{name: "missing port", args: []string{"127.0.0.1"}, wantErr: "invalid listen address"},
-		{name: "not an address", args: []string{"nonsense"}, wantErr: "invalid listen address"},
-		{name: "host and port", args: []string{"127.0.0.1:9754"}, want: "127.0.0.1:9754"},
-		{name: "port only", args: []string{":9754"}, want: ":9754"},
-		{name: "surrounding whitespace is trimmed", args: []string{"  127.0.0.1:9754\t"}, want: "127.0.0.1:9754"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := listenAddr(tc.args)
-			if tc.wantErr != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.wantErr)
-				assert.Empty(t, got)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tc.want, got)
-		})
-	}
+// testEndpoint parses an address the way setup does, for the tests that drive
+// obtain and newCollector directly.
+func testEndpoint(t *testing.T, addr string) endpoint.Endpoint {
+	t.Helper()
+	e, err := endpoint.Parse(pluginName, []string{addr}, endpoint.AllowBareTCP())
+	require.NoError(t, err)
+	return e
 }
 
 func TestObtain(t *testing.T) {
 	t.Run("same address returns the same collector", func(t *testing.T) {
 		ResetRegistry(t)
 
-		first, err := obtain("127.0.0.1:0")
+		first, err := obtain(testEndpoint(t, "127.0.0.1:0"))
 		require.NoError(t, err)
-		second, err := obtain("127.0.0.1:0")
+		second, err := obtain(testEndpoint(t, "127.0.0.1:0"))
 		require.NoError(t, err)
 		assert.Same(t, first, second)
 		assert.Len(t, registry.listeners, 1)
@@ -111,11 +93,11 @@ func TestObtain(t *testing.T) {
 	t.Run("a second address is a setup error naming both", func(t *testing.T) {
 		ResetRegistry(t)
 
-		c, err := obtain("127.0.0.1:0")
+		c, err := obtain(testEndpoint(t, "127.0.0.1:0"))
 		require.NoError(t, err)
 		running := c.ln.Addr().String()
 
-		_, err = obtain("127.0.0.2:9754")
+		_, err = obtain(testEndpoint(t, "127.0.0.2:9754"))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "127.0.0.1:0")
 		assert.Contains(t, err.Error(), "127.0.0.2:9754")
@@ -127,7 +109,11 @@ func TestObtain(t *testing.T) {
 	t.Run("bind failure is a setup error", func(t *testing.T) {
 		ResetRegistry(t)
 
-		_, err := obtain("127.0.0.1:not-a-port")
+		taken, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = taken.Close() })
+
+		_, err = obtain(testEndpoint(t, taken.Addr().String()))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot listen on")
 		assert.Empty(t, registry.listeners)
@@ -293,7 +279,7 @@ func TestServeMetricsWriteFailure(t *testing.T) {
 }
 
 func TestServeLoopLogsAListenerFailure(t *testing.T) {
-	c, err := newCollector("127.0.0.1:0")
+	c, err := newCollector(testEndpoint(t, "127.0.0.1:0"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.srv.Close() })
 

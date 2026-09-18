@@ -5,9 +5,12 @@
 package metrics_test
 
 import (
+	"context"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -42,10 +45,15 @@ func TestSetup4ArgumentValidation(t *testing.T) {
 		args    []string
 		wantErr string
 	}{
-		{name: "zero args", args: nil, wantErr: "expected exactly one argument"},
-		{name: "two args", args: []string{"127.0.0.1:9754", "extra"}, wantErr: "expected exactly one argument"},
-		{name: "address with no port", args: []string{"127.0.0.1"}, wantErr: "invalid listen address"},
-		{name: "garbage address", args: []string{"nonsense"}, wantErr: "invalid listen address"},
+		{name: "zero args", args: nil, wantErr: "expected one or two arguments"},
+		{name: "three args", args: []string{"127.0.0.1:9754", "mode:0660", "extra"}, wantErr: "expected one or two arguments"},
+		{name: "an unknown second argument", args: []string{"127.0.0.1:9754", "extra"}, wantErr: "unexpected argument"},
+		{name: "address with no port", args: []string{"127.0.0.1"}, wantErr: "invalid address"},
+		{name: "garbage address", args: []string{"nonsense"}, wantErr: "invalid address"},
+		{name: "a mode on a tcp address", args: []string{"127.0.0.1:9754", "mode:0660"}, wantErr: "applies to a unix socket"},
+		{name: "the wildcard address", args: []string{"0.0.0.0:9754"}, wantErr: "not a loopback address"},
+		{name: "a port on its own", args: []string{":9754"}, wantErr: "not a loopback address"},
+		{name: "a routable address", args: []string{"192.0.2.1:9754"}, wantErr: "not a loopback address"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, err := metrics.Plugin.Setup4(tc.args...)
@@ -64,10 +72,15 @@ func TestSetup6ArgumentValidation(t *testing.T) {
 		args    []string
 		wantErr string
 	}{
-		{name: "zero args", args: nil, wantErr: "expected exactly one argument"},
-		{name: "two args", args: []string{"127.0.0.1:9754", "extra"}, wantErr: "expected exactly one argument"},
-		{name: "address with no port", args: []string{"127.0.0.1"}, wantErr: "invalid listen address"},
-		{name: "garbage address", args: []string{"nonsense"}, wantErr: "invalid listen address"},
+		{name: "zero args", args: nil, wantErr: "expected one or two arguments"},
+		{name: "three args", args: []string{"127.0.0.1:9754", "mode:0660", "extra"}, wantErr: "expected one or two arguments"},
+		{name: "an unknown second argument", args: []string{"127.0.0.1:9754", "extra"}, wantErr: "unexpected argument"},
+		{name: "address with no port", args: []string{"127.0.0.1"}, wantErr: "invalid address"},
+		{name: "garbage address", args: []string{"nonsense"}, wantErr: "invalid address"},
+		{name: "a mode on a tcp address", args: []string{"127.0.0.1:9754", "mode:0660"}, wantErr: "applies to a unix socket"},
+		{name: "the wildcard address", args: []string{"0.0.0.0:9754"}, wantErr: "not a loopback address"},
+		{name: "a port on its own", args: []string{":9754"}, wantErr: "not a loopback address"},
+		{name: "a routable address", args: []string{"192.0.2.1:9754"}, wantErr: "not a loopback address"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, err := metrics.Plugin.Setup6(tc.args...)
@@ -222,4 +235,56 @@ func TestMethodAndPathRejection(t *testing.T) {
 
 		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	})
+}
+
+func TestTCPSchemeAndBareAddressAreTheSameEndpoint(t *testing.T) {
+	metrics.ResetRegistry(t)
+	addr := freeAddr(t)
+
+	_, err := metrics.Plugin.Setup4("tcp:" + addr)
+	require.NoError(t, err)
+
+	// The bare form parses to the same endpoint, so the second server
+	// section finds the listener the first one started rather than being
+	// refused as a second address.
+	_, err = metrics.Plugin.Setup6(addr)
+	require.NoError(t, err)
+}
+
+func TestUnixSocketEndpoint(t *testing.T) {
+	metrics.ResetRegistry(t)
+
+	// Not t.TempDir: it names the directory after the test, and a unix
+	// socket path is limited to 104 bytes on darwin.
+	dir, err := os.MkdirTemp("", "cdhcp")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "m.sock")
+
+	_, err = metrics.Plugin.Setup4("unix:"+path, "mode:0660")
+	require.NoError(t, err)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o660), info.Mode().Perm())
+
+	// The host in the URL goes nowhere: the dialer decides where the request
+	// lands, which is how a scraper reads a socket endpoint.
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", path)
+			},
+		},
+	}
+	resp, err := client.Get("http://metrics.invalid/metrics")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "coredhcp_build_info")
 }

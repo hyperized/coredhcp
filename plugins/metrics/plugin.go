@@ -16,10 +16,20 @@
 // independently, once per server section in config.yml, but operators expect a
 // single scrape endpoint covering both families. The registry is what lets the
 // two calls share one listener and one set of counters.
+//
+// # Where it may listen
+//
+// A unix socket or a loopback port, and nothing else. The rules are shared
+// with the leaseapi plugin through the endpoint package: an exposition says
+// how much traffic the server sees and of what kind, and there is no
+// authentication to put in front of it. An operator who wants the endpoint
+// reachable from elsewhere puts a reverse proxy in front of it and
+// authenticates there, or lets the scraper read the unix socket.
 package metrics
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -37,17 +47,30 @@ import (
 	"github.com/coredhcp/coredhcp/handler"
 	"github.com/coredhcp/coredhcp/logger"
 	"github.com/coredhcp/coredhcp/plugins"
+	"github.com/coredhcp/coredhcp/plugins/internal/endpoint"
 )
 
 var log = logger.GetLogger("plugins/metrics")
 
+// pluginName is what the plugin is called in config.yml and what every error
+// this package returns is prefixed with.
+const pluginName = "metrics"
+
 // Plugin wraps the metrics plugin information.
 //
-// The plugin takes one argument, the address its HTTP listener binds to:
+// The plugin takes the address its HTTP listener binds to, and for a unix
+// socket an optional mode:
 //
 //	server4:
 //	  plugins:
 //	    - metrics: 127.0.0.1:9754
+//	    - metrics: tcp:127.0.0.1:9754
+//	    - metrics: unix:/run/coredhcp/metrics.sock mode:0660
+//
+// The bare host:port is the form this plugin has always taken and means what
+// the tcp: one means. The host has to be a loopback address either way, so a
+// configuration that binds the wildcard address finds out at startup rather
+// than by being scraped from the next subnet over.
 //
 // Both handlers only count and hand the response straight on, so list
 // `metrics` first in each plugin section. Any plugin ahead of it that stops the
@@ -58,7 +81,7 @@ var log = logger.GetLogger("plugins/metrics")
 // setup error: there is a single set of counters, so a second endpoint would
 // only duplicate the first.
 var Plugin = plugins.Plugin{
-	Name:   "metrics",
+	Name:   pluginName,
 	Setup6: setup6,
 	Setup4: setup4,
 }
@@ -148,59 +171,46 @@ func setup6(args ...string) (handler.Handler6, error) {
 // setup validates the plugin arguments and returns the collector to count into,
 // starting the HTTP listener if this is the first setup for that address.
 func setup(args []string) (*collector, error) {
-	addr, err := listenAddr(args)
+	// AllowBareTCP keeps every configuration written before a scheme was an
+	// option working: "127.0.0.1:9754" is read as a tcp address. The
+	// loopback rule applies to it all the same.
+	e, err := endpoint.Parse(pluginName, args, endpoint.AllowBareTCP())
 	if err != nil {
 		return nil, err
 	}
-	return obtain(addr)
+	return obtain(e)
 }
 
-// listenAddr validates the plugin's single argument, a host:port listen address
-// such as "127.0.0.1:9754" or ":9754".
-//
-// The syntax check is not redundant with the bind that follows: it names the
-// offending argument, where net.Listen would report a parse failure that reads
-// like a network problem.
-func listenAddr(args []string) (string, error) {
-	if len(args) != 1 {
-		return "", fmt.Errorf("metrics: expected exactly one argument, a listen address, got %d", len(args))
-	}
-	addr := strings.TrimSpace(args[0])
-	if _, _, err := net.SplitHostPort(addr); err != nil {
-		return "", fmt.Errorf("metrics: invalid listen address %q: %w", addr, err)
-	}
-	return addr, nil
-}
-
-// obtain returns the collector for addr, starting a listener the first time the
+// obtain returns the collector for e, starting a listener the first time the
 // address is seen.
 //
 // One address per process is the whole contract: a second server section either
 // names the same address, and shares the listener, or the configuration asks
 // for two endpoints over one set of counters, which is a mistake worth failing
 // on at startup rather than resolving silently.
-func obtain(addr string) (*collector, error) {
+func obtain(e endpoint.Endpoint) (*collector, error) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 
-	if c, ok := registry.listeners[addr]; ok {
+	key := e.Key()
+	if c, ok := registry.listeners[key]; ok {
 		return c, nil
 	}
 	for running := range registry.listeners {
 		// The map holds at most one entry, so this loop reads the address
 		// already bound and returns; see the doc comment above.
-		return nil, fmt.Errorf("metrics: already listening on %s, refusing to also listen on %s", running, addr)
+		return nil, fmt.Errorf("%s: already listening on %s, refusing to also listen on %s", pluginName, running, key)
 	}
-	c, err := newCollector(addr)
+	c, err := newCollector(e)
 	if err != nil {
 		return nil, err
 	}
-	registry.listeners[addr] = c
+	registry.listeners[key] = c
 	return c, nil
 }
 
-// newCollector binds addr and starts serving the exposition on it.
-func newCollector(addr string) (*collector, error) {
+// newCollector binds e and starts serving the exposition on it.
+func newCollector(e endpoint.Endpoint) (*collector, error) {
 	c := &collector{
 		done:     make(chan struct{}),
 		requests: make(map[requestKey]*atomic.Uint64),
@@ -220,9 +230,15 @@ func newCollector(addr string) (*collector, error) {
 
 	// Bind synchronously so an occupied port fails the setup and the server
 	// refuses to start, rather than logging into the void a second later.
-	ln, err := net.Listen("tcp", addr)
+	//
+	// The context is Background because there is nothing else to pass: a
+	// setup function takes its arguments and nothing more, and the
+	// context-aware form of it changes what the handler is given, not what
+	// setup is. Listen puts its own deadline on top, so a bind that cannot
+	// finish fails the startup instead of holding it.
+	ln, err := e.Listen(context.Background())
 	if err != nil {
-		return nil, fmt.Errorf("metrics: cannot listen on %s: %w", addr, err)
+		return nil, err
 	}
 	c.ln = ln
 
@@ -235,10 +251,13 @@ func newCollector(addr string) (*collector, error) {
 	go func() {
 		defer close(c.done)
 		if err := c.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Errorf("metrics listener on %s stopped: %v", addr, err)
+			log.Errorf("metrics listener on %s stopped: %v", e.Key(), err)
 		}
 	}()
-	log.Infof("serving metrics on http://%s/metrics", ln.Addr())
+	// The bound address rather than the configured one: port 0 resolves to
+	// whatever the kernel handed out, and that is the number an operator has
+	// to point a scraper at.
+	log.Infof("serving metrics on %s:%s at /metrics (%s)", ln.Addr().Network(), ln.Addr(), e.Guard())
 	return c, nil
 }
 
