@@ -21,7 +21,7 @@ import (
 
 	flag "github.com/spf13/pflag"
 
-	"github.com/coredhcp/coredhcp/cmd/coredhcp-tui/tui"
+	"github.com/coredhcp/coredhcp/cmd/coredhcp-tui/internal/tui"
 	"github.com/coredhcp/coredhcp/config"
 	"github.com/coredhcp/coredhcp/events"
 	"github.com/coredhcp/coredhcp/logger"
@@ -170,7 +170,7 @@ func run(w io.Writer) error {
 	}
 	// register plugins
 	for _, plugin := range desiredPlugins {
-		if err := plugins.RegisterPlugin(plugin); err != nil {
+		if err = plugins.RegisterPlugin(plugin); err != nil {
 			// The plugin is not named here because the only error
 			// RegisterPlugin returns is for a nil entry, which has no name
 			// to read.

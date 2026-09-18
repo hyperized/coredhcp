@@ -5,7 +5,7 @@
 package tui
 
 import (
-	"sort"
+	"slices"
 	"strconv"
 	"time"
 	"unicode/utf8"
@@ -111,7 +111,7 @@ func chainLatency(traffic []events.Request) (median, top time.Duration, ok bool)
 		return 0, 0, false
 	}
 
-	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+	slices.Sort(durations)
 
 	return durations[len(durations)/2], durations[len(durations)-1], true
 }

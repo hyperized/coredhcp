@@ -418,7 +418,7 @@ func TestRunSignalStopsServerAndInterface(t *testing.T) {
 
 	select {
 	case err := <-errCh:
-		assert.NoError(t, err, "a shutdown we asked for is not a failure")
+		require.NoError(t, err, "a shutdown we asked for is not a failure")
 	case <-time.After(10 * time.Second):
 		t.Fatal("run() did not return after SIGTERM")
 	}

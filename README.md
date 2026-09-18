@@ -113,7 +113,7 @@ $ sudo ./bin/coredhcp-tui -c config.yml
 and `1` to `4` move focus, the arrow keys scroll, `c` clears the counters and
 `?` lists the keys. The lease table is read off the exchanges themselves, so it
 says what the server sent on the wire, not what a plugin stored; the details
-are in [cmd/coredhcp-tui/tui/](cmd/coredhcp-tui/tui/).
+are in [cmd/coredhcp-tui/internal/tui/](cmd/coredhcp-tui/internal/tui/).
 
 To look at it without a network to serve, `make demo` builds the binary into
 a container and puts it on a docker bridge with busybox clients that keep

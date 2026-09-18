@@ -124,7 +124,7 @@ func TestLineBufWriters(t *testing.T) {
 
 		l := newLine(10)
 		l.col(tagPlain, "hi", 0)
-		assert.Equal(t, "", l.String())
+		assert.Empty(t, l.String())
 	})
 
 	t.Run("col with no room left writes nothing", func(t *testing.T) {
@@ -132,7 +132,7 @@ func TestLineBufWriters(t *testing.T) {
 
 		l := newLine(0)
 		l.col(tagPlain, "hi", 5)
-		assert.Equal(t, "", l.String())
+		assert.Empty(t, l.String())
 	})
 
 	t.Run("col budget running out mid column", func(t *testing.T) {
@@ -157,7 +157,7 @@ func TestLineBufWriters(t *testing.T) {
 
 		l := newLine(10)
 		l.colRight(tagPlain, "42", 0)
-		assert.Equal(t, "", l.String())
+		assert.Empty(t, l.String())
 	})
 
 	t.Run("colRight with no room left writes nothing", func(t *testing.T) {
@@ -165,7 +165,7 @@ func TestLineBufWriters(t *testing.T) {
 
 		l := newLine(0)
 		l.colRight(tagPlain, "42", 5)
-		assert.Equal(t, "", l.String())
+		assert.Empty(t, l.String())
 	})
 
 	t.Run("space writes only what still fits", func(t *testing.T) {
@@ -182,7 +182,7 @@ func TestLineBufWriters(t *testing.T) {
 
 		l := newLine(5)
 		l.space(0)
-		assert.Equal(t, "", l.String())
+		assert.Empty(t, l.String())
 	})
 
 	t.Run("tag wraps text with the reset sequence", func(t *testing.T) {
@@ -216,7 +216,7 @@ func TestLineBufWriters(t *testing.T) {
 
 		l := newLine(0)
 		l.tail(tagPlain, "aa:bb:cc:dd:ee:ff")
-		assert.Equal(t, "", l.String())
+		assert.Empty(t, l.String())
 	})
 
 	t.Run("tail keeps the end when it does not fit", func(t *testing.T) {
@@ -241,7 +241,7 @@ func TestLineBufWriters(t *testing.T) {
 
 		l := newLine(10)
 		l.cell(0, func(b *lineBuf) { b.text(tagPlain, "ab") })
-		assert.Equal(t, "", l.String())
+		assert.Empty(t, l.String())
 	})
 
 	t.Run("cell with no room left writes nothing", func(t *testing.T) {
@@ -249,7 +249,7 @@ func TestLineBufWriters(t *testing.T) {
 
 		l := newLine(0)
 		l.cell(6, func(b *lineBuf) { b.text(tagPlain, "ab") })
-		assert.Equal(t, "", l.String())
+		assert.Empty(t, l.String())
 	})
 
 	t.Run("String returns the accumulated row", func(t *testing.T) {
@@ -417,7 +417,7 @@ func TestJoinAddrs(t *testing.T) {
 
 	t.Run("empty", func(t *testing.T) {
 		t.Parallel()
-		assert.Equal(t, "", joinAddrs(nil))
+		assert.Empty(t, joinAddrs(nil))
 	})
 
 	t.Run("one address", func(t *testing.T) {
@@ -439,12 +439,12 @@ func TestSparkline(t *testing.T) {
 
 	t.Run("empty values", func(t *testing.T) {
 		t.Parallel()
-		assert.Equal(t, "", sparkline(nil, 10, 5))
+		assert.Empty(t, sparkline(nil, 10, 5))
 	})
 
 	t.Run("zero width", func(t *testing.T) {
 		t.Parallel()
-		assert.Equal(t, "", sparkline([]uint32{1, 2}, 10, 0))
+		assert.Empty(t, sparkline([]uint32{1, 2}, 10, 0))
 	})
 
 	t.Run("zero peak renders the lowest step", func(t *testing.T) {
@@ -2099,12 +2099,47 @@ func TestRedactArg(t *testing.T) {
 }
 
 // TestRedactArgs pins that redactArgs joins its redacted arguments with a
-// space and returns the empty string for none.
+// space, returns the empty string for none, and runs both passes: the shapes
+// only config.RedactArgs knows, and the ones only the local pass knows.
 func TestRedactArgs(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, "", redactArgs(nil))
-	assert.Equal(t, "deny /etc/coredhcp/deny.txt", redactArgs([]string{"deny", "/etc/coredhcp/deny.txt"}))
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no arguments at all", nil, ""},
+		{"nothing worth hiding", []string{"deny", "/etc/coredhcp/deny.txt"}, "deny /etc/coredhcp/deny.txt"},
+		{"a prefixed password, which only config knows", []string{"password:hunter2"}, "password:***"},
+		{"a prefixed token, which only config knows", []string{"token:abc123"}, "token:***"},
+		{"a v2 NetBox token, which only config knows", []string{"nbt_deadbeef"}, "***"},
+		{"a 40 character NetBox token", []string{strings.Repeat("b", 40)}, "***"},
+		{"a 32 character hex key, which only the local pass knows", []string{strings.Repeat("a", 32)}, "***"},
+		{"an env reference survives both passes", []string{"env:REDIS_PASSWORD"}, "env:REDIS_PASSWORD"},
+		{"a password in a url's userinfo", []string{"redis://coredhcp:hunter2@10.0.0.9:6379"}, "redis://coredhcp:***@10.0.0.9:6379"},
+		{"the passes mix within one argument list", []string{"server", "password:hunter2", strings.Repeat("c", 32)}, "server password:*** ***"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, redactArgs(tc.args))
+		})
+	}
+}
+
+// TestRedactArgsLeavesTheCallerSliceAlone pins that the pane never edits the
+// arguments the model holds: it renders them every frame, so mutating them
+// once would stick.
+func TestRedactArgsLeavesTheCallerSliceAlone(t *testing.T) {
+	t.Parallel()
+
+	args := []string{"password:hunter2", strings.Repeat("a", 32)}
+
+	require.Equal(t, "password:*** ***", redactArgs(args))
+	assert.Equal(t, []string{"password:hunter2", strings.Repeat("a", 32)}, args)
 }
 
 // TestTaggedWidth pins the rune-counted width of a run of tagged pieces.
@@ -2199,7 +2234,7 @@ func TestListenerText(t *testing.T) {
 	}
 
 	assert.Equal(t, "0.0.0.0:67 (eth0), 127.0.0.1:67", listenerText(listeners, events.FamilyV4))
-	assert.Equal(t, "", listenerText(listeners, events.Family(99)))
+	assert.Empty(t, listenerText(listeners, events.Family(99)))
 }
 
 // TestChainLine pins a plugin's row, with the tallies pinned to the right

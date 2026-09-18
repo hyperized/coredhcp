@@ -7,21 +7,56 @@ run:
 linters:
   default: standard
   enable:
+    - bodyclose
+    - containedctx
     - copyloopvar
+    - durationcheck
+    - errchkjson
+    - errname
     - errorlint
+    - exhaustive
+    - exptostd
+    - fatcontext
+    - forcetypeassert
+    - gocheckcompilerdirectives
     - gocritic
     - gosec
+    - iface
+    - intrange
+    - makezero
+    - mirror
     - misspell
+    - modernize
+    - musttag
+    - nakedret
     - nilerr
+    - nilnesserr
+    - nilnil
     - nolintlint
+    - perfsprint
+    - prealloc
     - predeclared
+    - reassign
+    - recvcheck
     - revive
+    - sloglint
+    - testifylint
     - thelper
     - tparallel
     - unconvert
     - unparam
     - usestdlibvars
+    - usetesting
     - wastedassign
+  settings:
+    exhaustive:
+      # tcell.Key runs to a couple of hundred constants and the key handlers
+      # name the handful they act on, so a default is what makes those
+      # switches complete.
+      default-signifies-exhaustive: true
+    govet:
+      enable:
+        - shadow
   exclusions:
     generated: lax
     presets:
@@ -35,6 +70,7 @@ linters:
 formatters:
   enable:
     - gofmt
+    - gofumpt
     - goimports
   settings:
     goimports:
