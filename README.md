@@ -217,6 +217,15 @@ The [Dockerfile](./Dockerfile) builds a cgo-free binary and ships it on
 distroless static. `make docker-image` builds it, and the entrypoint reads its
 configuration from `/etc/coredhcp/config.yaml`, so mount one there.
 
+The published image is signed with cosign keyless signing, so a pull can be
+checked against the workflow that built it:
+
+```
+$ cosign verify ghcr.io/hyperized/coredhcp@<digest> \
+    --certificate-identity-regexp '^https://github.com/hyperized/coredhcp/' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
 The server runs as uid 65532, not as root, so the two things it needs from the
 kernel have to be granted. Binding udp/67 needs `NET_BIND_SERVICE`, and
 answering a client that has no address yet goes over an AF_PACKET socket, which
