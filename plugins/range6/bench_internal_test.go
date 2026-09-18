@@ -59,7 +59,7 @@ func BenchmarkHandler6NewBinding(b *testing.B) {
 	// temp-dir file below, so that part of the cost stays honest.
 	logger.WithNoStdOutErr()
 
-	db, err := loadDB(filepath.Join(b.TempDir(), "leases6.db"))
+	db, err := loadDB(b.Context(), filepath.Join(b.TempDir(), "leases6.db"))
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func BenchmarkHandler6Renewal(b *testing.B) {
 	b.ReportAllocs()
 	logger.WithNoStdOutErr()
 
-	db, err := loadDB(filepath.Join(b.TempDir(), "leases6.db"))
+	db, err := loadDB(b.Context(), filepath.Join(b.TempDir(), "leases6.db"))
 	if err != nil {
 		b.Fatal(err)
 	}

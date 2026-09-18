@@ -55,7 +55,7 @@ func (p *pluginState) Leases() []leases.Lease {
 			// Expiry is stored as a Unix second. It goes out in UTC because
 			// an API answer is usually read somewhere other than the host
 			// that produced it.
-			Expires:  time.Unix(int64(record.expires), 0).UTC(),
+			Expires:  time.Unix(record.expires, 0).UTC(),
 			Address:  netip.PrefixFrom(addr, addr.BitLen()),
 			Hostname: record.hostname,
 			Source:   p.name,

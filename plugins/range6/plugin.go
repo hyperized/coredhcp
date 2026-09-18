@@ -14,7 +14,7 @@
 //	  plugins:
 //	    - range6: leases6.sqlite3 2001:db8:1::100 2001:db8:1::1ff 12h
 //
-// Three optional arguments may follow, in any order:
+// Four optional arguments may follow, in any order:
 //
 //	sweep:<duration>              how often expired bindings are reclaimed in
 //	                              the background. Defaults to half the lease
@@ -26,6 +26,10 @@
 //	decline-max:<count>           how many declined addresses may be held back
 //	                              at once. Defaults to a tenth of the pool,
 //	                              and never less than one address.
+//	max-leases:<count>            how many bindings this instance may hold at
+//	                              once. Defaults to 65536. 0 turns the bound
+//	                              off, which is only sensible on a pool the
+//	                              machine has the memory for.
 //
 // # Bindings
 //
@@ -80,10 +84,32 @@
 // is nothing else left to reclaim, the address that has been held longest goes
 // back first. None of this survives a restart: probation is tracked in memory
 // only.
+//
+// # How many bindings there can be
+//
+// A binding is made for every DUID and IAID pair that asks for one, and it
+// lives in the map, in the allocator and as a database row until it expires.
+// The allocator will take a pool of up to 2^32 addresses, so a client that
+// rotates its DUID can fill the heap and the lease file with bindings nobody
+// will ever renew. max-leases is the bound on that: past it a new pair is
+// turned away with NoAddrsAvail, while the bindings that already exist carry
+// on renewing. The bindings loaded at startup count against it, so a lease
+// file that is already over the bound hands out nothing new until it shrinks.
+//
+// # Storage
+//
+// One writer goroutine owns the lease database and applies changes in the
+// order the packet path made them, so the plugin lock is never held across a
+// disk write. A slow disk costs queue depth instead of blocking every other
+// client, the sweeper and the lease API behind one insert. The queue is
+// bounded, and a binding that cannot be queued is refused rather than handed
+// out with no row behind it: an address nobody can see after a restart is how
+// two clients end up with the same one.
 package range6
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -134,8 +160,12 @@ const (
 	// declined addresses may be held back at once, e.g. "decline-max:32".
 	declineMaxArg = "decline-max"
 
+	// maxLeasesArg names the optional argument that overrides how many
+	// bindings this instance may hold at once, e.g. "max-leases:4096".
+	maxLeasesArg = "max-leases"
+
 	// optionSyntax spells the optional arguments out for error messages.
-	optionSyntax = sweepArg + ":<duration>, " + declineArg + ":<duration> or " + declineMaxArg + ":<count>"
+	optionSyntax = sweepArg + ":<duration>, " + declineArg + ":<duration>, " + declineMaxArg + ":<count> or " + maxLeasesArg + ":<count>"
 
 	// minSweepInterval floors the derived sweep interval. A short lease time
 	// must not turn the sweeper into a hot loop taking the plugin lock.
@@ -150,6 +180,16 @@ const (
 	// declineMaxDivisor sets the default quarantine bound to a tenth of the
 	// pool, so declines can cost a tenth of the addresses at worst.
 	declineMaxDivisor = 10
+
+	// defaultMaxLeases bounds the binding table when max-leases says
+	// nothing. The pool is no bound at all here: a /96 is 2^32 addresses,
+	// and a DUID costs a client nothing to change.
+	defaultMaxLeases = 1 << 16
+
+	// leaseLimitEvery paces the refusal log. Once the table is full every
+	// new client is turned away, and one line per packet would bury the
+	// reason among the symptoms.
+	leaseLimitEvery = time.Minute
 
 	// maxDUIDLen bounds the client DUID we are willing to key a binding by.
 	// RFC 8415 §11.1 caps a DUID at 128 octets plus its two-octet type code,
@@ -176,10 +216,15 @@ const (
 // Record holds one address binding: which client holds which address, until
 // when, and the name the client asked to be known by.
 type Record struct {
-	DUID     []byte
-	IAID     [4]byte
-	IP       net.IP
-	expires  int
+	DUID []byte
+	IAID [4]byte
+	IP   net.IP
+
+	// expires is the Unix second the binding lapses at. It is int64 and not
+	// int because a 32-bit build would wrap it negative on 2038-01-19, at
+	// which point every binding reads as expired and the pool empties
+	// itself.
+	expires  int64
 	hostname string
 }
 
@@ -192,7 +237,29 @@ func (r *Record) key() string {
 // stored with second granularity, so a binding expiring exactly at t counts as
 // expired.
 func (r *Record) expired(t time.Time) bool {
-	return int64(r.expires) <= t.Unix()
+	return r.expires <= t.Unix()
+}
+
+// logThrottle paces a log line that one packet can trigger. It holds the
+// moment the last line went out and how many were dropped since.
+//
+// It is not safe for concurrent use and carries no lock of its own: each
+// instance has one owner, either the plugin lock or the writer goroutine.
+type logThrottle struct {
+	last    time.Time
+	skipped uint64
+}
+
+// ready reports whether a line may go out now, and how many were suppressed
+// since the last one that did. The first call always lets one through.
+func (t *logThrottle) ready(now time.Time, every time.Duration) (uint64, bool) {
+	if !t.last.IsZero() && now.Sub(t.last) < every {
+		t.skipped++
+		return 0, false
+	}
+	skipped := t.skipped
+	t.skipped, t.last = 0, now
+	return skipped, true
 }
 
 // leaseKey builds the map key for one address association. The IAID goes
@@ -232,12 +299,35 @@ type pluginState struct {
 	declined map[string]time.Time
 
 	// sweepInterval is how often the background sweeper reclaims expired
-	// bindings, declineProbation how long a declined address is held back and
-	// declineMax how many may be held at once. All set during setup and
-	// read-only afterwards.
+	// bindings, declineProbation how long a declined address is held back,
+	// declineMax how many may be held at once and maxLeases how many
+	// bindings the instance may hold before it turns new clients away. All
+	// set during setup and read-only afterwards.
 	sweepInterval    time.Duration
 	declineProbation time.Duration
 	declineMax       int
+	maxLeases        int
+
+	// leaseLimit paces the log line saying the binding table is full.
+	// Guarded by the plugin lock, like the table it counts.
+	leaseLimit logThrottle
+
+	// dbCtx is the context every storage call runs under, and dbCancel ends
+	// it once the writer has drained. It is the plugin's own lifetime and
+	// not a request's: the writer outlives the packet that queued a change,
+	// and a handler may not hold on to the context it was called with.
+	dbCtx    context.Context
+	dbCancel context.CancelFunc
+
+	// writes carries binding changes to the writer goroutine, stopWrites
+	// closes to shut it down and writerDone closes once it has drained.
+	// writeErrors paces its failure log and belongs to it alone. All four
+	// are nil until startWriter runs, which is what makes a state built by
+	// hand write inline; see storage.go.
+	writes      chan bindingWrite
+	stopWrites  chan struct{}
+	writerDone  chan struct{}
+	writeErrors logThrottle
 
 	// now is the clock seam. It is written once during setup, before the
 	// sweeper goroutine starts, and only read afterwards. Use timeNow rather
@@ -536,8 +626,12 @@ func (p *pluginState) renewKnown(key, hostname string, now time.Time) (rec *Reco
 // memory. hint is the zero net.IPNet for a binding we have never seen, the
 // address the client asked for, or the one it held before its binding lapsed;
 // the allocator honours a hint whenever that address is still free. A nil
-// return means the pool is exhausted. The caller must hold p's lock.
+// return means the pool is exhausted, the binding table is at its bound, or
+// the binding could not be persisted. The caller must hold p's lock.
 func (p *pluginState) allocateLease(key string, duid []byte, iaid [4]byte, hint net.IPNet, hostname string, now time.Time) *Record {
+	if p.atLeaseLimit(now) {
+		return nil
+	}
 	ip, err := p.allocate(hint)
 	if err != nil {
 		log.Errorf("Could not allocate an address for DUID %x IAID %x: %v", duid, iaid, err)
@@ -547,14 +641,44 @@ func (p *pluginState) allocateLease(key string, duid []byte, iaid [4]byte, hint 
 		DUID:     duid,
 		IAID:     iaid,
 		IP:       ip.IP,
-		expires:  int(now.Add(p.LeaseTime).Round(time.Second).Unix()),
+		expires:  now.Add(p.LeaseTime).Round(time.Second).Unix(),
 		hostname: hostname,
 	}
 	if err := p.saveIPAddress(rec); err != nil {
+		// Handing out an address we could not record would put a second
+		// client on it after a restart, which is worse than one client
+		// asking again, so the address goes back.
 		log.Errorf("Could not persist the binding for DUID %x IAID %x: %v", duid, iaid, err)
+		if err := p.allocator.Free(net.IPNet{IP: rec.IP}); err != nil {
+			log.Errorf("Could not return the unrecorded address %s to the pool: %v", rec.IP, err)
+		}
+		return nil
 	}
 	p.Records6[key] = rec
 	return rec
+}
+
+// atLeaseLimit reports whether the binding table has reached max-leases, and
+// logs the refusal at a pace an operator can read. A bound of zero means the
+// operator turned it off. The caller must hold p's lock.
+func (p *pluginState) atLeaseLimit(now time.Time) bool {
+	if p.maxLeases == 0 || len(p.Records6) < p.maxLeases {
+		return false
+	}
+	// A table full of bindings that have lapsed is a reason to sweep, not a
+	// reason to turn a client away: the background sweeper would return
+	// them, but not for up to half a lease time, and the client is here
+	// now. This is the bargain the allocation path already makes when the
+	// pool looks exhausted.
+	p.reclaim(now)
+	if len(p.Records6) < p.maxLeases {
+		return false
+	}
+	if skipped, ok := p.leaseLimit.ready(now, leaseLimitEvery); ok {
+		log.Warningf("Holding %d bindings, the %s bound, refusing new ones (%d refusal(s) since the last of these)",
+			p.maxLeases, maxLeasesArg, skipped)
+	}
+	return true
 }
 
 // allocate asks the allocator for an address, and on failure reclaims what has
@@ -603,12 +727,18 @@ func (p *pluginState) reallocateExpired(key string, record *Record, hostname str
 
 // renew extends a binding so it outlives the lifetime we are about to
 // advertise, and persists the change. A binding with enough time left is left
-// untouched. The caller must hold p's lock.
+// untouched.
+//
+// Unlike a fresh allocation, an extension that cannot be written is logged
+// and kept in memory anyway. The address is already this client's, so the
+// worst a lost expiry costs is a binding that lapses early after a restart,
+// and the client renews again long before then. The caller must hold p's
+// lock.
 func (p *pluginState) renew(record *Record, hostname string, now time.Time) {
-	if !time.Unix(int64(record.expires), 0).Before(now.Add(p.LeaseTime)) {
+	if !time.Unix(record.expires, 0).Before(now.Add(p.LeaseTime)) {
 		return
 	}
-	record.expires = int(now.Add(p.LeaseTime).Round(time.Second).Unix())
+	record.expires = now.Add(p.LeaseTime).Round(time.Second).Unix()
 	record.hostname = hostname
 	if err := p.saveIPAddress(record); err != nil {
 		log.Errorf("Could not persist the binding on %s: %v", record.IP, err)
@@ -867,6 +997,21 @@ func (p *pluginState) stopSweeper() {
 	<-p.done
 }
 
+// Close stops this instance's background goroutines and flushes the binding
+// writes it still has queued.
+//
+// Nothing in the server calls it: plugins are set up once and live as long as
+// the process, which is why setup registers the instance and hands back only
+// a handler. It is here for a program that embeds the plugin and for the
+// black-box tests. Both hold the leases.Source the registry gave them, and
+// both would otherwise leave a sweeper and a writer running over a lease file
+// they are about to delete. Call it once, and only on an instance setup
+// built, which is the only kind a caller can get hold of.
+func (p *pluginState) Close() {
+	p.stopSweeper()
+	p.stopWriter()
+}
+
 // defaultSweepInterval derives the sweep period from the lease time: half a
 // lease, so an address is back in the pool well within one lease of lapsing,
 // floored at minSweepInterval.
@@ -897,6 +1042,7 @@ type pluginOptions struct {
 	sweepInterval    time.Duration
 	declineProbation time.Duration
 	declineMax       int
+	maxLeases        int
 }
 
 // optionParsers dispatches on the argument key. parseOptions handles ordering,
@@ -906,6 +1052,7 @@ var optionParsers = map[string]func(*pluginOptions, string) error{
 	sweepArg:      parseSweepInterval,
 	declineArg:    parseDeclineProbation,
 	declineMaxArg: parseDeclineMax,
+	maxLeasesArg:  parseMaxLeases,
 }
 
 // parseOptions reads the optional key:value arguments, which may come in any
@@ -918,6 +1065,7 @@ func parseOptions(leaseTime time.Duration, poolSize uint64, extra []string) (plu
 		sweepInterval:    defaultSweepInterval(leaseTime),
 		declineProbation: defaultDeclineProbation,
 		declineMax:       defaultDeclineMax(poolSize),
+		maxLeases:        defaultMaxLeases,
 	}
 	seen := make(map[string]bool, len(extra))
 	for _, arg := range extra {
@@ -979,6 +1127,22 @@ func parseDeclineMax(opts *pluginOptions, raw string) error {
 	return nil
 }
 
+// parseMaxLeases reads the value of a "max-leases:" argument. Zero is allowed
+// and turns the bound off, for an operator who has weighed the pool against
+// the memory of the machine; a negative count is not, because it would read
+// as a limit and act as none at all.
+func parseMaxLeases(opts *pluginOptions, raw string) error {
+	held, err := strconv.Atoi(raw)
+	if err != nil {
+		return fmt.Errorf("invalid lease maximum %q: %w", raw, err)
+	}
+	if held < 0 {
+		return fmt.Errorf("lease maximum cannot be negative, got: %v", raw)
+	}
+	opts.maxLeases = held
+	return nil
+}
+
 // parseIPv6 reads one of the two pool bounds. An IPv4 address is refused
 // rather than mapped: a v4-mapped pool would build an allocator nothing on a
 // DHCPv6 link can use.
@@ -1022,14 +1186,20 @@ func setup6(args ...string) (handler.Handler6, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Started only once setup has fully succeeded: a failed setup must not
-	// leave a goroutine behind sweeping a half-built plugin.
+	// Both started only once setup has fully succeeded: a failed setup must
+	// not leave goroutines behind serving a half-built plugin. The writer
+	// goes first, because from here on the sweeper can queue deletes.
+	p.startWriter()
 	p.startSweeper(p.sweepInterval)
 	// Registered last, once everything that could fail has succeeded: a
 	// reader must never find a half-built instance in the registry.
 	leases.Register(p)
-	log.Printf("Reclaiming expired DHCPv6 bindings every %s, declined addresses after %s (at most %d held back)",
-		p.sweepInterval, p.declineProbation, p.declineMax)
+	log.Printf("Reclaiming expired DHCPv6 bindings every %s, declined addresses after %s (at most %d held back), holding at most %d bindings",
+		p.sweepInterval, p.declineProbation, p.declineMax, p.maxLeases)
+	if p.maxLeases > 0 && p.poolSize > uint64(p.maxLeases) {
+		log.Warningf("The pool holds %d addresses but %s bounds the binding table at %d, so the rest will never be handed out",
+			p.poolSize, maxLeasesArg, p.maxLeases)
+	}
 	return p.Handler6, nil
 }
 
@@ -1075,11 +1245,15 @@ func newPluginState(args ...string) (*pluginState, error) {
 		sweepInterval:    opts.sweepInterval,
 		declineProbation: opts.declineProbation,
 		declineMax:       opts.declineMax,
+		maxLeases:        opts.maxLeases,
 		now:              time.Now,
 		stop:             make(chan struct{}),
 		done:             make(chan struct{}),
 	}
-	if err := p.restore(filename); err != nil {
+	// Rooted at Background rather than at a request: this is how long the
+	// lease database is open for, which is the life of the process.
+	p.dbCtx, p.dbCancel = context.WithCancel(context.Background())
+	if err := p.restore(p.dbCtx, filename); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -1087,11 +1261,15 @@ func newPluginState(args ...string) (*pluginState, error) {
 
 // restore opens the lease database and puts every stored binding back where it
 // was, both in the map and in the allocator.
-func (p *pluginState) restore(filename string) error {
-	if err := p.registerBackingDB(filename); err != nil {
+//
+// What comes off disk counts against max-leases: a table that is already over
+// the bound keeps renewing what it holds and hands out nothing new, which is
+// the point of counting it.
+func (p *pluginState) restore(ctx context.Context, filename string) error {
+	if err := p.registerBackingDB(ctx, filename); err != nil {
 		return fmt.Errorf("could not setup lease storage: %w", err)
 	}
-	records, err := loadRecords(p.leasedb)
+	records, err := loadRecords(ctx, p.leasedb)
 	if err != nil {
 		return fmt.Errorf("could not load records from file: %w", err)
 	}

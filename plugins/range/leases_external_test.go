@@ -25,7 +25,12 @@ func registeredSource(t *testing.T, name string) leases.Source {
 	t.Helper()
 	for _, s := range leases.Sources() {
 		if s.Name() == name {
-			t.Cleanup(func() { leases.Unregister(s) })
+			closer, ok := s.(interface{ Close() })
+			require.True(t, ok, "the registered source must be the plugin instance")
+			t.Cleanup(func() {
+				leases.Unregister(s)
+				closer.Close()
+			})
 			return s
 		}
 	}

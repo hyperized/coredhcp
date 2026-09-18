@@ -41,7 +41,7 @@ func BenchmarkHandler4NewLease(b *testing.B) {
 	// temp-dir file below, so that part of the cost stays honest.
 	logger.WithNoStdOutErr()
 
-	db, err := loadDB(filepath.Join(b.TempDir(), "leases.db"))
+	db, err := loadDB(b.Context(), filepath.Join(b.TempDir(), "leases.db"))
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func BenchmarkHandler4Renewal(b *testing.B) {
 	b.ReportAllocs()
 	logger.WithNoStdOutErr()
 
-	db, err := loadDB(filepath.Join(b.TempDir(), "leases.db"))
+	db, err := loadDB(b.Context(), filepath.Join(b.TempDir(), "leases.db"))
 	if err != nil {
 		b.Fatal(err)
 	}
