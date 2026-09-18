@@ -46,6 +46,12 @@ var (
 	// the writer is that far behind. The caller abandons the change rather
 	// than waiting for the disk with the plugin lock in hand.
 	ErrWriteQueueFull = errors.New("range6: binding write queue is full")
+
+	// ErrWriterStopped reports a change queued after the writer had been
+	// shut down, which nothing will apply. Only a stopped plugin does that,
+	// so in the server it never happens: it is here so a caller waiting for
+	// a write gets an answer instead of waiting forever.
+	ErrWriterStopped = errors.New("range6: binding writer has stopped")
 )
 
 // sqlOpen is sql.Open, extracted as a seam for tests. The registered
@@ -61,10 +67,13 @@ const (
 	// much a crash loses.
 	writeQueueLen = 1024
 
-	// writeTimeout bounds one statement. A wedged database has to surface
-	// as a logged failure and a growing queue, not as a writer that never
-	// returns.
-	writeTimeout = 5 * time.Second
+	// writeTimeout bounds how long a client waits for its binding to reach
+	// the disk. The context is made when the change is queued, so it covers
+	// the wait in the queue and every attempt at the statement together. A
+	// write to a local sqlite file takes microseconds; one that takes
+	// seconds is one the client has already retransmitted past, so the
+	// binding is refused rather than waited on any longer.
+	writeTimeout = 2 * time.Second
 
 	// loadTimeout bounds the startup read of the binding table. Long enough
 	// for a large table on slow storage, short enough that a server which
@@ -73,15 +82,12 @@ const (
 
 	// busyRetries is how many extra attempts a write gets when sqlite says
 	// the database is locked, and busyBackoff how long the writer waits
-	// between them. Only the writer goroutine retries: nothing is waiting
-	// on it, and losing a binding to a lock another process held for a
-	// moment would be worse than the delay.
+	// between them. A lock another process held for a moment should not
+	// cost a client its binding, and the retries cost nothing extra in the
+	// worst case: they run inside the same writeTimeout the caller is
+	// already waiting out.
 	busyRetries = 3
 	busyBackoff = 20 * time.Millisecond
-
-	// writeErrorEvery paces the writer's failure log. A database that has
-	// gone away fails every write, and one line per packet helps nobody.
-	writeErrorEvery = time.Minute
 )
 
 // dsnReservedChars are the characters that stop a path being just a path once
@@ -223,6 +229,29 @@ type bindingWrite struct {
 	ip    string
 	query string
 	args  []any
+
+	// ctx bounds the whole change, from the moment it was queued, and
+	// cancel releases it once the writer is done with it. done carries the
+	// result back to the handler waiting on it, and is buffered so the
+	// writer never blocks on a caller that has already given up.
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan error
+}
+
+// pendingWrite is a queued change from the point of view of whoever made it:
+// the result to wait for, and how to put the in-memory change back when that
+// result is a failure.
+//
+// undo is nil for a change that cannot be undone. Removing a binding is the
+// case: the address went back to the pool under the same lock, another
+// client may hold it by the time the delete fails, and handing the record
+// back would then put two clients on one address. The row stays on disk
+// instead, which a restart reads as a binding for its original owner and the
+// sweeper clears once it expires.
+type pendingWrite struct {
+	done chan error
+	undo func()
 }
 
 // describe names the change for a log line.
@@ -231,7 +260,9 @@ func (w bindingWrite) describe() string {
 }
 
 // saveIPAddress writes out a binding to storage.
-func (p *pluginState) saveIPAddress(record *Record) error {
+// undo is run under the plugin lock if the write fails, to put the
+// in-memory change back.
+func (p *pluginState) saveIPAddress(record *Record, undo func()) error {
 	ip := record.IP.String()
 	return p.enqueue(bindingWrite{
 		op:    "store",
@@ -240,7 +271,7 @@ func (p *pluginState) saveIPAddress(record *Record) error {
 		ip:    ip,
 		query: `insert or replace into leases6(duid, iaid, ip, expiry, hostname) values (?, ?, ?, ?, ?)`,
 		args:  []any{record.DUID, iaidValue(record.IAID), ip, record.expires, record.hostname},
-	})
+	}, undo)
 }
 
 // freeIPAddress removes a binding from storage. The address is part of the
@@ -255,7 +286,7 @@ func (p *pluginState) freeIPAddress(record *Record) error {
 		ip:    ip,
 		query: `delete from leases6 where duid = ? and iaid = ? and ip = ?`,
 		args:  []any{record.DUID, iaidValue(record.IAID), ip},
-	})
+	}, nil)
 }
 
 // enqueue hands one change to the writer goroutine.
@@ -266,13 +297,18 @@ func (p *pluginState) freeIPAddress(record *Record) error {
 // abandons the change it was about to make, which is what keeps memory and
 // storage from drifting apart under a backlog.
 //
-// A state with no writer running applies the write inline. That is the zero
+// A state with no writer running applies the write inline and reports the
+// result at once, so there is nothing pending to wait for. That is the zero
 // value a test builds by hand, never a plugin that setup produced. It draws
 // the same conclusion from a change that matched nothing as the writer does:
 // the row is already in the state the caller wanted, so there is nothing to
 // report.
-func (p *pluginState) enqueue(w bindingWrite) error {
+func (p *pluginState) enqueue(w bindingWrite, undo func()) error {
+	w.ctx, w.cancel = context.WithTimeout(p.storeContext(), writeTimeout)
+	w.done = make(chan error, 1)
+
 	if p.writes == nil {
+		defer w.cancel()
 		if err := p.applyWrite(w); err != nil && !errors.Is(err, ErrNotFound) {
 			return err
 		}
@@ -280,20 +316,108 @@ func (p *pluginState) enqueue(w bindingWrite) error {
 	}
 	select {
 	case p.writes <- w:
+		p.pending = append(p.pending, pendingWrite{done: w.done, undo: undo})
 		return nil
 	default:
+		w.cancel()
 		return fmt.Errorf("could not %s: %w", w.describe(), ErrWriteQueueFull)
 	}
 }
 
-// applyWrite runs one statement against the database. A delete that matched
-// nothing comes back as ErrNotFound: the row is already gone, which is not a
-// failure, but the writer logs the two differently.
-func (p *pluginState) applyWrite(w bindingWrite) error {
-	ctx, cancel := context.WithTimeout(p.storeContext(), writeTimeout)
-	defer cancel()
+// takePending hands the caller the changes queued since the lock was taken
+// and clears the list.
+//
+// One caller at a time: every enqueue happens with the plugin lock held, so
+// the only changes on the list are the ones this caller just made. The
+// caller has to take them before it releases the lock, which is what
+// withLock does for every path that has one.
+func (p *pluginState) takePending() []pendingWrite {
+	if len(p.pending) == 0 {
+		return nil
+	}
+	pending := p.pending
+	p.pending = nil
+	return pending
+}
 
-	res, err := p.leasedb.ExecContext(ctx, w.query, w.args...)
+// settleAll waits for every queued change and returns one result each, in
+// the order they were queued. A change that failed has its in-memory effect
+// undone, under the lock, before this returns.
+//
+// The invariant this exists for: nothing a client is told outlives the write
+// behind it. The handler makes its change in memory under the lock, queues
+// the write, drops the lock, and only answers once the row is on disk. A
+// crash between the two would otherwise leave a client holding an address
+// the next start reads as free, and hands to somebody else.
+//
+// The caller must not hold the lock: waiting is the whole point, and an undo
+// takes the lock again.
+func (p *pluginState) settleAll(pending []pendingWrite) []error {
+	if len(pending) == 0 {
+		return nil
+	}
+	results := make([]error, len(pending))
+	var failed []func()
+	for i, pw := range pending {
+		results[i] = waitFor(pw.done, p.writerDone)
+		if results[i] != nil && pw.undo != nil {
+			failed = append(failed, pw.undo)
+		}
+	}
+	if failed == nil {
+		return results
+	}
+	p.Lock()
+	defer p.Unlock()
+	// Backwards: the last change made is the first one put back.
+	for i := len(failed) - 1; i >= 0; i-- {
+		failed[i]()
+	}
+	return results
+}
+
+// settle is settleAll for a caller with a single answer to give, reporting
+// the first failure among the changes it made.
+func (p *pluginState) settle(pending []pendingWrite) error {
+	return firstError(p.settleAll(pending))
+}
+
+// firstError reports the first failure in a run of results, or nil when they
+// all succeeded.
+func firstError(results []error) error {
+	for _, err := range results {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// waitFor blocks for one change's result. A writer that exits without
+// applying it, which only a stopped plugin does, comes back as a failure
+// rather than as a caller that never returns. The result is preferred over
+// the writer having gone, because the drain fills every result it has
+// before it closes writerDone.
+func waitFor(done <-chan error, writerDone <-chan struct{}) error {
+	select {
+	case err := <-done:
+		return err
+	default:
+	}
+	select {
+	case err := <-done:
+		return err
+	case <-writerDone:
+		return ErrWriterStopped
+	}
+}
+
+// applyWrite runs one statement against the database, under the context the
+// change was queued with. A delete that matched nothing comes back as
+// ErrNotFound: the row is already gone, which is not a failure, but the
+// caller tells the two apart.
+func (p *pluginState) applyWrite(w bindingWrite) error {
+	res, err := p.leasedb.ExecContext(w.ctx, w.query, w.args...)
 	if err != nil {
 		return storeError("could not "+w.describe(), err)
 	}
@@ -324,10 +448,13 @@ func (p *pluginState) storeContext() context.Context {
 // The invariant it exists for: a change is queued while the plugin lock is
 // held, at the moment the in-memory state changes, and the queue is applied
 // in that same order by this one goroutine. Storage therefore replays the
-// sequence the map went through and converges on it, and the delete of an
-// address can never land after the insert that hands the same address to the
-// next client. What it costs is that storage lags memory by at most the
-// queue: a crash loses the tail, the same way an unsynced write does.
+// sequence the map went through, and the delete of an address can never land
+// after the insert that hands the same address to the next client.
+//
+// The handler then waits for its own change here, with the lock released, so
+// the reply still stands on a write that finished. What the writer buys is
+// not a shorter wait for that one client, it is that every other client, the
+// sweeper and the lease API are no longer queued behind the disk.
 //
 // It must run before the plugin is handed anything to serve: it is what
 // installs the queue, and until then writes go to the disk inline.
@@ -362,28 +489,29 @@ func (p *pluginState) drainWrites() {
 	}
 }
 
-// write applies one queued change, retrying while sqlite says the database is
-// locked. Nothing is waiting on the result, so the only thing left to do with
-// a failure is log it, paced so a database that has gone away does not bury
-// everything else.
+// write applies one queued change and reports the result to whoever is
+// waiting for it, retrying while sqlite says the database is locked and the
+// change still has time left on it.
+//
+// A change that matched no row is reported as a success: the row is already
+// in the state the caller wanted. Everything else is the caller's to log and
+// to undo, which is why nothing is logged here.
 func (p *pluginState) write(w bindingWrite) {
+	defer w.cancel()
+
 	var err error
 	for attempt := 0; ; attempt++ {
-		if err = p.applyWrite(w); !errors.Is(err, ErrBusy) || attempt == busyRetries {
+		err = p.applyWrite(w)
+		if !errors.Is(err, ErrBusy) || attempt == busyRetries || w.ctx.Err() != nil {
 			break
 		}
 		time.Sleep(busyBackoff)
 	}
-	switch {
-	case err == nil:
-	case errors.Is(err, ErrNotFound):
-		// Nothing to undo: whatever the change wanted is already true.
+	if errors.Is(err, ErrNotFound) {
 		log.Debugf("%v", err)
-	default:
-		if skipped, ok := p.writeErrors.ready(p.timeNow(), writeErrorEvery); ok {
-			log.Errorf("%v (%d further write failure(s) not logged)", err, skipped)
-		}
+		err = nil
 	}
+	w.done <- err
 }
 
 // stopWriter shuts the writer down and waits for it to drain, then ends the

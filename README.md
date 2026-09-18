@@ -346,13 +346,17 @@ DUID for free: without a bound, every fresh DUID and IAID pair costs a map
 entry and a database row until it expires. A pool with room for more than the
 bound needs it raised, and `max-leases:0` turns it off.
 
-Both plugins write their lease file through a goroutine of their own, so the
-plugin lock is not held across a sqlite write: a slow disk costs queue depth
-instead of blocking every other client and the lease API behind one insert. A
-lease reaches the file a moment after the packet it answered, which is what a
-reader of that file has to expect. The hostname a client sends is filtered
-and cut to 255 bytes before it is stored, because option 12 can arrive as
-tens of kilobytes.
+Both plugins write their lease file through a goroutine of their own, which
+applies changes in the order the packet path made them. The plugin lock is
+not held across the write, so a slow disk no longer queues every other
+client, the sweeper and the lease API behind one insert, but the reply still
+waits for its own row: a client is never told it holds an address before
+that address is on disk, because a crash in between would leave the next
+start handing it to somebody else. A write that fails or takes longer than
+two seconds costs that one client its lease for that exchange, and the
+address goes straight back to the pool. The hostname a client sends is
+filtered and cut to 255 bytes before it is stored, because option 12 can
+arrive as tens of kilobytes.
 
 The `file` plugin no longer stamps its static reservation onto a RELEASE or
 DECLINE, and `server_id` decides whether a DHCPv4 request is addressed to

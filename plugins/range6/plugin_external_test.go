@@ -685,8 +685,10 @@ func TestBindingsSurviveARestart(t *testing.T) {
 	duid := testDUID(1)
 
 	first := setupPoolAt(t, dbPath, "2001:db8:1::101")
+	// No waiting for the writer here: the answer the client got is only
+	// given once its row is on disk, which is the whole point of the wait
+	// in the handler.
 	held := solicit(t, first, duid, iaid1)
-	waitForRows(t, dbPath, 1)
 
 	second := setupPoolAt(t, dbPath, "2001:db8:1::101")
 	assert.Equal(t, held.String(), solicit(t, second, duid, iaid1).String())
@@ -704,7 +706,6 @@ func TestStoredHostnameIsSanitised(t *testing.T) {
 	dhcpv6.WithFQDN(0, "lap top;drop\x00.example")(req)
 	resp, _ := exchange(t, h, req)
 	require.NotNil(t, resp)
-	waitForRows(t, dbPath, 1)
 
 	db, err := sql.Open("sqlite", "file:"+dbPath)
 	require.NoError(t, err)
@@ -714,27 +715,6 @@ func TestStoredHostnameIsSanitised(t *testing.T) {
 	require.NoError(t, db.QueryRow("select ip, hostname from leases6").Scan(&ip, &hostname))
 	assert.Equal(t, leasedAddress(t, resp, iaid1).String(), ip)
 	assert.Equal(t, "laptopdrop.example", hostname)
-}
-
-// waitForRows blocks until the lease table holds want rows.
-//
-// The plugin writes through a goroutine of its own, so the row for a binding
-// it has already answered lands a moment later. A test reading the file, and
-// an operator doing the same, has to wait for the writer rather than assume
-// the disk is in step with the packet it just saw answered.
-func waitForRows(t *testing.T, path string, want int) {
-	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+path)
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
-
-	require.Eventually(t, func() bool {
-		var n int
-		if err := db.QueryRow("select count(*) from leases6").Scan(&n); err != nil {
-			return false
-		}
-		return n == want
-	}, 5*time.Second, time.Millisecond, "the writer must put %d binding(s) on disk", want)
 }
 
 // seedDB writes rows straight into the lease table, bypassing every check the
