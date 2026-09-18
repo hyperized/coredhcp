@@ -9,6 +9,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/insomniacslk/dhcp/dhcpv6"
@@ -274,27 +275,33 @@ func TestSweepOnceWithNothingExpired(t *testing.T) {
 	assert.Len(t, h.Records, 1, "a live delegation survives a sweep")
 }
 
-// TestSweeperReclaimsInBackground drives the real ticker at a very short
-// interval: with nobody asking for a prefix, a lapsed delegation must go back
-// to the pool on its own, and the goroutine must stop when told to.
+// TestSweeperReclaimsInBackground runs inside a synctest bubble: the
+// sweeper's ticker and the sleep below are fake time, advanced only once
+// every goroutine in the bubble is durably blocked, so the test does no real
+// waiting and no real I/O. With nobody asking for a prefix, a lapsed
+// delegation must go back to the pool on its own, and the goroutine must
+// stop when told to.
 func TestSweeperReclaimsInBackground(t *testing.T) {
-	h, clock := newTestPlugin(t, "2001:db8::/64")
+	synctest.Test(t, func(t *testing.T) {
+		h, clock := newTestPlugin(t, "2001:db8::/64")
 
-	require.Len(t, solicit(t, h, duidFor(1)), 1)
-	clock.Advance(testLeaseDuration + time.Second)
+		require.Len(t, solicit(t, h, duidFor(1)), 1)
+		clock.Advance(testLeaseDuration + time.Second)
 
-	h.startSweeper(time.Millisecond)
-	t.Cleanup(h.stopSweeper)
+		h.startSweeper(time.Millisecond)
+		defer h.stopSweeper()
 
-	require.Eventually(t, func() bool {
+		time.Sleep(2 * time.Millisecond) // fake time inside the bubble, returns at once
+		synctest.Wait()                  // let the sweep finish before we look
+
 		h.Lock()
-		defer h.Unlock()
-		return len(h.Records) == 0
-	}, 5*time.Second, 2*time.Millisecond, "the background sweeper must reclaim the lapsed delegation")
+		assert.Empty(t, h.Records, "the background sweeper must reclaim the lapsed delegation")
+		h.Unlock()
 
-	// Dropping the record alone would not prove reclamation; the prefix has
-	// to be allocatable again.
-	assert.Len(t, solicit(t, h, duidFor(2)), 1)
+		// Dropping the record alone would not prove reclamation; the prefix has
+		// to be allocatable again.
+		assert.Len(t, solicit(t, h, duidFor(2)), 1)
+	})
 }
 
 // freeErrAllocator refuses to take a prefix back, standing in for an allocator
@@ -536,5 +543,62 @@ func TestIapdsToAnswer(t *testing.T) {
 		for i, iapd := range got {
 			assert.Equal(t, [4]byte{0, 0, 0, byte(i + 1)}, iapd.IaId)
 		}
+	})
+}
+
+// buildHints returns n IAPrefix hints inside one IA_PD, each addressed with a
+// distinct low byte so a test can tell which ones a truncation kept.
+func buildHints(n int) *dhcpv6.OptIAPD {
+	iapd := &dhcpv6.OptIAPD{}
+	for i := range n {
+		ip := make(net.IP, net.IPv6len)
+		copy(ip, net.ParseIP("2001:db8::"))
+		ip[15] = byte(i)
+		iapd.Options.Add(&dhcpv6.OptIAPrefix{Prefix: &net.IPNet{IP: ip, Mask: net.CIDRMask(64, 128)}})
+	}
+	return iapd
+}
+
+// TestRequestedPrefixes pins requestedPrefixes: an IA_PD with no hints
+// synthesises a single empty one, fewer hints than maxHintsPerIAPD pass
+// through unchanged, more than that are truncated to exactly the cap keeping
+// the first ones in order, and a nil Prefix inside the kept portion is still
+// normalised.
+func TestRequestedPrefixes(t *testing.T) {
+	t.Run("no hints at all synthesises one empty hint", func(t *testing.T) {
+		got := requestedPrefixes(&dhcpv6.OptIAPD{})
+		require.Len(t, got, 1)
+		assert.Equal(t, &net.IPNet{}, got[0].Prefix)
+	})
+
+	t.Run("fewer than the cap passes through unchanged", func(t *testing.T) {
+		iapd := buildHints(maxHintsPerIAPD - 1)
+		want := iapd.Options.Prefixes()
+
+		got := requestedPrefixes(iapd)
+		require.Len(t, got, maxHintsPerIAPD-1)
+		for i, hint := range got {
+			assert.True(t, want[i].Prefix.IP.Equal(hint.Prefix.IP))
+		}
+	})
+
+	t.Run("more than the cap is truncated to exactly the cap", func(t *testing.T) {
+		iapd := buildHints(maxHintsPerIAPD + 4)
+		want := iapd.Options.Prefixes()
+
+		got := requestedPrefixes(iapd)
+		require.Len(t, got, maxHintsPerIAPD)
+		for i, hint := range got {
+			assert.True(t, want[i].Prefix.IP.Equal(hint.Prefix.IP), "the kept hints must be the first ones, in order")
+		}
+	})
+
+	t.Run("a nil Prefix inside the kept portion is normalised", func(t *testing.T) {
+		iapd := buildHints(maxHintsPerIAPD)
+		iapd.Options.Prefixes()[0].Prefix = nil
+
+		got := requestedPrefixes(iapd)
+		require.Len(t, got, maxHintsPerIAPD)
+		assert.Equal(t, &net.IPNet{}, got[0].Prefix)
 	})
 }

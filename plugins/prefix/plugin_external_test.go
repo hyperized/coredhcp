@@ -566,6 +566,36 @@ func TestHandleReleaseCapsIAPDsAnsweredPerMessage(t *testing.T) {
 	assert.Len(t, resp.Options.IAPD(), 8, "the reply must not grow past the per-message cap")
 }
 
+// TestHandleCapsHintsPerIAPD pins the per-IA_PD hint cap: a SOLICIT with a
+// single IA_PD repeating the same hint far past the cap must not come back
+// with one IAPrefix per hint. Every repeated hint here names a prefix the
+// client already holds, which renewExactMatches renews and adds to the reply
+// on every match, so this is exactly the shape that used to make the reply
+// grow with whatever the sender put in the request.
+func TestHandleCapsHintsPerIAPD(t *testing.T) {
+	// 8 mirrors the plugin's unexported maxHintsPerIAPD.
+	const maxHintsPerIAPD = 8
+
+	h, err := prefix.Plugin.Setup6("2001:db8::/64", "64")
+	require.NoError(t, err)
+
+	duid := testDUID()
+	first := solicitWith(t, h, duid)
+	held := first.Options.IAPD()[0].Options.Prefixes()
+	require.Len(t, held, 1)
+
+	const repeated = 2000
+	hints := make([]*dhcpv6.OptIAPrefix, repeated)
+	for i := range hints {
+		hints[i] = &dhcpv6.OptIAPrefix{Prefix: held[0].Prefix}
+	}
+
+	second := solicitWith(t, h, duid, hints...)
+	iapds := second.Options.IAPD()
+	require.Len(t, iapds, 1)
+	assert.Len(t, iapds[0].Options.Prefixes(), maxHintsPerIAPD, "the reply must not grow with the number of repeated hints")
+}
+
 // TestHandleCapsNewAllocationsPerClient pins the per-client cap: with the
 // default of four, a client asking for eight fresh prefixes in one message
 // gets four of them and four NoPrefixAvail answers, not eight prefixes from a
