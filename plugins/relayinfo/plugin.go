@@ -17,10 +17,12 @@
 //
 //	server4:
 //	  plugins:
-//	    - relayinfo: file:/etc/coredhcp/ports.txt key:circuit-id autorefresh
+//	    - relayinfo: file:/etc/coredhcp/ports.txt key:circuit-id allow 10.0.1.1 10.0.2.0/24 autorefresh
 //
-// Arguments may be given in any order. Anything that is not one of the three
-// below fails setup by name.
+// The named arguments may be given in any order. The allow list is the
+// exception: its addresses follow the allow keyword, so anything after it
+// that is not a named argument is read as an address. Anything else fails
+// setup by name.
 //
 //   - file:<path> is the mapping file, required. A relative path is resolved
 //     against the working directory coredhcp was started in.
@@ -29,12 +31,17 @@
 //     sub-options 1, 2 and 6); server6 accepts interface-id and remote-id
 //     (options 18 and 37). The two lists are separate, and a name from the
 //     other family fails setup.
+//   - allow <addr|cidr>... names the relays whose relay information this
+//     instance will act on, and is required. It is spelled the way the relay
+//     plugin spells it, so the two read alike in a config file. At least one
+//     entry has to be of the family the section serves, since an allow list
+//     that cannot match anything admits nothing.
 //   - autorefresh reloads the file whenever it changes on disk. Without it
 //     the file is read once, at startup.
 //
 // The plugin is configured per family, so a dual-stack server that wants both
 // needs a relayinfo entry in server4 and another in server6, each with its
-// own file.
+// own file and its own allow list.
 //
 // # File format
 //
@@ -92,27 +99,46 @@
 // an untrusted device can reach the server directly, every byte of it is
 // under the client's control: a client can send an option 82 of its own
 // making, and a server that believes it hands that client whichever address
-// it asked for. Two things have to hold before this plugin is worth
-// deploying.
+// it asked for.
 //
-// The relay has to be the only path to the server. Restrict the listening
-// address, filter DHCP at the network edge, or put the server on a network
-// only relays can reach. RFC 3046 section 2.1 says a relay agent discards a
-// request that already carries an option 82 from a downstream port, and most
-// switches do that by default, but that only helps for requests that actually
-// pass through the relay.
+// The allow list is what closes that. Before anything in the packet is read,
+// the source address of the datagram is matched against the configured
+// prefixes, and a request from anywhere else is dropped. The check is on the
+// UDP source the server saw rather than on anything the packet claims about
+// itself, and it applies to every message type: a check on where a packet
+// came from is worth little if it makes exceptions. A request the server
+// could not attribute at all is dropped too, since the source address is the
+// only thing the check has to go on.
 //
-// The relay's own address has to be checked, which this plugin does not do.
-// Pair it with a plugin or a firewall that admits only known relay addresses.
+// That is a filter and not authentication, and it is worth being plain about
+// what it does not buy. A host sharing a segment with a trusted relay can
+// still source packets from the relay's address if nothing on the switch
+// stops it. Port security, DHCP snooping and IP source guard are what hold
+// that ground. RFC 3046 section 2.1 has a relay agent discard a request that
+// already carries an option 82 from a downstream port, and most switches do
+// that by default, but it only helps for requests that pass through the relay
+// at all.
+//
+// # Placement
+//
+// A dropped request ends the chain, so no later plugin answers it either. A
+// server that also serves clients on its own link wants those clients covered
+// by the allow list, or relayinfo in a section of its own. Drops are logged
+// at Info with the source address, at most one line per second per reason, so
+// a flood of rejected packets does not become a flood of log lines.
 package relayinfo
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
+	"net/netip"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -128,26 +154,41 @@ const (
 	fileArgPrefix  = "file:"
 	keyArgPrefix   = "key:"
 
+	// allowArg introduces the relay allow list. The relay plugin uses the
+	// same keyword and the same entry syntax.
+	allowArg = "allow"
+
 	// maxKeyLen bounds the key taken off the wire. An option 82 sub-option
 	// cannot exceed this anyway, and a DHCPv6 interface-id that does is not
 	// something an operator writes down in a mapping file.
 	maxKeyLen = 255
+
+	// logInterval is how often one drop reason may produce a log line.
+	logInterval = time.Second
 )
 
 var log = logger.GetLogger("plugins/relayinfo")
 
 // Plugin wraps the relayinfo plugin information.
+//
+// Both families use the context-aware setup functions: the source address of
+// the datagram decides whether the relay information in the packet is worth
+// reading at all, and it exists nowhere in the DHCP payload.
 var Plugin = plugins.Plugin{
-	Name:   "relayinfo",
-	Setup6: setup6,
-	Setup4: setup4,
+	Name:      "relayinfo",
+	Setup6Ctx: setup6,
+	Setup4Ctx: setup4,
 }
 
 // Setup errors that callers and tests can match with errors.Is. Errors that
 // have to quote the offending argument are built with fmt.Errorf instead.
 var (
-	errNoFile = errors.New("need a mapping file, as file:<path>")
-	errNoKey  = errors.New("need a key to match on, as key:<name>")
+	errNoFile         = errors.New("need a mapping file, as file:<path>")
+	errNoKey          = errors.New("need a key to match on, as key:<name>")
+	errNoAllow        = errors.New("need a relay allow list, `allow` followed by addresses or prefixes")
+	errNoAllowEntries = errors.New("need at least one address or prefix after `allow`")
+	errMappedEntry    = errors.New("IPv4-mapped IPv6 entry never matches, write it as a plain IPv4 address")
+	errZonedEntry     = errors.New("zoned address never matches, the interface is matched separately")
 )
 
 // fsnotifyNewWatcher and watcherAdd are indirections over the two fsnotify
@@ -202,14 +243,55 @@ func relaySubOption(code dhcpv4.OptionCode) keyFunc4 {
 	}
 }
 
+// reason names one cause for dropping a request. Every value is a constant,
+// which is what keeps the drop limiter's map bounded by the set below rather
+// than by the traffic it sees.
+type reason string
+
+const (
+	reasonNoRequestInfo  reason = "no request information"
+	reasonPeerNotAllowed reason = "relay source not in the allow list"
+)
+
+// dropLimiter holds back repeated drop log lines, one per reason per
+// logInterval. The relay plugin carries the same thing for the same reason.
+type dropLimiter struct {
+	// now reads the clock. It is a field so tests can step over the interval
+	// instead of sleeping through it.
+	now func() time.Time
+
+	mu   sync.Mutex
+	last map[reason]time.Time
+}
+
+// newDropLimiter returns a limiter that permits one line per reason per
+// logInterval, reading the clock through now.
+func newDropLimiter(now func() time.Time) *dropLimiter {
+	return &dropLimiter{now: now, last: make(map[reason]time.Time)}
+}
+
+// allow reports whether a line for r may be logged, and if so records when it
+// was. A reason not seen before is always allowed.
+func (l *dropLimiter) allow(r reason) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	t := l.now()
+	if prev, ok := l.last[r]; ok && t.Sub(prev) < logInterval {
+		return false
+	}
+	l.last[r] = t
+	return true
+}
+
 // pluginState holds the key -> address mapping backing one instance of the
 // plugin, and the lock protecting it against the autorefresh goroutine.
 // setupState creates one instance per call, so the server4 and server6
 // entries of a dual-stack configuration keep their mappings apart.
 //
 // Exactly one of extract4 and extract6 is set, the one for the family this
-// instance was set up for. Both are fixed at setup time and read without the
-// lock, which only guards recs.
+// instance was set up for. That, keyName and allow are fixed at setup time
+// and read without the lock, which only guards recs. The limiter carries a
+// lock of its own.
 type pluginState struct {
 	mu   sync.RWMutex
 	recs map[string]record
@@ -217,6 +299,8 @@ type pluginState struct {
 	keyName  string
 	extract4 keyFunc4
 	extract6 keyFunc6
+	allow    []netip.Prefix
+	limiter  *dropLimiter
 }
 
 // numRecords returns the number of currently loaded mappings.
@@ -224,6 +308,38 @@ func (s *pluginState) numRecords() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.recs)
+}
+
+// logDrop reports a dropped request at Info, at most once per interval per
+// reason.
+func (s *pluginState) logDrop(r reason, format string, args ...any) {
+	if !s.limiter.allow(r) {
+		return
+	}
+	log.Infof("dropping request (%s): %s", r, fmt.Sprintf(format, args...))
+}
+
+// fromAllowedRelay reports whether the datagram came from one of the relays
+// named in the allow list.
+//
+// It fails closed. A request that arrives without the server's description of
+// it cannot be attributed to anything, and the whole point of the check is
+// that relay information is only believed when it comes from a relay.
+func (s *pluginState) fromAllowedRelay(ctx context.Context) bool {
+	info, ok := handler.RequestInfoFrom(ctx)
+	if !ok {
+		s.logDrop(reasonNoRequestInfo, "cannot tell where the request came from")
+		return false
+	}
+	// The server has already stripped the IPv6 zone; unmapping as well means
+	// an IPv4 peer read off a dual-stack socket compares equal to the same
+	// address written in dotted-quad form in the configuration.
+	peer := info.Peer.Addr().Unmap()
+	if !slices.ContainsFunc(s.allow, func(p netip.Prefix) bool { return p.Contains(peer) }) {
+		s.logDrop(reasonPeerNotAllowed, "source %s", peer)
+		return false
+	}
+	return true
 }
 
 // match looks up a key taken off the wire. It rejects a missing or oversized
@@ -261,7 +377,10 @@ func passthrough4(mt dhcpv4.MessageType) bool {
 }
 
 // Handler4 handles DHCPv4 packets for the relayinfo plugin.
-func (s *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+func (s *pluginState) Handler4(ctx context.Context, req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+	if !s.fromAllowedRelay(ctx) {
+		return nil, true
+	}
 	if passthrough4(req.MessageType()) {
 		return resp, false
 	}
@@ -278,7 +397,10 @@ func (s *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 }
 
 // Handler6 handles DHCPv6 packets for the relayinfo plugin.
-func (s *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
+func (s *pluginState) Handler6(ctx context.Context, req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
+	if !s.fromAllowedRelay(ctx) {
+		return nil, true
+	}
 	m, err := req.GetInnerMessage()
 	if err != nil {
 		log.Errorf("BUG: could not decapsulate: %v", err)
@@ -325,7 +447,7 @@ func (s *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	return resp, false
 }
 
-func setup4(args ...string) (handler.Handler4, error) {
+func setup4(args ...string) (handler.Handler4Ctx, error) {
 	s, err := setupState(false, args...)
 	if err != nil {
 		return nil, err
@@ -333,7 +455,7 @@ func setup4(args ...string) (handler.Handler4, error) {
 	return s.Handler4, nil
 }
 
-func setup6(args ...string) (handler.Handler6, error) {
+func setup6(args ...string) (handler.Handler6Ctx, error) {
 	s, err := setupState(true, args...)
 	if err != nil {
 		return nil, err
@@ -346,34 +468,127 @@ type pluginArgs struct {
 	filename string
 	key      string
 	refresh  bool
+
+	// allow4 and allow6 are the allow list split by family, since a handler
+	// only ever matches against the one it serves. sawAllow records that the
+	// keyword itself was given, which is what turns a bare argument from a
+	// typo into an address.
+	allow4   []netip.Prefix
+	allow6   []netip.Prefix
+	sawAllow bool
 }
 
-// parseArgs picks the file, the key and the autorefresh flag out of the
-// argument list, in whatever order they were given. An argument that is none
-// of the three is an error naming it, so that a typo fails the server at
-// startup instead of quietly disabling autorefresh.
+// parseArgs picks the file, the key, the allow list and the autorefresh flag
+// out of the argument list. An argument that is none of those is an error
+// naming it, so that a typo fails the server at startup instead of quietly
+// disabling autorefresh.
 func parseArgs(args []string) (pluginArgs, error) {
 	var a pluginArgs
 	for _, arg := range args {
-		switch {
-		case arg == autoRefreshArg:
-			a.refresh = true
-		case strings.HasPrefix(arg, fileArgPrefix):
-			a.filename = strings.TrimPrefix(arg, fileArgPrefix)
-		case strings.HasPrefix(arg, keyArgPrefix):
-			a.key = strings.TrimPrefix(arg, keyArgPrefix)
-		default:
-			return a, fmt.Errorf("unexpected argument `%s`, want %s<path>, %s<name> or %s",
-				arg, fileArgPrefix, keyArgPrefix, autoRefreshArg)
+		if err := a.apply(arg); err != nil {
+			return a, err
 		}
 	}
-	if a.filename == "" {
+	switch {
+	case a.filename == "":
 		return a, errNoFile
-	}
-	if a.key == "" {
+	case a.key == "":
 		return a, errNoKey
+	case !a.sawAllow:
+		return a, errNoAllow
 	}
 	return a, nil
+}
+
+// apply folds one argument into a. A bare argument is only an allow list
+// entry once the allow keyword has been seen; before that it is the typo it
+// looks like.
+func (a *pluginArgs) apply(arg string) error {
+	if a.applyNamed(arg) {
+		return nil
+	}
+	if a.sawAllow {
+		return a.addAllowEntry(arg)
+	}
+	return fmt.Errorf("unexpected argument `%s`, want %s<path>, %s<name>, %s <addr|cidr>... or %s",
+		arg, fileArgPrefix, keyArgPrefix, allowArg, autoRefreshArg)
+}
+
+// applyNamed folds one of the named arguments into a and reports whether arg
+// was one of them. They are recognised wherever they appear, which is what
+// keeps the rest of the argument list order independent.
+func (a *pluginArgs) applyNamed(arg string) bool {
+	switch {
+	case arg == autoRefreshArg:
+		a.refresh = true
+	case arg == allowArg:
+		a.sawAllow = true
+	case strings.HasPrefix(arg, fileArgPrefix):
+		a.filename = strings.TrimPrefix(arg, fileArgPrefix)
+	case strings.HasPrefix(arg, keyArgPrefix):
+		a.key = strings.TrimPrefix(arg, keyArgPrefix)
+	default:
+		return false
+	}
+	return true
+}
+
+// addAllowEntry parses one allow list entry and files it under its family.
+func (a *pluginArgs) addAllowEntry(arg string) error {
+	prefix, err := parseAllowEntry(arg)
+	if err != nil {
+		return err
+	}
+	if prefix.Addr().Is4() {
+		a.allow4 = append(a.allow4, prefix)
+		return nil
+	}
+	a.allow6 = append(a.allow6, prefix)
+	return nil
+}
+
+// allowFor returns the allow list entries of the family being set up. The
+// other family's entries are dropped rather than refused, so one line can be
+// copied between the two server sections and still mean what it reads as.
+func (a pluginArgs) allowFor(v6 bool) []netip.Prefix {
+	if v6 {
+		return a.allow6
+	}
+	return a.allow4
+}
+
+// parseAllowEntry turns one argument into a prefix. A bare address becomes a
+// host prefix, so both forms compare the same way afterwards. This is the
+// relay plugin's parser, kept here rather than imported so neither plugin has
+// to depend on the other.
+//
+// Two spellings are refused rather than accepted and quietly ignored: an
+// IPv4-mapped IPv6 entry, which netip never matches against an unmapped
+// address, and a zoned address, which never matches because the server strips
+// the zone before a plugin sees the peer. Both would look configured and
+// admit nothing.
+func parseAllowEntry(arg string) (netip.Prefix, error) {
+	if strings.Contains(arg, "/") {
+		prefix, err := netip.ParsePrefix(arg)
+		if err != nil {
+			return netip.Prefix{}, fmt.Errorf("invalid prefix %q: %w", arg, err)
+		}
+		if prefix.Addr().Is4In6() {
+			return netip.Prefix{}, fmt.Errorf("prefix %q: %w", arg, errMappedEntry)
+		}
+		return prefix.Masked(), nil
+	}
+	addr, err := netip.ParseAddr(arg)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("invalid address %q: %w", arg, err)
+	}
+	if addr.Is4In6() {
+		return netip.Prefix{}, fmt.Errorf("address %q: %w", arg, errMappedEntry)
+	}
+	if addr.Zone() != "" {
+		return netip.Prefix{}, fmt.Errorf("address %q: %w", arg, errZonedEntry)
+	}
+	return netip.PrefixFrom(addr, addr.BitLen()), nil
 }
 
 // keySource resolves a configured key name against one family's allow-list.
@@ -389,6 +604,14 @@ func keySource[F any](family, name string, allowed map[string]F) (F, error) {
 	return fn, nil
 }
 
+// familyName spells a family out for an error message.
+func familyName(v6 bool) string {
+	if v6 {
+		return "DHCPv6"
+	}
+	return "DHCPv4"
+}
+
 // setupState builds one plugin instance: it validates the arguments, loads
 // the mapping file once so a broken file fails startup, and starts the
 // autorefresh watcher if it was asked for.
@@ -398,7 +621,14 @@ func setupState(v6 bool, args ...string) (*pluginState, error) {
 		return nil, err
 	}
 
-	s := &pluginState{keyName: a.key}
+	s := &pluginState{
+		keyName: a.key,
+		allow:   a.allowFor(v6),
+		limiter: newDropLimiter(time.Now),
+	}
+	if len(s.allow) == 0 {
+		return nil, fmt.Errorf("%w for %s", errNoAllowEntries, familyName(v6))
+	}
 	if v6 {
 		s.extract6, err = keySource("DHCPv6", a.key, keys6)
 	} else {
@@ -417,37 +647,77 @@ func setupState(v6 bool, args ...string) (*pluginState, error) {
 		}
 	}
 
-	log.Infof("loaded %d %s mappings from %s", s.numRecords(), a.key, a.filename)
+	log.Infof("loaded %d %s mappings from %s, allowing %d relay source(s)",
+		s.numRecords(), a.key, a.filename, len(s.allow))
 	return s, nil
 }
 
-// watch reloads the mapping file on every event fsnotify reports for it. A
-// reload that fails keeps the mapping that was already loaded, so a file
-// caught halfway through being written does not empty the server's idea of
-// the network.
+// watch starts the autorefresh watcher.
 //
-// The goroutine runs until the watcher is closed, which nothing does: a
-// plugin is set up once and lives as long as the process, and the file plugin
-// watches its lease file the same way.
+// The watch goes on the directory rather than on the file. A mapping file is
+// usually replaced by writing a new one and renaming it over the old, and a
+// watch on the file follows the inode that was renamed away, so every update
+// after the first would be missed. The directory keeps reporting under the
+// same name, and watchLoop filters the events down to it.
 func (s *pluginState) watch(v6 bool, filename string) error {
 	watcher, err := fsnotifyNewWatcher()
 	if err != nil {
 		return fmt.Errorf("failed to create watcher: %w", err)
 	}
-	if err = watcherAdd(watcher, filename); err != nil {
-		return fmt.Errorf("failed to watch %s: %w", filename, err)
+	dir := filepath.Dir(filename)
+	if err = watcherAdd(watcher, dir); err != nil {
+		return fmt.Errorf("failed to watch %s: %w", dir, err)
 	}
 
-	go func() {
-		for range watcher.Events {
-			if err := s.loadFromFile(v6, filename); err != nil {
-				log.Warningf("failed to refresh from %s: %s", filename, err)
+	go s.watchLoop(v6, filename, watcher)
+	return nil
+}
+
+// watchLoop reloads the mapping file on what fsnotify reports for it, and
+// runs until the watcher is closed. Nothing closes it: a plugin is set up
+// once and lives as long as the process, and the file plugin watches its
+// lease file the same way.
+//
+// Both channels have to be read. fsnotify sends errors on an unbuffered
+// channel and blocks until somebody takes one, so a loop that only ranges
+// over Events parks fsnotify's own reader on the first error and no further
+// event ever arrives: reloads stop for good, with nothing in the log to say
+// so. An error reloads as well, because the errors a live watch produces mean
+// events were dropped rather than that nothing happened, a full inotify queue
+// being the usual one. The mapping in memory may already be behind the file,
+// and rereading it is the cheap way back into step.
+func (s *pluginState) watchLoop(v6 bool, filename string, watcher *fsnotify.Watcher) {
+	base := filepath.Base(filename)
+	for {
+		select {
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+			// Watching the directory reports every file in it.
+			if filepath.Base(event.Name) != base {
 				continue
 			}
-			log.Infof("updated to %d mappings from %s", s.numRecords(), filename)
+			s.refresh(v6, filename)
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			log.Warningf("watch on %s reported an error: %s", filename, err)
+			s.refresh(v6, filename)
 		}
-	}()
-	return nil
+	}
+}
+
+// refresh rereads the mapping file. A reload that fails keeps the mapping
+// that was already loaded, so a file caught halfway through being written
+// does not empty the server's idea of the network.
+func (s *pluginState) refresh(v6 bool, filename string) {
+	if err := s.loadFromFile(v6, filename); err != nil {
+		log.Warningf("failed to refresh from %s: %s", filename, err)
+		return
+	}
+	log.Infof("updated to %d mappings from %s", s.numRecords(), filename)
 }
 
 // loadFromFile reads the mapping file and swaps it in under the write lock.
