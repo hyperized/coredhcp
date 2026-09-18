@@ -64,6 +64,27 @@ const (
 	maxBodyBytes = 1 << 20
 )
 
+// The errors a NetBox response can turn into. They are sentinels, wrapped
+// into statusError's and findInterface's messages with %w, so a caller can
+// tell them apart with errors.Is instead of matching on text.
+var (
+	// ErrUnauthorized is what a request becomes on HTTP 401 or 403: the token
+	// is missing, wrong, or lacks the permission the call needed.
+	ErrUnauthorized = errors.New("not authorized")
+	// ErrNotFound is what a request becomes on HTTP 404.
+	ErrNotFound = errors.New("not found")
+	// ErrUnavailable is what a request becomes on HTTP 5xx: NetBox itself is
+	// failing or overloaded.
+	ErrUnavailable = errors.New("netbox unavailable")
+	// ErrUnexpectedStatus is what a request becomes on any other non-2xx
+	// status.
+	ErrUnexpectedStatus = errors.New("unexpected status")
+	// ErrNoInterface is what findInterface returns when NetBox has no
+	// interface carrying the looked-up MAC address. The caller sees it when
+	// a client is simply not one this plugin has an answer for.
+	ErrNoInterface = errors.New("no interface carries this MAC address")
+)
+
 // client talks to one NetBox instance.
 //
 // It is safe for concurrent use: every field is set at construction and read
@@ -80,7 +101,12 @@ func newClient(baseURL, token string, timeout time.Duration) *client {
 	return &client{
 		base: baseURL,
 		auth: authHeader(token),
-		hc:   &http.Client{Timeout: timeout},
+		// The caller now puts the same duration on the request context as a
+		// deadline covering both calls of a lookup, which is what actually
+		// bounds a request in normal operation. This stays set too, as a
+		// backstop for a call made through a context with no deadline of its
+		// own, such as one built by hand in a test.
+		hc: &http.Client{Timeout: timeout},
 	}
 }
 
@@ -247,16 +273,14 @@ type ipAddress struct {
 }
 
 // lookup resolves mac to the addresses documented on the interface carrying
-// it. mac must already be canonical lowercase. A MAC that NetBox does not know,
-// or that is not assigned to an interface, is not an error: the result comes
-// back with found false.
+// it. mac must already be canonical lowercase. findInterface's ErrNoInterface
+// travels straight up to the caller here: whether "no interface for this MAC"
+// counts as an answer or a failure is a decision for whoever is caching the
+// result, not for this method.
 func (c *client) lookup(ctx context.Context, mac string) (lookupResult, error) {
 	ref, err := c.findInterface(ctx, mac)
 	if err != nil {
 		return lookupResult{}, err
-	}
-	if ref == nil {
-		return lookupResult{}, nil
 	}
 	return c.addressesFor(ctx, ref)
 }
@@ -279,7 +303,7 @@ func (c *client) findInterface(ctx context.Context, mac string) (*interfaceRef, 
 		}
 		log.Debugf("MAC address %s: skipping an entry assigned to %q", mac, page.Results[i].AssignedObjectType)
 	}
-	return nil, nil
+	return nil, fmt.Errorf("MAC address %s: %w", mac, ErrNoInterface)
 }
 
 // addressesFor collects the first active IPv4 and IPv6 address on ref. One
@@ -341,12 +365,24 @@ func (c *client) get(ctx context.Context, path string, q url.Values, out any) er
 	return nil
 }
 
-// statusError describes a non-2xx response. Authentication failures name the
-// token, since that is the one thing an operator can act on and the status
-// alone reads like a routing mistake.
+// statusError describes a non-2xx response, wrapping the sentinel that
+// matches it so a caller can act on the outcome with errors.Is instead of
+// parsing the message. Authentication failures name the token, since that is
+// the one thing an operator can act on and the status alone reads like a
+// routing mistake. A 404 gets its own wording too. Both paths are list
+// endpoints and answer 200 with an empty page for a filter that matches
+// nothing, so a 404 says the endpoint is not there at all: either the
+// configured URL points somewhere else, or this is a NetBox older than 4.2,
+// where MAC addresses were not yet a model of their own.
 func statusError(path string, code int) error {
-	if code == http.StatusUnauthorized || code == http.StatusForbidden {
-		return fmt.Errorf("%s returned HTTP %d, check the API token and its permissions", path, code)
+	switch {
+	case code == http.StatusUnauthorized || code == http.StatusForbidden:
+		return fmt.Errorf("%s returned HTTP %d, check the API token and its permissions: %w", path, code, ErrUnauthorized)
+	case code == http.StatusNotFound:
+		return fmt.Errorf("%s returned HTTP %d, so check the configured NetBox URL and that NetBox is 4.2 or newer: %w", path, code, ErrNotFound)
+	case code >= http.StatusInternalServerError:
+		return fmt.Errorf("%s returned HTTP %d: %w", path, code, ErrUnavailable)
+	default:
+		return fmt.Errorf("%s returned HTTP %d: %w", path, code, ErrUnexpectedStatus)
 	}
-	return fmt.Errorf("%s returned HTTP %d", path, code)
 }

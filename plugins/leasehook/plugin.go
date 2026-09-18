@@ -100,7 +100,9 @@
 // that gets no answer retransmits and produces a fresh event; a redelivery
 // queue would either grow without bound or reorder events, and an endpoint
 // that has to see every one should acknowledge quickly and queue on its own
-// side. A non-2xx answer is logged with its status.
+// side. A non-2xx answer, a redirect included, is logged with its status: the
+// client does not follow a redirect, so an endpoint that has moved has to be
+// pointed at directly.
 //
 // With a secret configured, every POST carries
 //
@@ -110,10 +112,14 @@
 // parsing them.
 //
 // An exec delivery runs the program with no arguments, the JSON body on
-// stdin, and these variables added to the server's environment:
-// LEASEHOOK_EVENT, LEASEHOOK_FAMILY, LEASEHOOK_MAC, LEASEHOOK_ADDRESSES (space
-// separated) and LEASEHOOK_HOSTNAME. Delegated prefixes are on stdin only. A
-// non-zero exit is logged with the first kilobyte of stderr.
+// stdin, and an environment built from scratch rather than handed the
+// server's own: PATH, HOME, TMPDIR, LANG and any LC_* locale variable,
+// whichever of those the server itself has, plus LEASEHOOK_EVENT,
+// LEASEHOOK_FAMILY, LEASEHOOK_MAC, LEASEHOOK_ADDRESSES (space separated) and
+// LEASEHOOK_HOSTNAME. Nothing else the server carries, including a secret
+// another plugin was given with env:NAME, ever reaches the program.
+// Delegated prefixes are on stdin only. A non-zero exit is logged with the
+// first kilobyte of stderr.
 //
 // # Security
 //

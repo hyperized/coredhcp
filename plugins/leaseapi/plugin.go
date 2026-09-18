@@ -41,6 +41,7 @@
 package leaseapi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -54,9 +55,14 @@ import (
 	"github.com/coredhcp/coredhcp/handler"
 	"github.com/coredhcp/coredhcp/logger"
 	"github.com/coredhcp/coredhcp/plugins"
+	"github.com/coredhcp/coredhcp/plugins/internal/endpoint"
 )
 
 var log = logger.GetLogger("plugins/leaseapi")
+
+// pluginName is what the plugin is called in config.yml and what every error
+// this package returns is prefixed with.
+const pluginName = "leaseapi"
 
 // Plugin wraps the leaseapi plugin information.
 //
@@ -71,7 +77,7 @@ var log = logger.GetLogger("plugins/leaseapi")
 // a different one is a setup error: there is a single registry behind these
 // endpoints, so a second listener would only serve the same answers twice.
 var Plugin = plugins.Plugin{
-	Name:   "leaseapi",
+	Name:   pluginName,
 	Setup6: setup6,
 	Setup4: setup4,
 }
@@ -140,7 +146,10 @@ func setup6(args ...string) (handler.Handler6, error) {
 // setup validates the plugin arguments and returns the server to answer from,
 // starting the listener if this is the first setup for that address.
 func setup(args []string) (*server, error) {
-	e, err := parseArgs(args)
+	// The address rules live in the endpoint package, which the metrics
+	// plugin uses as well: both serve something unauthenticated, so both are
+	// held to a unix socket or a loopback port.
+	e, err := endpoint.Parse(pluginName, args)
 	if err != nil {
 		return nil, err
 	}
@@ -154,18 +163,18 @@ func setup(args []string) (*server, error) {
 // either names the same address, and shares the listener, or the configuration
 // asks for two endpoints over one registry, which is a mistake worth failing
 // on at startup rather than resolving silently.
-func obtain(e endpoint) (*server, error) {
+func obtain(e endpoint.Endpoint) (*server, error) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 
-	key := e.key()
+	key := e.Key()
 	if s, ok := registry.servers[key]; ok {
 		return s, nil
 	}
 	for running := range registry.servers {
 		// The map holds at most one entry, so this loop reads the address
 		// already bound and returns; see the doc comment above.
-		return nil, fmt.Errorf("leaseapi: already listening on %s, refusing to also listen on %s", running, key)
+		return nil, fmt.Errorf("%s: already listening on %s, refusing to also listen on %s", pluginName, running, key)
 	}
 	s, err := newServer(e)
 	if err != nil {
@@ -176,7 +185,7 @@ func obtain(e endpoint) (*server, error) {
 }
 
 // newServer binds e and starts serving the API on it.
-func newServer(e endpoint) (*server, error) {
+func newServer(e endpoint.Endpoint) (*server, error) {
 	s := &server{done: make(chan struct{})}
 
 	mux := http.NewServeMux()
@@ -200,7 +209,13 @@ func newServer(e endpoint) (*server, error) {
 	// Bind synchronously so an occupied port or an unwritable socket path
 	// fails the setup and the server refuses to start, rather than logging
 	// into the void a second later.
-	ln, err := e.listen()
+	//
+	// The context is Background because there is nothing else to pass: a
+	// setup function takes its arguments and nothing more, and the
+	// context-aware form of it changes what the handler is given, not what
+	// setup is. Listen puts its own deadline on top, so a bind that cannot
+	// finish fails the startup instead of holding it.
+	ln, err := e.Listen(context.Background())
 	if err != nil {
 		return nil, err
 	}
@@ -216,10 +231,10 @@ func newServer(e endpoint) (*server, error) {
 	go func() {
 		defer close(s.done)
 		if err := s.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Errorf("leaseapi listener on %s stopped: %v", e.key(), err)
+			log.Errorf("leaseapi listener on %s stopped: %v", e.Key(), err)
 		}
 	}()
-	log.Infof("serving the lease API on %s (read-only, unauthenticated: %s)", e.key(), e.guard())
+	log.Infof("serving the lease API on %s (read-only, unauthenticated: %s)", e.Key(), e.Guard())
 	return s, nil
 }
 

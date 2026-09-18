@@ -160,12 +160,10 @@ type health struct {
 
 // serveHealth answers GET /v1/health.
 func serveHealth(w http.ResponseWriter, _ *http.Request) {
-	var buf bytes.Buffer
-	// Encoding two scalars into a bytes.Buffer has nothing to fail on.
-	_ = json.NewEncoder(&buf).Encode(health{OK: true, Sources: len(leases.Sources())})
-	setJSONHeaders(w)
-	_, err := w.Write(buf.Bytes())
-	report(err)
+	body := health{OK: true, Sources: len(leases.Sources())}
+	writeJSON(w, http.StatusOK, func(out io.Writer) error {
+		return json.NewEncoder(out).Encode(body)
+	})
 }
 
 // collectLeases gathers the leases matching f from every source.
@@ -237,15 +235,38 @@ func comparePools(a, b leases.Pool) int {
 // either a whole body or none of it. A large one goes out entry by entry: see
 // streamThreshold.
 func respond[T any](w http.ResponseWriter, field string, items []T) {
-	setJSONHeaders(w)
 	if len(items) > streamThreshold {
+		setJSONHeaders(w)
 		report(encodeList(w, field, items))
 		return
 	}
+	writeJSON(w, http.StatusOK, func(out io.Writer) error {
+		return encodeList(out, field, items)
+	})
+}
+
+// writeJSON renders a body into a buffer and sends it with status.
+//
+// Buffering first is what lets a failed encode still become a 500. Once a
+// byte of the body is on the wire the status line is spent, and a client
+// reading a truncated lease list has no way to tell it from a short one. That
+// is also why the encode error is not simply logged: a monitor polling this
+// API would go on reporting healthy while every answer it got was half an
+// object.
+func writeJSON(w http.ResponseWriter, status int, encode func(io.Writer) error) {
 	var buf bytes.Buffer
-	// A bytes.Buffer never fails a write, and neither Lease nor Pool has a
-	// field encoding/json can refuse.
-	_ = encodeList(&buf, field, items)
+	if err := encode(&buf); err != nil {
+		// Nothing this package encodes has a field encoding/json can refuse
+		// and a bytes.Buffer never fails a write, so reaching this is a bug
+		// rather than a bad request.
+		log.Errorf("BUG: encoding a %d response: %v", status, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	setJSONHeaders(w)
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
 	_, err := w.Write(buf.Bytes())
 	report(err)
 }
@@ -286,13 +307,10 @@ func badRequest(w http.ResponseWriter, r *http.Request, err error) {
 	// sends can put a newline in a log line.
 	log.Debugf("rejecting %s from %s: %v", r.URL.RequestURI(), r.RemoteAddr, err)
 
-	var buf bytes.Buffer
-	// One string into a bytes.Buffer: nothing to fail on.
-	_ = json.NewEncoder(&buf).Encode(apiError{Error: err.Error()})
-	setJSONHeaders(w)
-	w.WriteHeader(http.StatusBadRequest)
-	_, werr := w.Write(buf.Bytes())
-	report(werr)
+	body := apiError{Error: err.Error()}
+	writeJSON(w, http.StatusBadRequest, func(out io.Writer) error {
+		return json.NewEncoder(out).Encode(body)
+	})
 }
 
 // setJSONHeaders declares the body type. Cache-Control is set for every

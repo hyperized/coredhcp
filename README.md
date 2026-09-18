@@ -248,7 +248,12 @@ This fork adds fifteen plugins upstream does not have built in:
   (`15:string:home.lan`), typed and validated, instead of one plugin per
   option
 * [metrics](plugins/metrics/) serves request counters in Prometheus text
-  format, with no new dependencies
+  format, with no new dependencies, on a unix socket or a loopback port. The
+  exposition is unauthenticated, so it is held to the same addresses as the
+  lease API: `metrics: 127.0.0.1:9754`, `metrics: tcp:127.0.0.1:9754` or
+  `metrics: unix:/run/coredhcp/metrics.sock mode:0660`. A wildcard or routable
+  bind is refused at startup, and a scraper on another host reads it through a
+  reverse proxy that authenticates
 * [macfilter](plugins/macfilter/) allows or denies clients by MAC, inline or
   from a file, with the caveat spelled out in its package doc: a MAC is not a
   credential, so allow mode is tidiness rather than authentication
@@ -301,7 +306,10 @@ This fork adds fifteen plugins upstream does not have built in:
   do: one JSON object per offer, ack, nak, release, decline or DHCPv6 reply,
   optionally signed with an HMAC. Delivery runs on a worker behind a bounded
   queue, so an endpoint that stops answering slows down deliveries and not
-  DHCP
+  DHCP. A hook program is started with an environment built from an allow
+  list (PATH, HOME, TMPDIR, LANG, LC_\*) plus its own LEASEHOOK_\* variables,
+  so the secrets other plugins were handed as `env:NAME` never reach it, and
+  a webhook redirect is refused rather than followed
 * [leaseapi](plugins/leaseapi/) answers what the server is holding right now
   over a read-only HTTP API on a unix socket or on loopback, which is the
   most-asked-for thing in the upstream tracker (coredhcp/coredhcp#111) and what

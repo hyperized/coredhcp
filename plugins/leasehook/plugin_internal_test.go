@@ -16,7 +16,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -33,6 +35,11 @@ import (
 const (
 	helperModeEnv = "COREDHCP_LEASEHOOK_HELPER"
 	helperOutEnv  = "COREDHCP_LEASEHOOK_OUT"
+
+	// probeEnv looks like a secret an operator would pass to some plugin
+	// with env:NAME. It is never in the allow list, so helperMain recording
+	// it empty is the proof that childEnv actually keeps it out.
+	probeEnv = "COREDHCP_LEASEHOOK_TEST_SECRET"
 
 	helperOK     = "ok"
 	helperFail   = "fail"
@@ -73,7 +80,7 @@ func helperMain(mode string) int {
 	if err != nil {
 		return 4
 	}
-	record := map[string]string{"stdin": string(body)}
+	record := map[string]string{"stdin": string(body), "PROBE": os.Getenv(probeEnv)}
 	for _, name := range []string{"EVENT", "FAMILY", "MAC", "ADDRESSES", "HOSTNAME"} {
 		record[name] = os.Getenv(envPrefix + name)
 	}
@@ -662,30 +669,36 @@ func TestTimeNowFallsBackToTheWallClock(t *testing.T) {
 	assert.WithinDuration(t, time.Now(), (&pluginState{}).timeNow(), time.Minute)
 }
 
+// TestWorker runs inside a synctest bubble: the worker goroutine, the queue
+// and fakeTarget's buffered channel are all fake-clock, real-I/O-free
+// participants, so synctest.Wait can stand in for the timeout a real clock
+// would otherwise need.
 func TestWorker(t *testing.T) {
-	p := newTestPlugin(t, "exec:/bin/true")
-	fake := &fakeTarget{delivered: make(chan delivery, 2), err: errors.New("the endpoint said no")}
-	p.target = fake
-	go p.run()
+	synctest.Test(t, func(t *testing.T) {
+		p := newTestPlugin(t, "exec:/bin/true")
+		fake := &fakeTarget{delivered: make(chan delivery, 2), err: errors.New("the endpoint said no")}
+		p.target = fake
+		go p.run()
 
-	req := v4Request(t, dhcpv4.MessageTypeRequest)
-	resp := v4Reply(t, req,
-		dhcpv4.WithMessageType(dhcpv4.MessageTypeAck),
-		dhcpv4.WithYourIP(net.IPv4(10, 0, 0, 5)))
-	got, stop := p.Handler4(req, resp)
-	assert.Same(t, resp, got)
-	assert.False(t, stop, "the plugin never ends the chain")
+		req := v4Request(t, dhcpv4.MessageTypeRequest)
+		resp := v4Reply(t, req,
+			dhcpv4.WithMessageType(dhcpv4.MessageTypeAck),
+			dhcpv4.WithYourIP(net.IPv4(10, 0, 0, 5)))
+		got, stop := p.Handler4(req, resp)
+		assert.Same(t, resp, got)
+		assert.False(t, stop, "the plugin never ends the chain")
 
-	select {
-	case d := <-fake.delivered:
+		// Every goroutine in the bubble is durably blocked once the worker
+		// has delivered the event and gone back to waiting on the queue, so
+		// the channel already holds it by the time Wait returns.
+		synctest.Wait()
+		d := <-fake.delivered
 		assert.Equal(t, eventAck, d.ev.Event)
-	case <-time.After(10 * time.Second):
-		t.Fatal("the event was never delivered")
-	}
 
-	// stopWorker blocks until the goroutine is gone, so a worker that did not
-	// notice would fail this test by timing out.
-	p.stopWorker()
+		// stopWorker blocks until the goroutine is gone, so a worker that did
+		// not notice would deadlock the bubble instead of the test hanging.
+		p.stopWorker()
+	})
 }
 
 func TestHandlersIgnoreWhatIsNotAnEvent(t *testing.T) {
@@ -833,10 +846,46 @@ func TestWebhookDeliver(t *testing.T) {
 	})
 }
 
-func TestCommandDeliver(t *testing.T) {
+// TestWebhookDeliverRefusesRedirects proves a redirect is reported as a
+// failure rather than followed: the second server, standing in for wherever
+// the redirect points, must never see a request at all.
+func TestWebhookDeliverRefusesRedirects(t *testing.T) {
+	var hits atomic.Int32
+	moved := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(moved.Close)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, moved.URL, http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	d := delivery{payload: []byte(`{"family":4,"event":"ack"}`), ev: event{Family: familyV4, Event: eventAck}}
+	err := newWebhook(srv.URL, nil).deliver(t.Context(), d)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "302 Found")
+	assert.Equal(t, int32(0), hits.Load(), "the endpoint the redirect pointed at must never be reached")
+}
+
+// helperCommand builds a command pointing at the re-executed test binary,
+// steered into the given helper mode. mode and out reach the child through
+// extraEnv rather than the process environment: childEnv no longer copies
+// that wholesale, so setting them with t.Setenv, as before the allow list
+// existed, would no longer reach the child at all.
+func helperCommand(t *testing.T, mode, out string) *command {
+	t.Helper()
 	self, err := os.Executable()
 	require.NoError(t, err)
+	env := []string{helperModeEnv + "=" + mode}
+	if out != "" {
+		env = append(env, helperOutEnv+"="+out)
+	}
+	return &command{path: self, extraEnv: env}
+}
 
+func TestCommandDeliver(t *testing.T) {
 	d := delivery{
 		payload: []byte(`{"family":4,"event":"ack"}`),
 		ev: event{
@@ -850,10 +899,7 @@ func TestCommandDeliver(t *testing.T) {
 
 	t.Run("the event arrives on stdin and in the environment", func(t *testing.T) {
 		out := filepath.Join(t.TempDir(), "event.json")
-		t.Setenv(helperModeEnv, helperOK)
-		t.Setenv(helperOutEnv, out)
-
-		require.NoError(t, (&command{path: self}).deliver(t.Context(), d))
+		require.NoError(t, helperCommand(t, helperOK, out).deliver(t.Context(), d))
 
 		raw, err := os.ReadFile(out)
 		require.NoError(t, err)
@@ -869,17 +915,65 @@ func TestCommandDeliver(t *testing.T) {
 	})
 
 	t.Run("a non-zero exit is an error carrying stderr", func(t *testing.T) {
-		t.Setenv(helperModeEnv, helperFail)
-		err := (&command{path: self}).deliver(t.Context(), d)
+		err := helperCommand(t, helperFail, "").deliver(t.Context(), d)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "exit status 3")
 		assert.Contains(t, err.Error(), helperStderr)
 	})
 
 	t.Run("a program that hangs runs into the timeout", func(t *testing.T) {
-		t.Setenv(helperModeEnv, helperSleep)
 		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 		defer cancel()
-		require.Error(t, (&command{path: self}).deliver(ctx, d))
+		require.Error(t, helperCommand(t, helperSleep, "").deliver(ctx, d))
+	})
+}
+
+// TestCommandDeliverDropsSecretsFromTheParentEnvironment proves the exec
+// target no longer hands a hook program the whole server environment. The
+// probe variable is set the same way a real secret would be, with
+// t.Setenv, and helperMain reports back whether it ever saw it.
+func TestCommandDeliverDropsSecretsFromTheParentEnvironment(t *testing.T) {
+	t.Setenv(probeEnv, "hunter2")
+
+	out := filepath.Join(t.TempDir(), "event.json")
+	d := delivery{payload: []byte(`{"family":4,"event":"ack"}`), ev: event{Family: familyV4, Event: eventAck}}
+	require.NoError(t, helperCommand(t, helperOK, out).deliver(t.Context(), d))
+
+	raw, err := os.ReadFile(out)
+	require.NoError(t, err)
+	var got map[string]string
+	require.NoError(t, json.Unmarshal(raw, &got))
+	assert.Empty(t, got["PROBE"], "a variable outside the allow list must never reach the hook program")
+}
+
+func TestChildEnv(t *testing.T) {
+	t.Run("passes through the allow list and LC_*, drops the rest", func(t *testing.T) {
+		t.Setenv("HOME", "/home/operator")
+		t.Setenv("LC_ALL", "C")
+		t.Setenv(probeEnv, "hunter2")
+
+		env := childEnv([]string{envPrefix + "EVENT=ack"})
+
+		assert.Contains(t, env, "HOME=/home/operator")
+		assert.Contains(t, env, "LC_ALL=C")
+		assert.Contains(t, env, envPrefix+"EVENT=ack")
+		for _, kv := range env {
+			assert.False(t, strings.HasPrefix(kv, probeEnv+"="),
+				"a variable outside the allow list must never reach a hook program")
+		}
+	})
+
+	t.Run("an allow-listed variable the parent does not have is left out", func(t *testing.T) {
+		old, had := os.LookupEnv("LANG")
+		require.NoError(t, os.Unsetenv("LANG"))
+		t.Cleanup(func() {
+			if had {
+				require.NoError(t, os.Setenv("LANG", old))
+			}
+		})
+
+		for _, kv := range childEnv(nil) {
+			assert.False(t, strings.HasPrefix(kv, "LANG="))
+		}
 	})
 }
