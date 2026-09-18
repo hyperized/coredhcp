@@ -28,21 +28,17 @@ const maxArgsW = 40
 // may hold secrets, and this pane is the one place they would otherwise end up
 // on a shared screen.
 //
-// config.RedactArgs runs first, so the pane covers the same shapes the
-// startup log does: the password:, token: and secret: prefixes, and a NetBox
-// token recognised by its length. The server already redacts before it hands
-// the event over, but the pane cannot tell where an event came from, and a
-// second pass over an argument that is already *** changes nothing. The local
-// pass after it catches what config leaves alone, such as a bare hex key too
-// short to be a NetBox token.
+// config.RedactArgs runs first for parity with the startup log, then the local
+// pass catches what it leaves alone, such as a hex key too short to be a
+// NetBox token. Redacting twice is harmless, and the pane cannot tell whether
+// the server already did it.
 func redactArgs(args []string) string {
 	if len(args) == 0 {
 		return ""
 	}
 
-	// RedactArgs hands back a slice of its own, so the second pass writes
-	// over that one instead of allocating another. The caller's slice is
-	// untouched either way.
+	// RedactArgs returns a slice of its own, so the second pass may write over
+	// it without touching the caller's.
 	out := config.RedactArgs(args)
 	for i, a := range out {
 		out[i] = redactArg(a)

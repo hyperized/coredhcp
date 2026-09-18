@@ -2098,9 +2098,6 @@ func TestRedactArg(t *testing.T) {
 	}
 }
 
-// TestRedactArgs pins that redactArgs joins its redacted arguments with a
-// space, returns the empty string for none, and runs both passes: the shapes
-// only config.RedactArgs knows, and the ones only the local pass knows.
 func TestRedactArgs(t *testing.T) {
 	t.Parallel()
 
@@ -2130,9 +2127,8 @@ func TestRedactArgs(t *testing.T) {
 	}
 }
 
-// TestRedactArgsLeavesTheCallerSliceAlone pins that the pane never edits the
-// arguments the model holds: it renders them every frame, so mutating them
-// once would stick.
+// The model's arguments are rendered every frame, so redacting them in place
+// would stick.
 func TestRedactArgsLeavesTheCallerSliceAlone(t *testing.T) {
 	t.Parallel()
 

@@ -17,17 +17,14 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coredhcp/coredhcp/cmd/coredhcp-tui/internal/tui"
+	"github.com/coredhcp/coredhcp/cmd/coredhcp-tui/tui"
 	"github.com/coredhcp/coredhcp/events"
 )
 
-// The tests in this file run inside a synctest bubble. Time there is the
-// bubble's own and moves only once every goroutine is blocked, so a wait
-// costs no real seconds and cannot end early: it ends when the draw loop has
-// caught up, or it runs out because the draw loop never will.
-//
-// waitFor is how long a test gives a frame to show what it asked for, and
-// refresh is the draw loop's tick, so one step of a wait is one frame.
+// Time inside the synctest bubble only moves once every goroutine is blocked,
+// so waitFor costs no real seconds and runs out only if the draw loop never
+// catches up. refresh matches the UI's tick, so one step of a wait is one
+// frame.
 const (
 	waitFor = 5 * time.Second
 	refresh = 2 * time.Millisecond
@@ -216,15 +213,13 @@ func (h *harness) text() string {
 	return strings.Join(h.screen.rows(), "\n")
 }
 
-// frame lets the draw loop wake for its next tick and waits for the frame it
-// draws to land, so the next look at the cells finds a finished frame rather
-// than half of one.
+// frame advances the bubble one tick and waits for the draw it triggers, so a
+// caller never reads half a frame.
 func (h *harness) frame() {
 	time.Sleep(refresh)
 	synctest.Wait()
 }
 
-// waitFor steps the screen a frame at a time until want is satisfied.
 func (h *harness) waitFor(what string, want func(string) bool) {
 	h.t.Helper()
 
@@ -247,8 +242,8 @@ func (h *harness) waitText(want string) {
 	h.waitFor(want, func(screen string) bool { return strings.Contains(screen, want) })
 }
 
-// settles watches the screen for d and fails the moment unwanted shows up,
-// proving it stays off screen rather than that a check ran once too early.
+// settles watches for the whole of d rather than checking once, so an absence
+// cannot be an assertion that merely ran too early.
 func (h *harness) settles(unwanted string, d time.Duration) {
 	h.t.Helper()
 
@@ -259,9 +254,6 @@ func (h *harness) settles(unwanted string, d time.Duration) {
 	}
 }
 
-// staysText watches the screen for d and fails if want ever goes missing,
-// proving a key press left it alone rather than that a check ran once too
-// early.
 func (h *harness) staysText(want string, d time.Duration) {
 	h.t.Helper()
 

@@ -18,6 +18,6 @@
 // text to tview inside QueueUpdateDraw. The render functions are ordinary
 // functions over a snapshot, so they can be tested without a screen; the
 // tests that do want a screen use tcell's simulation screen inside a synctest
-// bubble, where the ticker runs on the bubble's clock and a test steps frames
-// instead of sleeping for them.
+// bubble, so the ticker runs on the bubble's clock and no test waits on real
+// time.
 package tui
