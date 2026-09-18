@@ -206,7 +206,10 @@ DNS server ([test/ddns/](test/ddns/)): one container for Knot holding a
 forward zone and two reverse zones that accept a TSIG key, one `golang`
 container running the tests tagged `integration` against it. The tests drive
 the plugin's handlers in-process and then query Knot to see that the records
-really landed and that a release took them away again.
+really landed and that a release took them away again. Knot weighs the DHCID
+prerequisites too, so the case that matters most is checked against a real
+name server: a second client asking for a name the first one holds gets
+neither the name nor the ability to delete it.
 
 ## Docker
 
@@ -324,7 +327,11 @@ This fork adds fifteen plugins upstream does not have built in:
   RFC 2136 updates signed with a TSIG key (upstream issue #92, open since
   2020: Kea does this, dnsmasq does not). Forward and reverse zones, both
   families, names allow-listed before they reach a zone, and delivery off
-  the packet path through a bounded queue
+  the packet path through a bounded queue. A name is held against the
+  client it was written for with a DHCID record (RFC 4701) and the conflict
+  resolution of RFC 4703, so one client cannot take another's name or
+  delete it; `protect:` keeps named hosts such as `gateway` out of reach
+  entirely
 * [leasehook](plugins/leasehook/) reports every lease event to a webhook or a
   local program, the way Kea's `run_script` hook and dnsmasq's `dhcp-script`
   do: one JSON object per offer, ack, nak, release, decline or DHCPv6 reply,
