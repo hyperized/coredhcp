@@ -320,14 +320,18 @@ type pluginState struct {
 	dbCancel context.CancelFunc
 
 	// writes carries binding changes to the writer goroutine, stopWrites
-	// closes to shut it down and writerDone closes once it has drained.
-	// writeErrors paces its failure log and belongs to it alone. All four
-	// are nil until startWriter runs, which is what makes a state built by
-	// hand write inline; see storage.go.
-	writes      chan bindingWrite
-	stopWrites  chan struct{}
-	writerDone  chan struct{}
-	writeErrors logThrottle
+	// closes to shut it down and writerDone closes once it has drained. All
+	// three are nil until startWriter runs, which is what makes a state
+	// built by hand write inline; see storage.go.
+	writes     chan bindingWrite
+	stopWrites chan struct{}
+	writerDone chan struct{}
+
+	// pending holds the changes queued since the lock was taken, for the
+	// caller to wait on once it has let the lock go. Guarded by the plugin
+	// lock, and emptied by withLock before the lock is released, so it only
+	// ever holds one caller's writes.
+	pending []pendingWrite
 
 	// now is the clock seam. It is written once during setup, before the
 	// sweeper goroutine starts, and only read afterwards. Use timeNow rather
@@ -350,6 +354,20 @@ func (p *pluginState) timeNow() time.Time {
 		return time.Now()
 	}
 	return p.now()
+}
+
+// withLock runs fn under the plugin lock and hands back the binding writes
+// it queued, which the caller waits for with settle once the lock is free.
+//
+// Every path that changes binding state goes through here. Taking the queued
+// writes while the lock is still held is what makes them this caller's and
+// nobody else's, and doing it in one place is what stops a path from
+// forgetting to.
+func (p *pluginState) withLock(fn func()) []pendingWrite {
+	p.Lock()
+	defer p.Unlock()
+	fn()
+	return p.takePending()
 }
 
 // messageHandlers dispatches on the message type. A type that is not in here,
@@ -441,19 +459,61 @@ func limitIANAs(ianas []*dhcpv6.OptIANA) []*dhcpv6.OptIANA {
 	return ianas[:maxIANAs]
 }
 
-// eachIANA answers every IA_NA of the message under the plugin lock and adds
-// what comes back to the response. An answer of nil adds nothing, which is how
-// REBIND stays quiet about a binding it does not have.
-func (p *pluginState) eachIANA(msg *dhcpv6.Message, resp dhcpv6.DHCPv6, answer func(*dhcpv6.OptIANA, time.Time) *dhcpv6.OptIANA) {
-	p.Lock()
-	defer p.Unlock()
+// ianaAnswer is one IA_NA's answer and the range of queued writes it stands
+// on, as offsets into the message's pending list.
+type ianaAnswer struct {
+	reply    *dhcpv6.OptIANA
+	iaid     [4]byte
+	from, to int
+}
 
-	now := p.timeNow()
-	for _, ia := range limitIANAs(msg.Options.IANA()) {
-		if reply := answer(ia, now); reply != nil {
-			resp.AddOption(reply)
+// eachIANA answers every IA_NA of the message and adds what comes back to
+// the response. An answer of nil adds nothing, which is how REBIND stays
+// quiet about a binding it does not have.
+//
+// The state changes happen under the plugin lock; the answers go into the
+// response afterwards, once the writes behind them are on disk. An IA whose
+// write failed is answered by refuse instead, because telling a client it
+// holds an address that no restart would know about is the one thing worth
+// avoiding here.
+func (p *pluginState) eachIANA(msg *dhcpv6.Message, resp dhcpv6.DHCPv6,
+	answer func(*dhcpv6.OptIANA, time.Time) *dhcpv6.OptIANA,
+	refuse func([4]byte) *dhcpv6.OptIANA,
+) {
+	var answers []ianaAnswer
+	pending := p.withLock(func() {
+		now := p.timeNow()
+		for _, ia := range limitIANAs(msg.Options.IANA()) {
+			from := len(p.pending)
+			reply := answer(ia, now)
+			answers = append(answers, ianaAnswer{reply: reply, iaid: ia.IaId, from: from, to: len(p.pending)})
+		}
+	})
+
+	results := p.settleAll(pending)
+	for _, a := range answers {
+		if err := firstError(results[a.from:a.to]); err != nil {
+			log.Errorf("Could not record the change for IAID %x: %v", a.iaid, err)
+			a.reply = refuse(a.iaid)
+		}
+		if a.reply != nil {
+			resp.AddOption(a.reply)
 		}
 	}
+}
+
+// noAddress is the answer for an IA whose change could not be written. A
+// client that is told nothing is available asks again, which is the right
+// thing for it to do when the server could not record what it just did.
+func noAddress(iaid [4]byte) *dhcpv6.OptIANA {
+	return statusIANA(iaid, dhcpIana.StatusNoAddrsAvail, "the binding could not be recorded")
+}
+
+// notDone is the answer for a RELEASE or a DECLINE whose change could not be
+// written. The client asked us to forget something and we did not manage to,
+// so saying so beats a Success it cannot rely on.
+func notDone(iaid [4]byte) *dhcpv6.OptIANA {
+	return statusIANA(iaid, dhcpIana.StatusUnspecFail, "the change could not be recorded")
 }
 
 // handleBind answers a SOLICIT or a REQUEST.
@@ -461,7 +521,7 @@ func (p *pluginState) handleBind(msg *dhcpv6.Message, resp dhcpv6.DHCPv6, duid [
 	hostname := clientHostname(msg)
 	p.eachIANA(msg, resp, func(ia *dhcpv6.OptIANA, now time.Time) *dhcpv6.OptIANA {
 		return p.bind(duid, ia, hostname, now)
-	})
+	}, noAddress)
 }
 
 // handleRenew answers a RENEW: the binding is extended, and an IAID we have
@@ -474,7 +534,7 @@ func (p *pluginState) handleRenew(msg *dhcpv6.Message, resp dhcpv6.DHCPv6, duid 
 			return answer
 		}
 		return statusIANA(ia.IaId, dhcpIana.StatusNoBinding, "no address bound to this IAID")
-	})
+	}, noAddress)
 }
 
 // handleRebind answers a REBIND. Unlike a RENEW it is addressed to every
@@ -484,7 +544,7 @@ func (p *pluginState) handleRebind(msg *dhcpv6.Message, resp dhcpv6.DHCPv6, duid
 	hostname := clientHostname(msg)
 	p.eachIANA(msg, resp, func(ia *dhcpv6.OptIANA, now time.Time) *dhcpv6.OptIANA {
 		return p.extend(duid, ia, hostname, now)
-	})
+	}, noAddress)
 }
 
 // handleRelease frees the addresses a RELEASE names and answers per IA plus a
@@ -492,7 +552,7 @@ func (p *pluginState) handleRebind(msg *dhcpv6.Message, resp dhcpv6.DHCPv6, duid
 func (p *pluginState) handleRelease(msg *dhcpv6.Message, resp dhcpv6.DHCPv6, duid []byte) {
 	p.eachIANA(msg, resp, func(ia *dhcpv6.OptIANA, _ time.Time) *dhcpv6.OptIANA {
 		return p.releaseIANA(duid, ia)
-	})
+	}, notDone)
 	resp.AddOption(&dhcpv6.OptStatusCode{
 		StatusCode:    dhcpIana.StatusSuccess,
 		StatusMessage: "addresses released",
@@ -505,7 +565,7 @@ func (p *pluginState) handleRelease(msg *dhcpv6.Message, resp dhcpv6.DHCPv6, dui
 func (p *pluginState) handleDecline(msg *dhcpv6.Message, resp dhcpv6.DHCPv6, duid []byte) {
 	p.eachIANA(msg, resp, func(ia *dhcpv6.OptIANA, now time.Time) *dhcpv6.OptIANA {
 		return p.declineIANA(duid, ia, now)
-	})
+	}, notDone)
 	resp.AddOption(&dhcpv6.OptStatusCode{
 		StatusCode:    dhcpIana.StatusSuccess,
 		StatusMessage: "addresses declined",
@@ -607,9 +667,9 @@ func requestedAddress(ia *dhcpv6.OptIANA) net.IPNet {
 
 // renewKnown extends the binding for key when there is one. found reports
 // whether the client held one at all, which is what separates "no binding"
-// from "nothing left to give". A nil record with found true means the binding
-// had lapsed and the pool could not give the address back. The caller must
-// hold p's lock.
+// from "nothing left to give". A nil record with found true means the
+// binding had lapsed and the pool could not give the address back, or the
+// extension could not be recorded. The caller must hold p's lock.
 func (p *pluginState) renewKnown(key, hostname string, now time.Time) (rec *Record, found bool) {
 	known, ok := p.Records6[key]
 	if !ok {
@@ -618,7 +678,9 @@ func (p *pluginState) renewKnown(key, hostname string, now time.Time) (rec *Reco
 	if known.expired(now) {
 		return p.reallocateExpired(key, known, hostname, now), true
 	}
-	p.renew(known, hostname, now)
+	if !p.renew(known, hostname, now) {
+		return nil, true
+	}
 	return known, true
 }
 
@@ -644,18 +706,40 @@ func (p *pluginState) allocateLease(key string, duid []byte, iaid [4]byte, hint 
 		expires:  now.Add(p.LeaseTime).Round(time.Second).Unix(),
 		hostname: hostname,
 	}
-	if err := p.saveIPAddress(rec); err != nil {
-		// Handing out an address we could not record would put a second
-		// client on it after a restart, which is worse than one client
-		// asking again, so the address goes back.
+	// Handing out an address we could not record would put a second client
+	// on it after a restart, which is worse than one client asking again,
+	// so the address goes back whether the write is refused now or fails
+	// later.
+	if err := p.saveIPAddress(rec, func() { p.dropUnwritten(key, rec) }); err != nil {
 		log.Errorf("Could not persist the binding for DUID %x IAID %x: %v", duid, iaid, err)
-		if err := p.allocator.Free(net.IPNet{IP: rec.IP}); err != nil {
-			log.Errorf("Could not return the unrecorded address %s to the pool: %v", rec.IP, err)
-		}
+		p.freeUnrecorded(rec)
 		return nil
 	}
 	p.Records6[key] = rec
 	return rec
+}
+
+// dropUnwritten takes back a binding whose row did not make it to disk.
+//
+// The record goes only if it is still the one this write was for. A release,
+// or a later binding for the same client, has already dealt with the address
+// by then, and returning it a second time would take it from whoever holds
+// it now. The caller must hold p's lock.
+func (p *pluginState) dropUnwritten(key string, rec *Record) {
+	if p.Records6[key] != rec {
+		return
+	}
+	delete(p.Records6, key)
+	p.freeUnrecorded(rec)
+}
+
+// freeUnrecorded returns an address to the pool whose binding was never
+// recorded, so nothing else can be holding it. The caller must hold p's
+// lock.
+func (p *pluginState) freeUnrecorded(rec *Record) {
+	if err := p.allocator.Free(net.IPNet{IP: rec.IP}); err != nil {
+		log.Errorf("Could not return the unrecorded address %s to the pool: %v", rec.IP, err)
+	}
 }
 
 // atLeaseLimit reports whether the binding table has reached max-leases, and
@@ -719,7 +803,9 @@ func (p *pluginState) reallocateExpired(key string, record *Record, hostname str
 		// again could hand a second client the same address. Keep this client
 		// where it is and let the next sweep retry.
 		p.Records6[key] = record
-		p.renew(record, hostname, now)
+		if !p.renew(record, hostname, now) {
+			return nil
+		}
 		return record
 	}
 	return p.allocateLease(key, record.DUID, record.IAID, hint, hostname, now)
@@ -729,20 +815,33 @@ func (p *pluginState) reallocateExpired(key string, record *Record, hostname str
 // advertise, and persists the change. A binding with enough time left is left
 // untouched.
 //
-// Unlike a fresh allocation, an extension that cannot be written is logged
-// and kept in memory anyway. The address is already this client's, so the
-// worst a lost expiry costs is a binding that lapses early after a restart,
-// and the client renews again long before then. The caller must hold p's
-// lock.
-func (p *pluginState) renew(record *Record, hostname string, now time.Time) {
+// An extension that cannot be written is rolled back and the client is
+// answered with a status instead, the same as a fresh binding that cannot be
+// written: the lifetime in the reply would otherwise be one the lease file
+// has never heard of. It reports whether the client can be answered with
+// this binding. The caller must hold p's lock.
+func (p *pluginState) renew(record *Record, hostname string, now time.Time) bool {
 	if !time.Unix(record.expires, 0).Before(now.Add(p.LeaseTime)) {
-		return
+		return true
 	}
+	was, wasHostname := record.expires, record.hostname
 	record.expires = now.Add(p.LeaseTime).Round(time.Second).Unix()
 	record.hostname = hostname
-	if err := p.saveIPAddress(record); err != nil {
-		log.Errorf("Could not persist the binding on %s: %v", record.IP, err)
+	extended := record.expires
+	undo := func() {
+		// Only if nothing has moved it on since: a renewal that landed
+		// after this one is the client's current binding, not ours to
+		// shorten.
+		if record.expires == extended {
+			record.expires, record.hostname = was, wasHostname
+		}
 	}
+	if err := p.saveIPAddress(record, undo); err != nil {
+		log.Errorf("Could not persist the binding on %s: %v", record.IP, err)
+		undo()
+		return false
+	}
+	return true
 }
 
 // releaseLease returns a binding's address to the pool: it deletes the row
@@ -963,9 +1062,12 @@ func (p *pluginState) reclaim(t time.Time) int {
 // sweepOnce takes the lock and reclaims every expired binding and every
 // declined address whose probation has run out.
 func (p *pluginState) sweepOnce() {
-	p.Lock()
-	defer p.Unlock()
-	if freed := p.reclaim(p.timeNow()); freed > 0 {
+	var freed int
+	pending := p.withLock(func() { freed = p.reclaim(p.timeNow()) })
+	if err := p.settle(pending); err != nil {
+		log.Errorf("Could not clear a reclaimed binding from storage: %v", err)
+	}
+	if freed > 0 {
 		log.Printf("Returned %d DHCPv6 address(es) to the pool", freed)
 	}
 }

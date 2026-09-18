@@ -298,13 +298,14 @@ func TestHandler4RenewalSaveError(t *testing.T) {
 	req := &dhcpv4.DHCPv4{ClientHWAddr: hwaddr}
 	resp := &dhcpv4.DHCPv4{Options: make(dhcpv4.Options)}
 
-	// a storage failure while renewing is only logged; the in-memory lease
-	// is still extended and returned to the client.
+	// An extension that cannot be written is rolled back and the client is
+	// told nothing: the lease time in the reply would otherwise be one the
+	// lease file has never heard of.
 	result, stop := pl.Handler4(req, resp)
-	require.NotNil(t, result)
-	assert.False(t, stop)
-	assert.Equal(t, existing.IP, result.YourIPAddr)
-	assert.Greater(t, existing.expires, expiresBefore)
+	assert.Nil(t, result)
+	assert.True(t, stop)
+	assert.Equal(t, expiresBefore, existing.expires, "the extension must not survive the failed write")
+	assert.Equal(t, "old-name", existing.hostname)
 }
 
 func TestHandler4Release(t *testing.T) {
@@ -714,20 +715,22 @@ func TestHandler4ExpiredLeaseStorageFailure(t *testing.T) {
 	mockAlloc := &mockAllocator{}
 
 	const mac = "02:00:00:00:0d:00"
-	leased := request(t, pl, mac)
-	require.NotNil(t, leased)
+	require.NotNil(t, request(t, pl, mac))
+	leasedUntil := pl.Recordsv4[mac].expires
 
 	clock.Advance(testLeaseTime + time.Second)
 	require.NoError(t, pl.leasedb.Close()) // every statement now fails
 	pl.allocator = mockAlloc
 
-	got := request(t, pl, mac)
-	require.NotNil(t, got, "the client keeps the address it already had")
-	assert.Equal(t, leased, got)
+	// Neither half of the exchange can be written: the lapsed lease cannot
+	// be cleared and the renewal that would stand in for it cannot be
+	// recorded either, so the client is answered with nothing rather than
+	// with a lease time no restart would honour.
+	assert.Nil(t, request(t, pl, mac))
 
 	rec, ok := pl.Recordsv4[mac]
 	require.True(t, ok, "a lease that could not be reclaimed stays tracked")
-	assert.Equal(t, clock.Now().Add(testLeaseTime).Unix(), rec.expires, "it is renewed in place instead")
+	assert.Equal(t, leasedUntil, rec.expires, "and keeps the expiry it already had")
 	mockAlloc.AssertNotCalled(t, "Free")
 	mockAlloc.AssertNotCalled(t, "Allocate")
 }

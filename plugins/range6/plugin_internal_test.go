@@ -5,6 +5,7 @@
 package range6
 
 import (
+	"context"
 	"database/sql"
 	"database/sql/driver"
 	"errors"
@@ -259,23 +260,27 @@ func TestReallocateExpiredKeepsAddressForLateClient(t *testing.T) {
 }
 
 // TestReallocateExpiredReleaseLeaseFailureKeepsClientOnOldRecord covers the
-// fallback of reallocateExpired: when the stale binding can't be forgotten on
-// disk, re-allocating would risk handing the address to a second client, so
-// the caller is left on its old record instead.
+// fallback of reallocateExpired: when the stale binding can't be forgotten
+// on disk, re-allocating would risk handing the address to a second client,
+// so the record stays where it is. The renewal that would have stood in for
+// it cannot be written either, so the client is answered with nothing while
+// its record keeps the expiry it had.
 func TestReallocateExpiredReleaseLeaseFailureKeepsClientOnOldRecord(t *testing.T) {
 	p, clock := newTestPluginState(t, net.ParseIP(poolFirst), net.ParseIP(poolLast))
 	key := leaseKey(duidA, iaidX)
 
 	rec := p.allocateLease(key, duidA, iaidX, net.IPNet{}, "old-name", clock.Now())
 	require.NotNil(t, rec)
-	rec.expires = clock.Now().Add(-time.Second).Unix()
+	lapsed := clock.Now().Add(-time.Second).Unix()
+	rec.expires = lapsed
 	require.NoError(t, p.leasedb.Close()) // every statement now fails
 
 	got, found := p.renewKnown(key, "new-name", clock.Now())
-	require.True(t, found)
-	require.Same(t, rec, got, "the client must be left on its old record")
-	assert.Equal(t, clock.Now().Add(testLeaseTime).Unix(), got.expires, "it is renewed in place instead")
-	assert.Same(t, rec, p.Records6[key])
+	assert.True(t, found, "the client is known, it just cannot be answered")
+	assert.Nil(t, got)
+	assert.Same(t, rec, p.Records6[key], "and it keeps its record, address and all")
+	assert.Equal(t, lapsed, rec.expires)
+	assert.Equal(t, "old-name", rec.hostname)
 }
 
 // TestAllocateLeaseSaveIPAddressFailureRefusesTheBinding covers a storage
@@ -357,21 +362,22 @@ func TestAllocateGivesUpWhenNothingCanBeReclaimed(t *testing.T) {
 	assert.Error(t, err)
 }
 
-// TestRenewSaveIPAddressFailureStillExtendsInMemory covers renew's storage
-// failure: the in-memory binding is extended and handed to the client
-// regardless, with only the log recording that it wasn't persisted.
-func TestRenewSaveIPAddressFailureStillExtendsInMemory(t *testing.T) {
+// TestRenewSaveIPAddressFailureRollsBack covers renew's storage failure: an
+// extension that cannot be written is put back, because the lifetime the
+// client would be told otherwise is one no restart would honour.
+func TestRenewSaveIPAddressFailureRollsBack(t *testing.T) {
 	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
 	p := &pluginState{leasedb: db, LeaseTime: testLeaseTime}
 	now := time.Now()
-	rec := &Record{expires: now.Add(time.Minute).Unix(), hostname: "old-name"}
+	was := now.Add(time.Minute).Unix()
+	rec := &Record{expires: was, hostname: "old-name"}
 
-	p.renew(rec, "new-name", now)
-	assert.Equal(t, "new-name", rec.hostname)
-	assert.Equal(t, now.Add(testLeaseTime).Round(time.Second).Unix(), rec.expires)
+	assert.False(t, p.renew(rec, "new-name", now), "the client cannot be answered with this binding")
+	assert.Equal(t, "old-name", rec.hostname)
+	assert.Equal(t, was, rec.expires)
 }
 
 // TestRenewLeavesFullTermBindingUntouched pins renew's no-op branch: a
@@ -537,7 +543,7 @@ func TestSweepExpiredSkipsUndeletableRecordButReclaimsOthers(t *testing.T) {
 	for _, rec := range []*Record{stuck, reclaimable} {
 		_, err := alloc.Allocate(net.IPNet{IP: rec.IP})
 		require.NoError(t, err)
-		require.NoError(t, p.saveIPAddress(rec))
+		require.NoError(t, p.saveIPAddress(rec, nil))
 		p.Records6[rec.key()] = rec
 	}
 
@@ -818,7 +824,7 @@ func TestSaveIPAddressExecFailure(t *testing.T) {
 	require.NoError(t, db.Close())
 
 	p := &pluginState{leasedb: db}
-	err = p.saveIPAddress(&Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::100")})
+	err = p.saveIPAddress(&Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::100")}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "could not store the binding")
 }
@@ -1024,6 +1030,18 @@ func TestAllocateLeaseSaveFailureAndFreeFailureAreBothLogged(t *testing.T) {
 	mockAlloc.AssertExpectations(t)
 }
 
+// queuedWrite fills in what enqueue normally adds to a change before the
+// writer sees it: the context that bounds it and the channel its result goes
+// back on. A test that calls write or applyWrite directly has to supply
+// both.
+func queuedWrite(t *testing.T, w bindingWrite) bindingWrite {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), writeTimeout)
+	t.Cleanup(cancel)
+	w.ctx, w.cancel, w.done = ctx, cancel, make(chan error, 1)
+	return w
+}
+
 // TestWriteLogsNotFoundWithoutTreatingItAsAFailure covers write's ErrNotFound
 // case directly: a delete that matched nothing is not a failure, so the
 // writer logs it at debug and moves on without retrying.
@@ -1034,16 +1052,17 @@ func TestWriteLogsNotFoundWithoutTreatingItAsAFailure(t *testing.T) {
 
 	p := &pluginState{leasedb: db}
 	rec := &Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::100")}
-	w := bindingWrite{
+	w := queuedWrite(t, bindingWrite{
 		op:    "remove",
 		duid:  rec.DUID,
 		iaid:  rec.IAID,
 		ip:    rec.IP.String(),
 		query: `delete from leases6 where duid = ? and iaid = ? and ip = ?`,
 		args:  []any{rec.DUID, iaidValue(rec.IAID), rec.IP.String()},
-	}
+	})
 
 	p.write(w) // the row was never there; this must not panic or retry
+	assert.NoError(t, <-w.done, "a change that matched nothing is reported as done")
 }
 
 // TestParseOptions covers parseOptions and the parsers it dispatches to for
@@ -1111,7 +1130,7 @@ func TestBindingExpiryPast2038(t *testing.T) {
 	rec := &Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::100"), expires: future}
 
 	p := &pluginState{leasedb: db}
-	require.NoError(t, p.saveIPAddress(rec))
+	require.NoError(t, p.saveIPAddress(rec, nil))
 
 	records, err := loadRecords(t.Context(), db)
 	require.NoError(t, err)
@@ -1130,9 +1149,9 @@ func TestEnqueueQueueFull(t *testing.T) {
 	p := &pluginState{writes: make(chan bindingWrite, 1)}
 	rec := &Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::100")}
 
-	require.NoError(t, p.saveIPAddress(rec), "the first write fills the one-deep queue")
+	require.NoError(t, p.saveIPAddress(rec, nil), "the first write fills the one-deep queue")
 
-	err := p.saveIPAddress(rec)
+	err := p.saveIPAddress(rec, nil)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrWriteQueueFull)
 
@@ -1151,14 +1170,14 @@ func TestApplyWriteNotFound(t *testing.T) {
 
 	p := &pluginState{leasedb: db}
 	rec := &Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::100")}
-	w := bindingWrite{
+	w := queuedWrite(t, bindingWrite{
 		op:    "remove",
 		duid:  rec.DUID,
 		iaid:  rec.IAID,
 		ip:    rec.IP.String(),
 		query: `delete from leases6 where duid = ? and iaid = ? and ip = ?`,
 		args:  []any{rec.DUID, iaidValue(rec.IAID), rec.IP.String()},
-	}
+	})
 
 	err = p.applyWrite(w)
 	require.Error(t, err)
@@ -1177,7 +1196,7 @@ func TestWriterFailureIsLoggedWithoutRetrying(t *testing.T) {
 	p.startWriter()
 
 	rec := &Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::100")}
-	require.NoError(t, p.saveIPAddress(rec))
+	require.NoError(t, p.saveIPAddress(rec, nil))
 
 	p.stopWriter()
 }
@@ -1208,7 +1227,243 @@ func TestWriterRetriesOnBusyThenGivesUp(t *testing.T) {
 	p.startWriter()
 
 	rec := &Record{DUID: duidB, IAID: iaidX, IP: net.ParseIP("2001:db8:1::101")}
-	require.NoError(t, p.saveIPAddress(rec))
+	require.NoError(t, p.saveIPAddress(rec, nil))
 
 	p.stopWriter()
+}
+
+// blockInserts stops the binding table taking new rows, which is how a test
+// makes a queued write fail while the plugin carries on running.
+func blockInserts(t *testing.T, db *sql.DB) {
+	t.Helper()
+	_, err := db.Exec(`CREATE TRIGGER block_insert BEFORE INSERT ON leases6
+		BEGIN SELECT RAISE(ABORT, 'insert blocked'); END`)
+	require.NoError(t, err)
+}
+
+// blockDeletes stops it losing rows, so a queued delete fails while inserts
+// carry on working.
+func blockDeletes(t *testing.T, db *sql.DB) {
+	t.Helper()
+	_, err := db.Exec(`CREATE TRIGGER block_delete BEFORE DELETE ON leases6
+		BEGIN SELECT RAISE(ABORT, 'delete blocked'); END`)
+	require.NoError(t, err)
+}
+
+// oneIANA drives one message carrying a single IA_NA through the handler
+// for its message type, and returns the answer that came back for it.
+//
+// It calls the per-message handler rather than Handler6, so a test can name
+// the DUID it wants without encoding one into a client ID option first.
+func oneIANA(t *testing.T, handle func(*dhcpv6.Message, dhcpv6.DHCPv6, []byte), duid []byte, addrs ...net.IP) *dhcpv6.OptIANA {
+	t.Helper()
+	msg, err := dhcpv6.NewMessage()
+	require.NoError(t, err)
+	ia := &dhcpv6.OptIANA{IaId: iaidX}
+	for _, addr := range addrs {
+		ia.Options.Add(&dhcpv6.OptIAAddress{IPv6Addr: addr})
+	}
+	msg.AddOption(ia)
+
+	resp := &dhcpv6.Message{MessageType: dhcpv6.MessageTypeReply}
+	handle(msg, resp, duid)
+	for _, answer := range resp.Options.IANA() {
+		if answer.IaId == iaidX {
+			return answer
+		}
+	}
+	return nil
+}
+
+// statusOf returns the status code of an answered IA_NA, or 0 when it
+// carries an address instead.
+func statusOf(ia *dhcpv6.OptIANA) dhcpIana.StatusCode {
+	if status := ia.Options.Status(); status != nil {
+		return status.StatusCode
+	}
+	return 0
+}
+
+// TestQueuedWriteFailureRefusesTheBinding pins the rule the waiting exists
+// for: a client is not told it holds an address until the row is on disk, so
+// a write that fails after it was queued costs the binding rather than
+// leaving one only this process knows about. The address has to come back
+// with it, or the pool leaks one per failure.
+func TestQueuedWriteFailureRefusesTheBinding(t *testing.T) {
+	p, _ := newTestPluginState(t, net.ParseIP(poolFirst), net.ParseIP(poolLast))
+	blockInserts(t, p.leasedb)
+	p.startWriter()
+	t.Cleanup(p.stopWriter)
+
+	answer := oneIANA(t, p.handleBind, duidA)
+	require.NotNil(t, answer)
+	assert.Equal(t, dhcpIana.StatusNoAddrsAvail, statusOf(answer))
+
+	p.Lock()
+	assert.Empty(t, p.Records6, "a binding that never reached the disk is not kept")
+	p.Unlock()
+
+	// The address went back, so the pool still starts where it did.
+	first, err := p.allocator.Allocate(net.IPNet{})
+	require.NoError(t, err)
+	assert.Equal(t, poolFirst, first.IP.String())
+}
+
+// TestQueuedReleaseFailureIsAnsweredAsAFailure pins the other half: a client
+// that asked us to forget something is told we did not manage to, rather
+// than getting a Success the lease file does not back up.
+func TestQueuedReleaseFailureIsAnsweredAsAFailure(t *testing.T) {
+	p, _ := newTestPluginState(t, net.ParseIP(poolFirst), net.ParseIP(poolLast))
+
+	held := oneIANA(t, p.handleBind, duidA)
+	require.NotNil(t, held)
+	addrs := held.Options.Addresses()
+	require.Len(t, addrs, 1)
+
+	blockDeletes(t, p.leasedb)
+	p.startWriter()
+	t.Cleanup(p.stopWriter)
+
+	answer := oneIANA(t, p.handleRelease, duidA, addrs[0].IPv6Addr)
+	require.NotNil(t, answer)
+	assert.Equal(t, dhcpIana.StatusUnspecFail, statusOf(answer))
+}
+
+// TestSettleTakesTheResultThatIsAlreadyThere covers the fast path in the
+// wait: by the time a stopped writer has drained, every result is sitting in
+// its channel and nothing has to block.
+func TestSettleTakesTheResultThatIsAlreadyThere(t *testing.T) {
+	p, _ := newTestPluginState(t, net.ParseIP(poolFirst), net.ParseIP(poolLast))
+	p.startWriter()
+
+	rec := &Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP(poolFirst), expires: time.Now().Add(time.Hour).Unix()}
+	p.Lock()
+	require.NoError(t, p.saveIPAddress(rec, nil))
+	pending := p.takePending()
+	p.Unlock()
+
+	p.stopWriter()
+	assert.NoError(t, p.settle(pending))
+}
+
+// TestSettleReportsAStoppedWriter pins that a change queued after the writer
+// has gone comes back as a failure rather than as a handler that never
+// answers. Only a stopped plugin can do this, which is to say only a test.
+func TestSettleReportsAStoppedWriter(t *testing.T) {
+	p, _ := newTestPluginState(t, net.ParseIP(poolFirst), net.ParseIP(poolLast))
+	p.startWriter()
+	p.stopWriter()
+
+	rec := &Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP(poolFirst), expires: time.Now().Add(time.Hour).Unix()}
+	p.Lock()
+	require.NoError(t, p.saveIPAddress(rec, nil))
+	pending := p.takePending()
+	p.Unlock()
+
+	assert.ErrorIs(t, p.settle(pending), ErrWriterStopped)
+}
+
+// TestDropUnwrittenLeavesALaterBindingAlone covers the guard on the undo: by
+// the time a failed write is put back, the client may hold a different
+// binding, and taking that one apart would free an address somebody else
+// has.
+func TestDropUnwrittenLeavesALaterBindingAlone(t *testing.T) {
+	p, _ := newTestPluginState(t, net.ParseIP(poolFirst), net.ParseIP(poolLast))
+
+	key := leaseKey(duidA, iaidX)
+	current := &Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::101")}
+	p.Records6[key] = current
+
+	p.dropUnwritten(key, &Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP(poolFirst)})
+	assert.Same(t, current, p.Records6[key])
+}
+
+// TestSweepWriteFailureIsLogged covers the sweeper waiting for its own
+// deletes: one that fails is logged rather than carried silently, because
+// nothing else is watching the sweeper.
+func TestSweepWriteFailureIsLogged(t *testing.T) {
+	p, clock := newTestPluginState(t, net.ParseIP(poolFirst), net.ParseIP(poolLast))
+	require.NotNil(t, p.allocateLease(leaseKey(duidA, iaidX), duidA, iaidX, net.IPNet{}, "", clock.Now()))
+
+	blockDeletes(t, p.leasedb)
+	p.startWriter()
+	t.Cleanup(p.stopWriter)
+	clock.Advance(testLeaseTime + time.Second)
+
+	p.sweepOnce()
+	p.Lock()
+	assert.Empty(t, p.Records6, "the sweep drops the record whatever the disk says")
+	p.Unlock()
+}
+
+// TestRenewKnownRefusesWhenTheExtensionWillNotWrite covers renewKnown's
+// found-but-nothing-to-give branch for a write that fails: the client is
+// known, its binding is live, and the extension it asked for could not be
+// recorded, so the caller answers with a status instead of a lifetime.
+func TestRenewKnownRefusesWhenTheExtensionWillNotWrite(t *testing.T) {
+	p, clock := newTestPluginState(t, net.ParseIP(poolFirst), net.ParseIP(poolLast))
+	key := leaseKey(duidA, iaidX)
+	require.NotNil(t, p.allocateLease(key, duidA, iaidX, net.IPNet{}, "old-name", clock.Now()))
+
+	blockInserts(t, p.leasedb)
+	clock.Advance(testLeaseTime / 2)
+
+	rec, found := p.renewKnown(key, "new-name", clock.Now())
+	assert.True(t, found)
+	assert.Nil(t, rec)
+	assert.Equal(t, "old-name", p.Records6[key].hostname, "the extension was rolled back")
+}
+
+// TestExpiredBindingIsRenewedWhenItsRowWillNotGo covers the fallback in
+// reallocateExpired with only the delete failing: the address cannot be
+// reclaimed, so the client is left where it is and its binding extended in
+// place, which is a binding the disk does agree with.
+//
+// No writer runs here on purpose. The delete has to fail before the code
+// decides what to do next, which is what the inline path does; with the
+// writer in between, the failure arrives after the answer is built and the
+// whole exchange is refused instead.
+func TestExpiredBindingIsRenewedWhenItsRowWillNotGo(t *testing.T) {
+	p, clock := newTestPluginState(t, net.ParseIP(poolFirst), net.ParseIP(poolLast))
+	key := leaseKey(duidA, iaidX)
+	held := p.allocateLease(key, duidA, iaidX, net.IPNet{}, "old-name", clock.Now())
+	require.NotNil(t, held)
+
+	blockDeletes(t, p.leasedb)
+	clock.Advance(testLeaseTime + time.Second)
+
+	rec, found := p.renewKnown(key, "new-name", clock.Now())
+	assert.True(t, found)
+	require.Same(t, held, rec, "the client keeps the binding it already had")
+	assert.Equal(t, clock.Now().Add(testLeaseTime).Unix(), rec.expires)
+}
+
+// TestDrainWritesAppliesEverythingQueued pins that shutting the writer down
+// does not throw away whatever is still queued: every row handed to it must
+// be on disk once it returns. Calling drainWrites directly, rather than
+// racing it against the writer goroutine, is what makes the queued changes
+// still be there to drain.
+func TestDrainWritesAppliesEverythingQueued(t *testing.T) {
+	p, _ := newTestPluginState(t, net.ParseIP(poolFirst), net.ParseIP(poolLast))
+	p.writes = make(chan bindingWrite, 8)
+
+	duids := [][]byte{duidA, duidB}
+	for i, duid := range duids {
+		rec := &Record{
+			DUID:    duid,
+			IAID:    iaidX,
+			IP:      net.ParseIP(fmt.Sprintf("2001:db8:1::10%d", i)),
+			expires: time.Now().Add(time.Hour).Unix(),
+		}
+		require.NoError(t, p.saveIPAddress(rec, nil))
+	}
+
+	p.drainWrites()
+
+	recs, err := loadRecords(t.Context(), p.leasedb)
+	require.NoError(t, err)
+	assert.Len(t, recs, len(duids), "every queued write must be on disk")
+	for _, pw := range p.takePending() {
+		assert.NoError(t, <-pw.done, "and each one reports back to whoever queued it")
+	}
 }

@@ -265,14 +265,18 @@ type pluginState struct {
 	dbCancel context.CancelFunc
 
 	// writes carries lease changes to the writer goroutine, stopWrites
-	// closes to shut it down and writerDone closes once it has drained.
-	// writeErrors paces its failure log and belongs to it alone. All four
-	// are nil until startWriter runs, which is what makes a state built by
-	// hand write inline; see storage.go.
-	writes      chan leaseWrite
-	stopWrites  chan struct{}
-	writerDone  chan struct{}
-	writeErrors logThrottle
+	// closes to shut it down and writerDone closes once it has drained. All
+	// three are nil until startWriter runs, which is what makes a state
+	// built by hand write inline; see storage.go.
+	writes     chan leaseWrite
+	stopWrites chan struct{}
+	writerDone chan struct{}
+
+	// pending holds the changes queued since the lock was taken, for the
+	// caller to wait on once it has let the lock go. Guarded by the plugin
+	// lock, and emptied by withLock before the lock is released, so it only
+	// ever holds one caller's writes.
+	pending []pendingWrite
 
 	// now is the clock seam. It is written once during setup, before the
 	// sweeper goroutine starts, and only read afterwards. Use timeNow rather
@@ -297,6 +301,20 @@ func (p *pluginState) timeNow() time.Time {
 	return p.now()
 }
 
+// withLock runs fn under the plugin lock and hands back the lease writes it
+// queued, which the caller waits for with settle once the lock is free.
+//
+// Every path that changes lease state goes through here. Taking the queued
+// writes while the lock is still held is what makes them this caller's and
+// nobody else's, and doing it in one place is what stops a path from
+// forgetting to.
+func (p *pluginState) withLock(fn func()) []pendingWrite {
+	p.Lock()
+	defer p.Unlock()
+	fn()
+	return p.takePending()
+}
+
 // Handler4 handles DHCPv4 packets for the range plugin.
 //
 // RELEASE and DECLINE do their bookkeeping and then hand the response on
@@ -315,18 +333,33 @@ func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 		return resp, false
 	}
 
-	p.Lock()
-	defer p.Unlock()
-
 	mac := req.ClientHWAddr.String()
-	record := p.leaseFor(mac, p.Recordsv4[mac], clientHostname(req))
-	if record == nil {
+	hostname := clientHostname(req)
+
+	var ip net.IP
+	pending := p.withLock(func() {
+		if record := p.leaseFor(mac, p.Recordsv4[mac], hostname); record != nil {
+			// Copied out under the lock: once it is released the record
+			// belongs to whoever takes the lock next.
+			ip = record.IP
+		}
+	})
+
+	// The reply waits for the lease to reach the disk. A client told it
+	// holds an address that a crash then forgets would find that address
+	// handed to the next client at the following start, which is the one
+	// thing a lease file exists to prevent.
+	if err := p.settle(pending); err != nil {
+		log.Errorf("Not leasing to MAC %s: %v", mac, err)
+		return nil, true
+	}
+	if ip == nil {
 		return nil, true
 	}
 
-	resp.YourIPAddr = record.IP
+	resp.YourIPAddr = ip
 	resp.Options.Update(dhcpv4.OptIPAddressLeaseTime(p.LeaseTime.Round(time.Second)))
-	log.Printf("found IP address %s for MAC %s", record.IP, mac)
+	log.Printf("found IP address %s for MAC %s", ip, mac)
 	return resp, false
 }
 
@@ -364,8 +397,9 @@ func (p *pluginState) leaseFor(mac string, record *Record, hostname string) *Rec
 		return p.allocateLease(mac, net.IPNet{}, hostname, now)
 	case record.expired(now):
 		return p.reallocateExpired(mac, record, hostname, now)
+	case !p.renew(mac, record, hostname, now):
+		return nil
 	default:
-		p.renew(mac, record, hostname, now)
 		return record
 	}
 }
@@ -390,18 +424,40 @@ func (p *pluginState) allocateLease(mac string, hint net.IPNet, hostname string,
 		expires:  now.Add(p.LeaseTime).Unix(),
 		hostname: hostname,
 	}
-	if err := p.saveIPAddress(mac, rec); err != nil {
-		// Handing out an address we could not record would put a second
-		// client on it after a restart, which is worse than one client
-		// waiting for the next DISCOVER, so the address goes back.
+	// Handing out an address we could not record would put a second client
+	// on it after a restart, which is worse than one client waiting for the
+	// next DISCOVER, so the address goes back whether the write is refused
+	// now or fails later.
+	if err := p.saveIPAddress(mac, rec, func() { p.dropUnwritten(mac, rec) }); err != nil {
 		log.Errorf("SaveIPAddress for MAC %s failed: %v", mac, err)
-		if err := p.allocator.Free(net.IPNet{IP: rec.IP}); err != nil {
-			log.Errorf("Could not return the unrecorded address %s to the pool: %v", rec.IP, err)
-		}
+		p.freeUnrecorded(rec)
 		return nil
 	}
 	p.Recordsv4[mac] = rec
 	return rec
+}
+
+// dropUnwritten takes back a lease whose row did not make it to disk.
+//
+// The record goes only if it is still the one this write was for. A release,
+// or a later lease for the same client, has already dealt with the address
+// by then, and returning it a second time would take it from whoever holds
+// it now. The caller must hold p's lock.
+func (p *pluginState) dropUnwritten(mac string, rec *Record) {
+	if p.Recordsv4[mac] != rec {
+		return
+	}
+	delete(p.Recordsv4, mac)
+	p.freeUnrecorded(rec)
+}
+
+// freeUnrecorded returns an address to the pool whose lease was never
+// recorded, so nothing else can be holding it. The caller must hold p's
+// lock.
+func (p *pluginState) freeUnrecorded(rec *Record) {
+	if err := p.allocator.Free(net.IPNet{IP: rec.IP}); err != nil {
+		log.Errorf("Could not return the unrecorded address %s to the pool: %v", rec.IP, err)
+	}
 }
 
 // atLeaseLimit reports whether the lease table has reached max-leases, and
@@ -496,7 +552,9 @@ func (p *pluginState) reallocateExpired(mac string, record *Record, hostname str
 		// again could hand a second client the same address. Keep this client
 		// where it is and let the next sweep retry.
 		p.Recordsv4[mac] = record
-		p.renew(mac, record, hostname, now)
+		if !p.renew(mac, record, hostname, now) {
+			return nil
+		}
 		return record
 	}
 	return p.allocateLease(mac, hint, hostname, now)
@@ -504,23 +562,34 @@ func (p *pluginState) reallocateExpired(mac string, record *Record, hostname str
 
 // renew extends record's lease so it outlives the lease time we are about to
 // advertise, and persists the change. A lease with enough time left is left
-// untouched.
+// untouched. It reports whether the client can be answered with this lease.
 //
-// Unlike a fresh allocation, an extension that cannot be written is logged
-// and kept in memory anyway. The address is already this client's, so the
-// worst a lost expiry costs is a lease that lapses early after a restart,
-// and the client renews again long before then. The caller must hold p's
-// lock.
-func (p *pluginState) renew(mac string, record *Record, hostname string, now time.Time) {
+// An extension that cannot be written is rolled back and the client is
+// answered with nothing, the same as a fresh lease that cannot be written:
+// the reply it would otherwise get names a lease time the lease file does
+// not know about. The caller must hold p's lock.
+func (p *pluginState) renew(mac string, record *Record, hostname string, now time.Time) bool {
 	// Ensure we extend the existing lease at least past when the one we're giving expires
 	if !time.Unix(record.expires, 0).Before(now.Add(p.LeaseTime)) {
-		return
+		return true
 	}
+	was, wasHostname := record.expires, record.hostname
 	record.expires = now.Add(p.LeaseTime).Round(time.Second).Unix()
 	record.hostname = hostname
-	if err := p.saveIPAddress(mac, record); err != nil {
-		log.Errorf("Could not persist lease for MAC %s: %v", mac, err)
+	extended := record.expires
+	undo := func() {
+		// Only if nothing has moved it on since: a renewal that landed
+		// after this one is the client's current lease, not ours to shorten.
+		if record.expires == extended {
+			record.expires, record.hostname = was, wasHostname
+		}
 	}
+	if err := p.saveIPAddress(mac, record, undo); err != nil {
+		log.Errorf("Could not persist lease for MAC %s: %v", mac, err)
+		undo()
+		return false
+	}
+	return true
 }
 
 // releaseLease returns record's address to the pool: it deletes the row from
@@ -550,9 +619,14 @@ func (p *pluginState) releaseLease(mac string, record *Record) error {
 // now change nothing. Nothing is ever sent in reply, so failures are logged
 // and dropped here.
 func (p *pluginState) handleRelease(req *dhcpv4.DHCPv4) {
-	p.Lock()
-	defer p.Unlock()
+	if err := p.settle(p.withLock(func() { p.release(req) })); err != nil {
+		log.Errorf("Could not record the release from MAC %s: %v", req.ClientHWAddr, err)
+	}
+}
 
+// release frees the lease a DHCPRELEASE names. The caller must hold p's
+// lock; handleRelease is what waits for the row to go.
+func (p *pluginState) release(req *dhcpv4.DHCPv4) {
 	mac := req.ClientHWAddr.String()
 	record, ok := p.Recordsv4[mac]
 	if !ok {
@@ -577,9 +651,14 @@ func (p *pluginState) handleRelease(req *dhcpv4.DHCPv4) {
 // which is zero in a DHCPDECLINE. As with a release, only the client that
 // actually holds the address may decline it, and a decline never allocates.
 func (p *pluginState) handleDecline(req *dhcpv4.DHCPv4) {
-	p.Lock()
-	defer p.Unlock()
+	if err := p.settle(p.withLock(func() { p.decline(req) })); err != nil {
+		log.Errorf("Could not record the decline from MAC %s: %v", req.ClientHWAddr, err)
+	}
+}
 
+// decline takes the address a DHCPDECLINE names out of circulation. The
+// caller must hold p's lock; handleDecline is what waits for the row to go.
+func (p *pluginState) decline(req *dhcpv4.DHCPv4) {
 	mac := req.ClientHWAddr.String()
 	declined := req.RequestedIPAddress()
 	record, ok := p.Recordsv4[mac]
@@ -690,9 +769,12 @@ func (p *pluginState) reclaim(t time.Time) int {
 // sweepOnce takes the lock and reclaims every expired lease and every declined
 // address whose probation has run out.
 func (p *pluginState) sweepOnce() {
-	p.Lock()
-	defer p.Unlock()
-	if freed := p.reclaim(p.timeNow()); freed > 0 {
+	var freed int
+	pending := p.withLock(func() { freed = p.reclaim(p.timeNow()) })
+	if err := p.settle(pending); err != nil {
+		log.Errorf("Could not clear a reclaimed lease from storage: %v", err)
+	}
+	if freed > 0 {
 		log.Printf("Returned %d DHCPv4 address(es) to the pool", freed)
 	}
 }
