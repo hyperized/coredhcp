@@ -451,6 +451,52 @@ func TestAutorefresh(t *testing.T) {
 		"autorefresh did not recover after a bad reload")
 }
 
+// TestAutorefreshAcrossRename is the regression test for defect (b): a
+// config management tool or an editor commonly replaces a file by writing
+// the new content to a sibling file and renaming it over the original, which
+// leaves the original name attached to a new inode. Watching the file
+// itself would stay on the old, now-unlinked inode and never see this
+// update; watching its directory does not.
+func TestAutorefreshAcrossRename(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "leases.txt")
+	mac1, mac2 := "aa:11:22:33:44:55", "aa:11:22:33:44:66"
+
+	require.NoError(t, os.WriteFile(path, []byte(mac1+" 2001:db8::10:1\n"), 0o600))
+
+	h6, err := file.Plugin.Setup6(path, "autorefresh")
+	require.NoError(t, err)
+
+	resolves := func(mac string) func() bool {
+		return func() bool {
+			claddr, err := net.ParseMAC(mac)
+			if err != nil {
+				return false
+			}
+			req, err := dhcpv6.NewSolicit(claddr)
+			if err != nil {
+				return false
+			}
+			resp, err := dhcpv6.NewAdvertiseFromSolicit(req)
+			if err != nil {
+				return false
+			}
+			result, _ := h6(req, resp)
+			return len(result.GetOption(dhcpv6.OptionIANA)) == 1
+		}
+	}
+
+	require.True(t, resolves(mac1)(), "initial lease must resolve right after setup")
+
+	replacement := filepath.Join(dir, "leases.txt.new")
+	require.NoError(t, os.WriteFile(replacement,
+		[]byte(mac1+" 2001:db8::10:1\n"+mac2+" 2001:db8::10:2\n"), 0o600))
+	require.NoError(t, os.Rename(replacement, path))
+
+	require.Eventually(t, resolves(mac2), 5*time.Second, 20*time.Millisecond,
+		"autorefresh did not pick up a lease file replaced by a rename")
+}
+
 // overwrite replaces the start of path with data without truncating it, so a
 // watcher never sees the file empty. What was there before stays on after the
 // new content, which is fine for content that is meant to be malformed.
