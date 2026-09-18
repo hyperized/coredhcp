@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -307,9 +308,8 @@ func TestLookupMACNotFound(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret", time.Second)
-	result, err := c.lookup(context.Background(), "aa:bb:cc:dd:ee:ff")
-	require.NoError(t, err)
-	assert.False(t, result.found)
+	_, err := c.lookup(context.Background(), "aa:bb:cc:dd:ee:ff")
+	require.ErrorIs(t, err, ErrNoInterface, "a MAC NetBox does not know is reported to the caller, not swallowed here")
 	assert.Equal(t, int32(1), calls.Load(), "a MAC NetBox does not know must not trigger the address lookup")
 }
 
@@ -378,9 +378,8 @@ func TestLookupNothingUsable(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret", time.Second)
-	result, err := c.lookup(context.Background(), "aa:bb:cc:dd:ee:ff")
-	require.NoError(t, err)
-	assert.False(t, result.found)
+	_, err := c.lookup(context.Background(), "aa:bb:cc:dd:ee:ff")
+	require.ErrorIs(t, err, ErrNoInterface)
 	assert.Equal(t, int32(1), calls.Load())
 }
 
@@ -653,7 +652,43 @@ func TestLookupBaseURLWithSubpath(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL+"/netbox", "secret", time.Second)
-	result, err := c.lookup(context.Background(), "aa:bb:cc:dd:ee:ff")
-	require.NoError(t, err)
-	assert.False(t, result.found)
+	_, err := c.lookup(context.Background(), "aa:bb:cc:dd:ee:ff")
+	require.ErrorIs(t, err, ErrNoInterface)
+}
+
+func TestFindInterfaceReturnsErrNoInterface(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(macPageBody(t))
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL, "secret", time.Second)
+	ref, err := c.findInterface(context.Background(), "aa:bb:cc:dd:ee:ff")
+	require.ErrorIs(t, err, ErrNoInterface)
+	assert.Nil(t, ref)
+	assert.Contains(t, err.Error(), "aa:bb:cc:dd:ee:ff")
+}
+
+func TestStatusError(t *testing.T) {
+	cases := []struct {
+		name       string
+		code       int
+		wantTarget error
+	}{
+		{name: "401 is unauthorized", code: http.StatusUnauthorized, wantTarget: ErrUnauthorized},
+		{name: "403 is unauthorized", code: http.StatusForbidden, wantTarget: ErrUnauthorized},
+		{name: "404 is not found", code: http.StatusNotFound, wantTarget: ErrNotFound},
+		{name: "500 is unavailable", code: http.StatusInternalServerError, wantTarget: ErrUnavailable},
+		{name: "503 is unavailable", code: http.StatusServiceUnavailable, wantTarget: ErrUnavailable},
+		{name: "429 is an unexpected status", code: http.StatusTooManyRequests, wantTarget: ErrUnexpectedStatus},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := statusError(macAddressPath, tc.code)
+			require.ErrorIs(t, err, tc.wantTarget)
+			assert.Contains(t, err.Error(), macAddressPath)
+			assert.Contains(t, err.Error(), strconv.Itoa(tc.code))
+		})
+	}
 }

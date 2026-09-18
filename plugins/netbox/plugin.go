@@ -37,7 +37,8 @@
 //   - ttl:<duration> how long a found answer is cached, default 5m.
 //   - negative-ttl:<duration> how long "NetBox does not know this MAC" is
 //     cached, default 30s.
-//   - timeout:<duration> the HTTP timeout per NetBox request, default 5s.
+//   - timeout:<duration> how long a cache miss may take before the lookup
+//     gives up, covering both NetBox calls together, default 5s.
 //   - lifetime:<duration> the preferred and valid lifetime of the DHCPv6
 //     address, default 1h.
 //
@@ -93,6 +94,7 @@ package netbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -109,10 +111,15 @@ import (
 var log = logger.GetLogger("plugins/netbox")
 
 // Plugin wraps the netbox plugin information.
+//
+// Both setup functions are the context-aware form, so a lookup on the
+// request path can inherit the caller's deadline and be cancelled at
+// shutdown, instead of running to completion against a background context no
+// one can ever cut short.
 var Plugin = plugins.Plugin{
-	Name:   "netbox",
-	Setup6: setup6,
-	Setup4: setup4,
+	Name:      "netbox",
+	Setup6Ctx: setup6,
+	Setup4Ctx: setup4,
 }
 
 // Defaults for the optional trailing arguments.
@@ -214,7 +221,7 @@ type pluginState struct {
 	now     func() time.Time // clock seam, time.Now in production
 }
 
-func setup4(args ...string) (handler.Handler4, error) {
+func setup4(args ...string) (handler.Handler4Ctx, error) {
 	p, err := setupState(args...)
 	if err != nil {
 		return nil, err
@@ -222,7 +229,7 @@ func setup4(args ...string) (handler.Handler4, error) {
 	return p.Handler4, nil
 }
 
-func setup6(args ...string) (handler.Handler6, error) {
+func setup6(args ...string) (handler.Handler6Ctx, error) {
 	p, err := setupState(args...)
 	if err != nil {
 		return nil, err
@@ -268,25 +275,31 @@ func setupState(args ...string) (*pluginState, error) {
 // briefly unreachable is retried on the next packet instead of being
 // remembered as a failure for a whole TTL.
 //
+// The configured timeout is applied here, as a deadline on ctx, so it bounds
+// the miss path as a whole: both backend calls a cold lookup makes, not each
+// one separately. It is not applied around the cache read, which never
+// blocks on anything external.
+//
 // There is no single-flight around the miss path. Two packets from the same
 // client arriving while the first lookup is still out will both query NetBox,
 // which is two requests for one client rather than the coordination and the
 // extra lock a de-duplicating layer costs. A boot storm is many clients, and
 // those are separate lookups either way.
-func (p *pluginState) lookup(hwaddr net.HardwareAddr) (lookupResult, error) {
+func (p *pluginState) lookup(ctx context.Context, hwaddr net.HardwareAddr) (lookupResult, error) {
 	mac := hwaddr.String()
 	now := p.now()
 	if result, ok := p.cache.get(mac, now); ok {
 		return result, nil
 	}
 
-	// The plugin handler API has no context to inherit, and the client's own
-	// timeout bounds the request, so a background context is the whole story
-	// here.
-	result, err := p.backend.lookup(context.Background(), mac)
-	if err != nil {
+	ctx, cancel := context.WithTimeout(ctx, p.opts.timeout)
+	defer cancel()
+	result, err := p.backend.lookup(ctx, mac)
+	if err != nil && !errors.Is(err, ErrNoInterface) {
 		return lookupResult{}, err
 	}
+	// ErrNoInterface is how the client says NetBox has no interface carrying
+	// this MAC. That is an answer, and it gets cached for the negative TTL.
 
 	ttl := p.opts.ttl
 	if !result.found {
@@ -311,15 +324,31 @@ func skipsLookup4(msgType dhcpv4.MessageType) bool {
 	}
 }
 
+// logLookupFailure logs a failed NetBox lookup at the level its cause calls
+// for, and is shared by Handler4 and Handler6 so that choice lives in one
+// place. ErrUnauthorized and ErrNotFound are configuration faults: the token
+// is wrong or NetBox is older than this plugin needs, and every packet will
+// fail the same way until someone fixes it, so they get error level.
+// Everything else, a timeout or a 5xx included, is logged as a warning: it is
+// likely transient, and the client's own retransmission retries it. Either
+// way the request is dropped.
+func logLookupFailure(mac net.HardwareAddr, err error) {
+	if errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrNotFound) {
+		log.Errorf("dropping request from MAC address %s, NetBox lookup will keep failing until the configuration is fixed: %v", mac, err)
+		return
+	}
+	log.Warningf("dropping request from MAC address %s, NetBox lookup failed: %v", mac, err)
+}
+
 // Handler4 handles DHCPv4 packets for the netbox plugin.
-func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+func (p *pluginState) Handler4(ctx context.Context, req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	if skipsLookup4(req.MessageType()) {
 		return resp, false
 	}
 
-	result, err := p.lookup(req.ClientHWAddr)
+	result, err := p.lookup(ctx, req.ClientHWAddr)
 	if err != nil {
-		log.Warningf("dropping request from MAC address %s, NetBox lookup failed: %v", req.ClientHWAddr, err)
+		logLookupFailure(req.ClientHWAddr, err)
 		return nil, true
 	}
 	if !result.found || !result.v4.IsValid() {
@@ -346,7 +375,7 @@ func skipsLookup6(msgType dhcpv6.MessageType) bool {
 }
 
 // Handler6 handles DHCPv6 packets for the netbox plugin.
-func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
+func (p *pluginState) Handler6(ctx context.Context, req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	m, err := req.GetInnerMessage()
 	if err != nil {
 		log.Errorf("BUG: could not decapsulate: %v", err)
@@ -372,9 +401,9 @@ func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 		return resp, false
 	}
 
-	result, err := p.lookup(mac)
+	result, err := p.lookup(ctx, mac)
 	if err != nil {
-		log.Warningf("dropping request from MAC address %s, NetBox lookup failed: %v", mac, err)
+		logLookupFailure(mac, err)
 		return nil, true
 	}
 	if !result.found || !result.v6.IsValid() {

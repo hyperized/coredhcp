@@ -7,6 +7,7 @@
 package netbox_test
 
 import (
+	"context"
 	"net"
 	"net/netip"
 	"os"
@@ -50,7 +51,7 @@ func TestIntegration(t *testing.T) {
 	wantIPv6 := os.Getenv("NETBOX_TEST_IPV6")
 
 	t.Run("Setup4", func(t *testing.T) {
-		h4, err := netbox.Plugin.Setup4(url, token)
+		h4, err := netbox.Plugin.Setup4Ctx(url, token)
 		require.NoError(t, err)
 
 		req, err := dhcpv4.NewDiscovery(mac)
@@ -61,7 +62,7 @@ func TestIntegration(t *testing.T) {
 		// Handler4 only stops the chain when it actually served an address.
 		// YourIPAddr is not a usable signal on its own: NewReplyFromRequest
 		// pre-fills it with the unspecified address, so it is never empty.
-		gotResp, stop := h4(req, resp)
+		gotResp, stop := h4(context.Background(), req, resp)
 		require.True(t, stop, "NetBox has no IPv4 address on record for %s", macStr)
 		require.NotNil(t, gotResp)
 		require.False(t, gotResp.YourIPAddr.IsUnspecified())
@@ -72,7 +73,7 @@ func TestIntegration(t *testing.T) {
 	})
 
 	t.Run("Setup6", func(t *testing.T) {
-		h6, err := netbox.Plugin.Setup6(url, token)
+		h6, err := netbox.Plugin.Setup6Ctx(url, token)
 		require.NoError(t, err)
 
 		req, err := dhcpv6.NewSolicit(mac)
@@ -80,7 +81,7 @@ func TestIntegration(t *testing.T) {
 		resp, err := dhcpv6.NewAdvertiseFromSolicit(req)
 		require.NoError(t, err)
 
-		gotResp, _ := h6(req, resp)
+		gotResp, _ := h6(context.Background(), req, resp)
 		require.NotNil(t, gotResp)
 		opts := gotResp.GetOption(dhcpv6.OptionIANA)
 		require.Len(t, opts, 1, "expected an IPv6 answer for %s, got none", macStr)
