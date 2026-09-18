@@ -147,6 +147,22 @@ func encapsulateRelay6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, error) {
 	return dhcpv6.NewRelayReplFromRelayForw(req.(*dhcpv6.RelayMessage), rmsg)
 }
 
+// errRelayedNotAllowed is what the observer is told about a relayed request
+// the server refused. There is no error from the network stack to pass on
+// here: the packet is fine, the configuration is what says nothing about
+// which relays this server answers.
+var errRelayedNotAllowed = errors.New("relayed request and no relay plugin configured")
+
+// isRelayed4 reports whether a DHCPv4 request came through a relay agent.
+// giaddr is what says so (RFC 2131 section 2): a client sends zero there,
+// and the first relay to forward the request writes its own address in. An
+// absent field is not a relay, since a datagram off the wire always carries
+// the four bytes and a request built in memory without them came through
+// nothing.
+func isRelayed4(req *dhcpv4.DHCPv4) bool {
+	return len(req.GatewayIPAddr) != 0 && !req.GatewayIPAddr.IsUnspecified()
+}
+
 // replyDestination4 decides where a DHCPv4 response goes. src is the address
 // the request arrived from (may be nil when unknown). useEthernet is set when
 // the client has no usable IP yet and the reply must leave as a raw layer-2

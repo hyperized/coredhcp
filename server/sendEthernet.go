@@ -67,6 +67,13 @@ func sendEthernet(iface net.Interface, resp *dhcpv4.DHCPv4) error {
 	}
 	data := buf.Bytes()
 
+	// One socket per reply, closed again below. The descriptors this can
+	// hold at once are bounded by the server's in-flight handler limit (see
+	// WithMaxInFlight), which is eight per processor by default. Caching
+	// one socket instead would need an owner to close it: the interface
+	// travels in the sockaddr rather than in the socket, so a single
+	// descriptor would serve every interface, but nothing here outlives the
+	// reply to hold it, and a package-level one would outlive the server.
 	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, 0)
 	if err != nil {
 		return fmt.Errorf("send Ethernet: cannot open socket: %w", err)
