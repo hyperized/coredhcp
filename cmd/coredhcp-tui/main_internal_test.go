@@ -293,7 +293,8 @@ func TestRunBadLogFile(t *testing.T) {
 
 	err := run(io.Discard)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to open log file")
+	assert.Contains(t, err.Error(), "cannot open log file")
+	assert.Contains(t, err.Error(), "point --logfile")
 }
 
 func TestRunConfigLoadFailure(t *testing.T) {
@@ -304,7 +305,8 @@ func TestRunConfigLoadFailure(t *testing.T) {
 
 	err := run(io.Discard)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to load configuration")
+	assert.Contains(t, err.Error(), "cannot load the configuration")
+	assert.Contains(t, err.Error(), "pass --conf")
 }
 
 // TestRunPluginRegistrationFailure drives the registration error branch. A
@@ -316,7 +318,7 @@ func TestRunPluginRegistrationFailure(t *testing.T) {
 
 	err := run(io.Discard)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to register plugin")
+	assert.Contains(t, err.Error(), "cannot register a built-in plugin")
 	assert.Contains(t, err.Error(), "cannot register nil plugin")
 }
 
@@ -418,7 +420,7 @@ func TestRunSignalStopsServerAndInterface(t *testing.T) {
 
 	select {
 	case err := <-errCh:
-		assert.NoError(t, err, "a shutdown we asked for is not a failure")
+		require.NoError(t, err, "a shutdown we asked for is not a failure")
 	case <-time.After(10 * time.Second):
 		t.Fatal("run() did not return after SIGTERM")
 	}

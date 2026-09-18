@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -20,10 +21,14 @@ import (
 	"github.com/coredhcp/coredhcp/events"
 )
 
-// waitFor is how long a test waits for a frame to show what it asked for. The
-// draw loop runs every few milliseconds in tests, so reaching this means
-// something is wrong rather than slow.
-const waitFor = 5 * time.Second
+// Time inside the synctest bubble only moves once every goroutine is blocked,
+// so waitFor costs no real seconds and runs out only if the draw loop never
+// catches up. refresh matches the UI's tick, so one step of a wait is one
+// frame.
+const (
+	waitFor = 5 * time.Second
+	refresh = 2 * time.Millisecond
+)
 
 // clock is a hand-wound clock so the tests can put the UI at a known time.
 type clock struct {
@@ -149,7 +154,7 @@ func newPendingHarness(t *testing.T, width, height int, opts ...tui.Option) *har
 
 	ui := tui.New(append([]tui.Option{
 		tui.WithScreen(screen),
-		tui.WithRefresh(2 * time.Millisecond),
+		tui.WithRefresh(refresh),
 	}, opts...)...)
 
 	return &harness{t: t, ui: ui, screen: screen, done: make(chan error, 1)}
@@ -208,7 +213,13 @@ func (h *harness) text() string {
 	return strings.Join(h.screen.rows(), "\n")
 }
 
-// waitFor polls the screen until want is satisfied.
+// frame advances the bubble one tick and waits for the draw it triggers, so a
+// caller never reads half a frame.
+func (h *harness) frame() {
+	time.Sleep(refresh)
+	synctest.Wait()
+}
+
 func (h *harness) waitFor(what string, want func(string) bool) {
 	h.t.Helper()
 
@@ -218,7 +229,7 @@ func (h *harness) waitFor(what string, want func(string) bool) {
 			return
 		}
 
-		time.Sleep(time.Millisecond)
+		h.frame()
 	}
 
 	h.t.Fatalf("timed out waiting for %s, screen was:\n%s", what, h.text())
@@ -231,27 +242,25 @@ func (h *harness) waitText(want string) {
 	h.waitFor(want, func(screen string) bool { return strings.Contains(screen, want) })
 }
 
-// settles polls for d and fails immediately if unwanted ever shows up,
-// proving it stays off screen rather than that a check ran once too early.
+// settles watches for the whole of d rather than checking once, so an absence
+// cannot be an assertion that merely ran too early.
 func (h *harness) settles(unwanted string, d time.Duration) {
 	h.t.Helper()
 
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
 		require.NotContains(h.t, h.text(), unwanted)
-		time.Sleep(time.Millisecond)
+		h.frame()
 	}
 }
 
-// staysText polls for d and fails if want ever goes missing, proving a key
-// press left it alone rather than that a check ran once too early.
 func (h *harness) staysText(want string, d time.Duration) {
 	h.t.Helper()
 
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
 		require.Contains(h.t, h.text(), want)
-		time.Sleep(time.Millisecond)
+		h.frame()
 	}
 }
 
@@ -399,19 +408,21 @@ func seed(t *testing.T, ui *tui.UI, at time.Time) {
 func TestScreenDump(t *testing.T) {
 	t.Parallel()
 
-	at := time.Date(2026, 9, 4, 21, 4, 11, 123000000, time.UTC)
-	c := newClock(at)
+	synctest.Test(t, func(t *testing.T) {
+		at := time.Date(2026, 9, 4, 21, 4, 11, 123000000, time.UTC)
+		c := newClock(at)
 
-	h := newHarness(t, 100, 35, tui.WithClock(c.now), tui.WithVersion("v0.2.0"))
+		h := newHarness(t, 100, 35, tui.WithClock(c.now), tui.WithVersion("v0.2.0"))
 
-	seed(t, h.ui, at)
-	c.advance(90 * time.Minute)
-	h.waitText("HEALTHY")
+		seed(t, h.ui, at)
+		c.advance(90 * time.Minute)
+		h.waitText("HEALTHY")
 
-	require.Equal(t, 100, h.width())
-	require.Contains(t, h.row(0), "coredhcp")
+		require.Equal(t, 100, h.width())
+		require.Contains(t, h.row(0), "coredhcp")
 
-	t.Logf("\n%s", h.text())
+		t.Logf("\n%s", h.text())
+	})
 }
 
 // TestStopBeforeRunReturnsNilImmediately pins down that calling Stop before
@@ -419,10 +430,12 @@ func TestScreenDump(t *testing.T) {
 func TestStopBeforeRunReturnsNilImmediately(t *testing.T) {
 	t.Parallel()
 
-	ui := tui.New()
-	ui.Stop()
+	synctest.Test(t, func(t *testing.T) {
+		ui := tui.New()
+		ui.Stop()
 
-	require.NoError(t, waitRun(t, runAsync(context.Background(), ui)))
+		require.NoError(t, waitRun(t, runAsync(context.Background(), ui)))
+	})
 }
 
 // TestSecondRunReturnsNilAfterFirstReturns pins down that calling Run again
@@ -430,13 +443,15 @@ func TestStopBeforeRunReturnsNilImmediately(t *testing.T) {
 func TestSecondRunReturnsNilAfterFirstReturns(t *testing.T) {
 	t.Parallel()
 
-	ui := tui.New(tui.WithScreen(newSyncScreen(t)), tui.WithRefresh(2*time.Millisecond))
+	synctest.Test(t, func(t *testing.T) {
+		ui := tui.New(tui.WithScreen(newSyncScreen(t)), tui.WithRefresh(refresh))
 
-	first := runAsync(context.Background(), ui)
-	ui.Stop()
-	require.NoError(t, waitRun(t, first))
+		first := runAsync(context.Background(), ui)
+		ui.Stop()
+		require.NoError(t, waitRun(t, first))
 
-	require.NoError(t, waitRun(t, runAsync(context.Background(), ui)))
+		require.NoError(t, waitRun(t, runAsync(context.Background(), ui)))
+	})
 }
 
 // TestContextCancellationEndsRun pins down that cancelling the context passed
@@ -444,13 +459,15 @@ func TestSecondRunReturnsNilAfterFirstReturns(t *testing.T) {
 func TestContextCancellationEndsRun(t *testing.T) {
 	t.Parallel()
 
-	ui := tui.New(tui.WithScreen(newSyncScreen(t)), tui.WithRefresh(2*time.Millisecond))
-	ctx, cancel := context.WithCancel(context.Background())
+	synctest.Test(t, func(t *testing.T) {
+		ui := tui.New(tui.WithScreen(newSyncScreen(t)), tui.WithRefresh(refresh))
+		ctx, cancel := context.WithCancel(context.Background())
 
-	done := runAsync(ctx, ui)
-	cancel()
+		done := runAsync(ctx, ui)
+		cancel()
 
-	require.NoError(t, waitRun(t, done))
+		require.NoError(t, waitRun(t, done))
+	})
 }
 
 // TestStopIdempotentBeforeRun pins down that hammering Stop before Run ever
@@ -458,15 +475,17 @@ func TestContextCancellationEndsRun(t *testing.T) {
 func TestStopIdempotentBeforeRun(t *testing.T) {
 	t.Parallel()
 
-	ui := tui.New()
+	synctest.Test(t, func(t *testing.T) {
+		ui := tui.New()
 
-	select {
-	case <-hammerStop(ui, 20):
-	case <-time.After(waitFor):
-		t.Fatal("Stop blocked before Run")
-	}
+		select {
+		case <-hammerStop(ui, 20):
+		case <-time.After(waitFor):
+			t.Fatal("Stop blocked before Run")
+		}
 
-	require.NoError(t, waitRun(t, runAsync(context.Background(), ui)))
+		require.NoError(t, waitRun(t, runAsync(context.Background(), ui)))
+	})
 }
 
 // TestStopIdempotentDuringRun pins down that hammering Stop while Run is in
@@ -474,16 +493,18 @@ func TestStopIdempotentBeforeRun(t *testing.T) {
 func TestStopIdempotentDuringRun(t *testing.T) {
 	t.Parallel()
 
-	ui := tui.New(tui.WithScreen(newSyncScreen(t)), tui.WithRefresh(2*time.Millisecond))
-	done := runAsync(context.Background(), ui)
+	synctest.Test(t, func(t *testing.T) {
+		ui := tui.New(tui.WithScreen(newSyncScreen(t)), tui.WithRefresh(refresh))
+		done := runAsync(context.Background(), ui)
 
-	select {
-	case <-hammerStop(ui, 20):
-	case <-time.After(waitFor):
-		t.Fatal("Stop blocked during Run")
-	}
+		select {
+		case <-hammerStop(ui, 20):
+		case <-time.After(waitFor):
+			t.Fatal("Stop blocked during Run")
+		}
 
-	require.NoError(t, waitRun(t, done))
+		require.NoError(t, waitRun(t, done))
+	})
 }
 
 // TestStopIdempotentAfterRun pins down that hammering Stop once Run has
@@ -491,16 +512,18 @@ func TestStopIdempotentDuringRun(t *testing.T) {
 func TestStopIdempotentAfterRun(t *testing.T) {
 	t.Parallel()
 
-	ui := tui.New(tui.WithScreen(newSyncScreen(t)), tui.WithRefresh(2*time.Millisecond))
-	done := runAsync(context.Background(), ui)
-	ui.Stop()
-	require.NoError(t, waitRun(t, done))
+	synctest.Test(t, func(t *testing.T) {
+		ui := tui.New(tui.WithScreen(newSyncScreen(t)), tui.WithRefresh(refresh))
+		done := runAsync(context.Background(), ui)
+		ui.Stop()
+		require.NoError(t, waitRun(t, done))
 
-	select {
-	case <-hammerStop(ui, 20):
-	case <-time.After(waitFor):
-		t.Fatal("Stop blocked after Run")
-	}
+		select {
+		case <-hammerStop(ui, 20):
+		case <-time.After(waitFor):
+			t.Fatal("Stop blocked after Run")
+		}
+	})
 }
 
 // TestEventsAcceptedBeforeRunShowOnScreen pins down that events and log lines
@@ -508,22 +531,24 @@ func TestStopIdempotentAfterRun(t *testing.T) {
 func TestEventsAcceptedBeforeRunShowOnScreen(t *testing.T) {
 	t.Parallel()
 
-	h := newPendingHarness(t, 200, 35)
+	synctest.Test(t, func(t *testing.T) {
+		h := newPendingHarness(t, 200, 35)
 
-	h.ui.Listener(events.Listener{Family: events.FamilyV4, Address: "0.0.0.0:67", Interface: "eth0"})
-	h.ui.Plugin(events.Plugin{Family: events.FamilyV4, Name: "range"})
-	h.ui.Request(events.Request{
-		Family: events.FamilyV4, Type: "DISCOVER", Outcome: events.OutcomeDropped, Plugin: "macfilter",
+		h.ui.Listener(events.Listener{Family: events.FamilyV4, Address: "0.0.0.0:67", Interface: "eth0"})
+		h.ui.Plugin(events.Plugin{Family: events.FamilyV4, Name: "range"})
+		h.ui.Request(events.Request{
+			Family: events.FamilyV4, Type: "DISCOVER", Outcome: events.OutcomeDropped, Plugin: "macfilter",
+		})
+
+		_, err := h.ui.LogWriter().Write([]byte("preboot line\n"))
+		require.NoError(t, err)
+
+		h.start()
+
+		h.waitText("preboot line")
+		require.Contains(t, h.text(), "0.0.0.0:67")
+		require.Contains(t, h.text(), "macfilter")
 	})
-
-	_, err := h.ui.LogWriter().Write([]byte("preboot line\n"))
-	require.NoError(t, err)
-
-	h.start()
-
-	h.waitText("preboot line")
-	require.Contains(t, h.text(), "0.0.0.0:67")
-	require.Contains(t, h.text(), "macfilter")
 }
 
 // TestEventsAndLogAcceptedAfterStopDoNotPanic pins down that events and log
@@ -531,16 +556,18 @@ func TestEventsAcceptedBeforeRunShowOnScreen(t *testing.T) {
 func TestEventsAndLogAcceptedAfterStopDoNotPanic(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, 80, 24)
-	h.ui.Stop()
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, 80, 24)
+		h.ui.Stop()
 
-	require.NotPanics(t, func() {
-		h.ui.Listener(events.Listener{Family: events.FamilyV6, Address: "[::]:547"})
-		h.ui.Plugin(events.Plugin{Family: events.FamilyV6, Name: "range"})
-		h.ui.Request(events.Request{Family: events.FamilyV6, Type: "SOLICIT", Outcome: events.OutcomeDropped})
+		require.NotPanics(t, func() {
+			h.ui.Listener(events.Listener{Family: events.FamilyV6, Address: "[::]:547"})
+			h.ui.Plugin(events.Plugin{Family: events.FamilyV6, Name: "range"})
+			h.ui.Request(events.Request{Family: events.FamilyV6, Type: "SOLICIT", Outcome: events.OutcomeDropped})
 
-		_, err := h.ui.LogWriter().Write([]byte("postmortem\n"))
-		require.NoError(t, err)
+			_, err := h.ui.LogWriter().Write([]byte("postmortem\n"))
+			require.NoError(t, err)
+		})
 	})
 }
 
@@ -563,8 +590,10 @@ func TestQuitKeysEndRun(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			h := newHarness(t, 80, 24)
-			h.key(tc.key, tc.r)
+			synctest.Test(t, func(t *testing.T) {
+				h := newHarness(t, 80, 24)
+				h.key(tc.key, tc.r)
+			})
 		})
 	}
 }
@@ -574,9 +603,11 @@ func TestQuitKeysEndRun(t *testing.T) {
 func TestDefaultVersionIsDevel(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, 80, 24)
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, 80, 24)
 
-	h.waitText("(devel)")
+		h.waitText("(devel)")
+	})
 }
 
 // TestWithVersionShowsInHeader pins down that WithVersion's value reaches the
@@ -584,9 +615,11 @@ func TestDefaultVersionIsDevel(t *testing.T) {
 func TestWithVersionShowsInHeader(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, 80, 24, tui.WithVersion("v9.9.9"))
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, 80, 24, tui.WithVersion("v9.9.9"))
 
-	h.waitText("v9.9.9")
+		h.waitText("v9.9.9")
+	})
 }
 
 // TestInvalidOptionsFallBackToDefaults pins down that an option given a value
@@ -611,15 +644,17 @@ func TestInvalidOptionsFallBackToDefaults(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			h := newHarness(t, 100, 30, tc.opt)
+			synctest.Test(t, func(t *testing.T) {
+				h := newHarness(t, 100, 30, tc.opt)
 
-			h.ui.Listener(events.Listener{Family: events.FamilyV4, Address: "0.0.0.0:67"})
-			h.ui.Request(events.Request{
-				Family: events.FamilyV4, Type: "DISCOVER", ReplyType: "OFFER",
-				ClientID: "aa:bb:cc:dd:ee:ff", Outcome: events.OutcomeReplied,
+				h.ui.Listener(events.Listener{Family: events.FamilyV4, Address: "0.0.0.0:67"})
+				h.ui.Request(events.Request{
+					Family: events.FamilyV4, Type: "DISCOVER", ReplyType: "OFFER",
+					ClientID: "aa:bb:cc:dd:ee:ff", Outcome: events.OutcomeReplied,
+				})
+
+				h.waitText("DISCOVER")
 			})
-
-			h.waitText("DISCOVER")
 		})
 	}
 }
@@ -629,19 +664,21 @@ func TestInvalidOptionsFallBackToDefaults(t *testing.T) {
 func TestWithHistoryBoundsTrafficPane(t *testing.T) {
 	t.Parallel()
 
-	const n = 5
+	synctest.Test(t, func(t *testing.T) {
+		const n = 5
 
-	h := newHarness(t, 100, 30, tui.WithHistory(n))
+		h := newHarness(t, 100, 30, tui.WithHistory(n))
 
-	for i := range n + 3 {
-		h.ui.Request(events.Request{
-			Family: events.FamilyV4, Type: "DISCOVER", Outcome: events.OutcomeDropped,
-			ClientID: fmt.Sprintf("client-%02d", i),
-		})
-	}
+		for i := range n + 3 {
+			h.ui.Request(events.Request{
+				Family: events.FamilyV4, Type: "DISCOVER", Outcome: events.OutcomeDropped,
+				ClientID: fmt.Sprintf("client-%02d", i),
+			})
+		}
 
-	h.waitText("client-07")
-	require.NotContains(t, h.text(), "client-00")
+		h.waitText("client-07")
+		require.NotContains(t, h.text(), "client-00")
+	})
 }
 
 // TestWithMaxLeasesBoundsLeaseTable pins down that WithMaxLeases caps the
@@ -649,19 +686,21 @@ func TestWithHistoryBoundsTrafficPane(t *testing.T) {
 func TestWithMaxLeasesBoundsLeaseTable(t *testing.T) {
 	t.Parallel()
 
-	const n = 3
+	synctest.Test(t, func(t *testing.T) {
+		const n = 3
 
-	h := newHarness(t, 100, 30, tui.WithMaxLeases(n))
+		h := newHarness(t, 100, 30, tui.WithMaxLeases(n))
 
-	for i := range n + 4 {
-		h.ui.Request(events.Request{
-			Family: events.FamilyV4, Type: "DISCOVER", ReplyType: "OFFER",
-			ClientID: fmt.Sprintf("client-%02d", i), Outcome: events.OutcomeReplied,
-		})
-	}
+		for i := range n + 4 {
+			h.ui.Request(events.Request{
+				Family: events.FamilyV4, Type: "DISCOVER", ReplyType: "OFFER",
+				ClientID: fmt.Sprintf("client-%02d", i), Outcome: events.OutcomeReplied,
+			})
+		}
 
-	h.waitText(fmt.Sprintf("client-%02d", n+3))
-	h.waitText(fmt.Sprintf("%d offered, 0 confirmed", n))
+		h.waitText(fmt.Sprintf("client-%02d", n+3))
+		h.waitText(fmt.Sprintf("%d offered, 0 confirmed", n))
+	})
 }
 
 // TestWithLogLinesBoundsLogPane pins down that WithLogLines caps the log
@@ -669,17 +708,19 @@ func TestWithMaxLeasesBoundsLeaseTable(t *testing.T) {
 func TestWithLogLinesBoundsLogPane(t *testing.T) {
 	t.Parallel()
 
-	const n = 3
+	synctest.Test(t, func(t *testing.T) {
+		const n = 3
 
-	h := newHarness(t, 100, 30, tui.WithLogLines(n))
+		h := newHarness(t, 100, 30, tui.WithLogLines(n))
 
-	for i := range n + 4 {
-		_, err := fmt.Fprintf(h.ui.LogWriter(), "line-%02d\n", i)
-		require.NoError(t, err)
-	}
+		for i := range n + 4 {
+			_, err := fmt.Fprintf(h.ui.LogWriter(), "line-%02d\n", i)
+			require.NoError(t, err)
+		}
 
-	h.waitText("line-06")
-	require.NotContains(t, h.text(), "line-00")
+		h.waitText("line-06")
+		require.NotContains(t, h.text(), "line-00")
+	})
 }
 
 // TestWithClockDrivesUptime pins down that the header's uptime tracks the
@@ -687,13 +728,15 @@ func TestWithLogLinesBoundsLogPane(t *testing.T) {
 func TestWithClockDrivesUptime(t *testing.T) {
 	t.Parallel()
 
-	c := newClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	h := newHarness(t, 100, 30, tui.WithClock(c.now))
+	synctest.Test(t, func(t *testing.T) {
+		c := newClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+		h := newHarness(t, 100, 30, tui.WithClock(c.now))
 
-	h.waitText("up 00:00:00")
+		h.waitText("up 00:00:00")
 
-	c.advance(time.Minute)
-	h.waitText("up 00:01:00")
+		c.advance(time.Minute)
+		h.waitText("up 00:01:00")
+	})
 }
 
 // TestListenerShowsInPluginsPaneAndHeaderCount pins down that a Listener
@@ -701,14 +744,16 @@ func TestWithClockDrivesUptime(t *testing.T) {
 func TestListenerShowsInPluginsPaneAndHeaderCount(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, 100, 30)
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, 100, 30)
 
-	h.waitText("listeners=0")
+		h.waitText("listeners=0")
 
-	h.ui.Listener(events.Listener{Family: events.FamilyV4, Address: "0.0.0.0:67", Interface: "eth0"})
+		h.ui.Listener(events.Listener{Family: events.FamilyV4, Address: "0.0.0.0:67", Interface: "eth0"})
 
-	h.waitText("listeners=1")
-	h.waitText("0.0.0.0:67 (eth0)")
+		h.waitText("listeners=1")
+		h.waitText("0.0.0.0:67 (eth0)")
+	})
 }
 
 // TestPluginChainNumberedAndRedacted pins down that plugin events render as a
@@ -716,22 +761,24 @@ func TestListenerShowsInPluginsPaneAndHeaderCount(t *testing.T) {
 func TestPluginChainNumberedAndRedacted(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, 160, 30)
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, 160, 30)
 
-	h.ui.Plugin(events.Plugin{
-		Family: events.FamilyV6, Name: "redis",
-		Args: []string{"redis://coredhcp:hunter2@10.0.0.9:6379"},
-	})
-	h.ui.Plugin(events.Plugin{
-		Family: events.FamilyV6, Name: "range",
-		Args: []string{"2001:db8::1", "2001:db8::ff"},
-	})
+		h.ui.Plugin(events.Plugin{
+			Family: events.FamilyV6, Name: "redis",
+			Args: []string{"redis://coredhcp:hunter2@10.0.0.9:6379"},
+		})
+		h.ui.Plugin(events.Plugin{
+			Family: events.FamilyV6, Name: "range",
+			Args: []string{"2001:db8::1", "2001:db8::ff"},
+		})
 
-	h.waitText("range")
-	require.Contains(t, h.text(), "1 redis")
-	require.Contains(t, h.text(), "2 range")
-	require.Contains(t, h.text(), "coredhcp:***@")
-	require.NotContains(t, h.text(), "hunter2")
+		h.waitText("range")
+		require.Contains(t, h.text(), "1 redis")
+		require.Contains(t, h.text(), "2 range")
+		require.Contains(t, h.text(), "coredhcp:***@")
+		require.NotContains(t, h.text(), "hunter2")
+	})
 }
 
 // TestConfirmedLeaseFromDiscoverOfferRequestAck pins down that a DISCOVER
@@ -740,21 +787,23 @@ func TestPluginChainNumberedAndRedacted(t *testing.T) {
 func TestConfirmedLeaseFromDiscoverOfferRequestAck(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, 160, 30)
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, 160, 30)
 
-	h.ui.Request(events.Request{
-		Family: events.FamilyV4, Type: "DISCOVER", ReplyType: "OFFER",
-		ClientID: "aa:bb:cc:dd:ee:ff", Addresses: []netip.Prefix{prefix(t, "10.0.0.5")},
-		LeaseTime: time.Hour, Outcome: events.OutcomeReplied,
-	})
-	h.ui.Request(events.Request{
-		Family: events.FamilyV4, Type: "REQUEST", ReplyType: "ACK",
-		ClientID: "aa:bb:cc:dd:ee:ff", Addresses: []netip.Prefix{prefix(t, "10.0.0.5")},
-		LeaseTime: time.Hour, Outcome: events.OutcomeReplied,
-	})
+		h.ui.Request(events.Request{
+			Family: events.FamilyV4, Type: "DISCOVER", ReplyType: "OFFER",
+			ClientID: "aa:bb:cc:dd:ee:ff", Addresses: []netip.Prefix{prefix(t, "10.0.0.5")},
+			LeaseTime: time.Hour, Outcome: events.OutcomeReplied,
+		})
+		h.ui.Request(events.Request{
+			Family: events.FamilyV4, Type: "REQUEST", ReplyType: "ACK",
+			ClientID: "aa:bb:cc:dd:ee:ff", Addresses: []netip.Prefix{prefix(t, "10.0.0.5")},
+			LeaseTime: time.Hour, Outcome: events.OutcomeReplied,
+		})
 
-	h.waitText("1 confirmed")
-	require.Contains(t, h.text(), "ee:ff")
+		h.waitText("1 confirmed")
+		require.Contains(t, h.text(), "ee:ff")
+	})
 }
 
 // TestStatusLineGrading pins down how the status line grades the server:
@@ -814,12 +863,14 @@ func TestStatusLineGrading(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			c := newClock(at)
-			h := newHarness(t, 100, 30, tui.WithClock(c.now))
+			synctest.Test(t, func(t *testing.T) {
+				c := newClock(at)
+				h := newHarness(t, 100, 30, tui.WithClock(c.now))
 
-			tc.seed(h.ui)
+				tc.seed(h.ui)
 
-			h.waitText(tc.want)
+				h.waitText(tc.want)
+			})
 		})
 	}
 }
@@ -830,17 +881,19 @@ func TestStatusLineGrading(t *testing.T) {
 func TestHostnameMarkupAndControlCharsSanitised(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, 160, 30)
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, 160, 30)
 
-	h.ui.Request(events.Request{
-		Family: events.FamilyV4, Type: "DISCOVER", ReplyType: "OFFER",
-		ClientID: "c1", Hostname: "[red]evil\x07host",
-		Outcome: events.OutcomeReplied,
+		h.ui.Request(events.Request{
+			Family: events.FamilyV4, Type: "DISCOVER", ReplyType: "OFFER",
+			ClientID: "c1", Hostname: "[red]evil\x07host",
+			Outcome: events.OutcomeReplied,
+		})
+
+		h.waitText("evil")
+		require.Contains(t, h.text(), "[red]evil.host")
+		require.NotContains(t, h.text(), "\x07")
 	})
-
-	h.waitText("evil")
-	require.Contains(t, h.text(), "[red]evil.host")
-	require.NotContains(t, h.text(), "\x07")
 }
 
 // TestLogWriterRendersParsedFields pins down that a slog text-handler line
@@ -848,16 +901,18 @@ func TestHostnameMarkupAndControlCharsSanitised(t *testing.T) {
 func TestLogWriterRendersParsedFields(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, 160, 30)
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, 160, 30)
 
-	line := `time=2026-09-04T21:04:10.001+02:00 level=INFO msg="Listen [::]:547" prefix=server6`
-	_, err := h.ui.LogWriter().Write([]byte(line + "\n"))
-	require.NoError(t, err)
+		line := `time=2026-09-04T21:04:10.001+02:00 level=INFO msg="Listen [::]:547" prefix=server6`
+		_, err := h.ui.LogWriter().Write([]byte(line + "\n"))
+		require.NoError(t, err)
 
-	h.waitText("Listen [::]:547")
-	require.Contains(t, h.text(), "21:04:10")
-	require.Contains(t, h.text(), "INFO")
-	require.Contains(t, h.text(), "server6")
+		h.waitText("Listen [::]:547")
+		require.Contains(t, h.text(), "21:04:10")
+		require.Contains(t, h.text(), "INFO")
+		require.Contains(t, h.text(), "server6")
+	})
 }
 
 // TestLogWriterRendersUnparsedLineRaw pins down that a log line which is not
@@ -865,14 +920,16 @@ func TestLogWriterRendersParsedFields(t *testing.T) {
 func TestLogWriterRendersUnparsedLineRaw(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, 160, 30)
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, 160, 30)
 
-	const raw = "plain log line without any key value pairs"
+		const raw = "plain log line without any key value pairs"
 
-	_, err := h.ui.LogWriter().Write([]byte(raw + "\n"))
-	require.NoError(t, err)
+		_, err := h.ui.LogWriter().Write([]byte(raw + "\n"))
+		require.NoError(t, err)
 
-	h.waitText(raw)
+		h.waitText(raw)
+	})
 }
 
 // TestLogWriterHoldsPartialLineUntilNewline pins down that a write with no
@@ -880,17 +937,19 @@ func TestLogWriterRendersUnparsedLineRaw(t *testing.T) {
 func TestLogWriterHoldsPartialLineUntilNewline(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, 160, 30)
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, 160, 30)
 
-	_, err := h.ui.LogWriter().Write([]byte("half a line no newline yet"))
-	require.NoError(t, err)
+		_, err := h.ui.LogWriter().Write([]byte("half a line no newline yet"))
+		require.NoError(t, err)
 
-	h.settles("half a line", 20*time.Millisecond)
+		h.settles("half a line", 20*time.Millisecond)
 
-	_, err = h.ui.LogWriter().Write([]byte(" now complete\n"))
-	require.NoError(t, err)
+		_, err = h.ui.LogWriter().Write([]byte(" now complete\n"))
+		require.NoError(t, err)
 
-	h.waitText("half a line no newline yet now complete")
+		h.waitText("half a line no newline yet now complete")
+	})
 }
 
 // TestPauseKeyFreezesTrafficPane pins down that 'p' freezes the traffic pane
@@ -898,24 +957,26 @@ func TestLogWriterHoldsPartialLineUntilNewline(t *testing.T) {
 func TestPauseKeyFreezesTrafficPane(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, 160, 30)
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, 160, 30)
 
-	h.ui.Request(events.Request{
-		Family: events.FamilyV4, Type: "DISCOVER", ClientID: "before-pause", Outcome: events.OutcomeDropped,
+		h.ui.Request(events.Request{
+			Family: events.FamilyV4, Type: "DISCOVER", ClientID: "before-pause", Outcome: events.OutcomeDropped,
+		})
+		h.waitText("before-pause")
+
+		h.key(tcell.KeyRune, 'p')
+		h.waitText("PAUSED")
+		h.waitText("paused")
+
+		h.ui.Request(events.Request{
+			Family: events.FamilyV4, Type: "DISCOVER", ClientID: "after-pause", Outcome: events.OutcomeDropped,
+		})
+		h.settles("after-pause", 20*time.Millisecond)
+
+		h.key(tcell.KeyRune, 'p')
+		h.waitText("after-pause")
 	})
-	h.waitText("before-pause")
-
-	h.key(tcell.KeyRune, 'p')
-	h.waitText("PAUSED")
-	h.waitText("paused")
-
-	h.ui.Request(events.Request{
-		Family: events.FamilyV4, Type: "DISCOVER", ClientID: "after-pause", Outcome: events.OutcomeDropped,
-	})
-	h.settles("after-pause", 20*time.Millisecond)
-
-	h.key(tcell.KeyRune, 'p')
-	h.waitText("after-pause")
 }
 
 // TestHelpOverlayTogglesOnAnyKey pins down that '?' opens the help overlay
@@ -923,13 +984,15 @@ func TestPauseKeyFreezesTrafficPane(t *testing.T) {
 func TestHelpOverlayTogglesOnAnyKey(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, 100, 30)
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, 100, 30)
 
-	h.key(tcell.KeyRune, '?')
-	h.waitText("Home, End")
+		h.key(tcell.KeyRune, '?')
+		h.waitText("Home, End")
 
-	h.key(tcell.KeyRune, 'x')
-	h.waitFor("help overlay closed", func(s string) bool { return !strings.Contains(s, "Home, End") })
+		h.key(tcell.KeyRune, 'x')
+		h.waitFor("help overlay closed", func(s string) bool { return !strings.Contains(s, "Home, End") })
+	})
 }
 
 // TestFocusMovesWithTabAndDigitKeys pins down that Tab, Shift-Tab and the
@@ -938,54 +1001,56 @@ func TestHelpOverlayTogglesOnAnyKey(t *testing.T) {
 func TestFocusMovesWithTabAndDigitKeys(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, 100, 16)
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, 100, 16)
 
-	for i := range 20 {
-		h.ui.Request(events.Request{
-			Family: events.FamilyV4, Type: "DISCOVER", Outcome: events.OutcomeDropped,
-			ClientID: fmt.Sprintf("t%02d", i),
-		})
-	}
+		for i := range 20 {
+			h.ui.Request(events.Request{
+				Family: events.FamilyV4, Type: "DISCOVER", Outcome: events.OutcomeDropped,
+				ClientID: fmt.Sprintf("t%02d", i),
+			})
+		}
 
-	h.waitText("t19")
+		h.waitText("t19")
 
-	// Traffic is focused by default: Up stops it from following the newest row.
-	h.key(tcell.KeyUp, 0)
-	h.waitFor("traffic pane to stop following", func(s string) bool { return !strings.Contains(s, "t19") })
+		// Traffic is focused by default: Up stops it from following the newest row.
+		h.key(tcell.KeyUp, 0)
+		h.waitFor("traffic pane to stop following", func(s string) bool { return !strings.Contains(s, "t19") })
 
-	// Back to the newest row, then Tab away: Up must no longer reach traffic,
-	// so the newest row stays put.
-	h.key(tcell.KeyEnd, 0)
-	h.waitText("t19")
+		// Back to the newest row, then Tab away: Up must no longer reach traffic,
+		// so the newest row stays put.
+		h.key(tcell.KeyEnd, 0)
+		h.waitText("t19")
 
-	h.key(tcell.KeyTab, 0)
-	h.key(tcell.KeyUp, 0)
-	h.staysText("t19", 20*time.Millisecond)
+		h.key(tcell.KeyTab, 0)
+		h.key(tcell.KeyUp, 0)
+		h.staysText("t19", 20*time.Millisecond)
 
-	// '1' brings the focus straight back: Up reaches the traffic pane again.
-	h.key(tcell.KeyRune, '1')
-	h.key(tcell.KeyUp, 0)
-	h.waitFor("traffic pane to stop following again", func(s string) bool { return !strings.Contains(s, "t19") })
+		// '1' brings the focus straight back: Up reaches the traffic pane again.
+		h.key(tcell.KeyRune, '1')
+		h.key(tcell.KeyUp, 0)
+		h.waitFor("traffic pane to stop following again", func(s string) bool { return !strings.Contains(s, "t19") })
 
-	// '2', '3' and '4' each move focus away from traffic too.
-	for _, r := range []rune{'2', '3', '4'} {
+		// '2', '3' and '4' each move focus away from traffic too.
+		for _, r := range []rune{'2', '3', '4'} {
+			h.key(tcell.KeyRune, '1')
+			h.key(tcell.KeyEnd, 0)
+			h.waitText("t19")
+
+			h.key(tcell.KeyRune, r)
+			h.key(tcell.KeyUp, 0)
+			h.staysText("t19", 20*time.Millisecond)
+		}
+
+		// Shift-Tab cycles focus backward, away from traffic as well.
 		h.key(tcell.KeyRune, '1')
 		h.key(tcell.KeyEnd, 0)
 		h.waitText("t19")
 
-		h.key(tcell.KeyRune, r)
+		h.key(tcell.KeyBacktab, 0)
 		h.key(tcell.KeyUp, 0)
 		h.staysText("t19", 20*time.Millisecond)
-	}
-
-	// Shift-Tab cycles focus backward, away from traffic as well.
-	h.key(tcell.KeyRune, '1')
-	h.key(tcell.KeyEnd, 0)
-	h.waitText("t19")
-
-	h.key(tcell.KeyBacktab, 0)
-	h.key(tcell.KeyUp, 0)
-	h.staysText("t19", 20*time.Millisecond)
+	})
 }
 
 // TestScrollingMovesByRowsHomeEndPgUpPgDn pins down Up, End, Home, PgDn and
@@ -993,32 +1058,34 @@ func TestFocusMovesWithTabAndDigitKeys(t *testing.T) {
 func TestScrollingMovesByRowsHomeEndPgUpPgDn(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, 100, 16)
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, 100, 16)
 
-	for i := range 40 {
-		h.ui.Request(events.Request{
-			Family: events.FamilyV4, Type: "DISCOVER", Outcome: events.OutcomeDropped,
-			ClientID: fmt.Sprintf("r%02d", i),
-		})
-	}
+		for i := range 40 {
+			h.ui.Request(events.Request{
+				Family: events.FamilyV4, Type: "DISCOVER", Outcome: events.OutcomeDropped,
+				ClientID: fmt.Sprintf("r%02d", i),
+			})
+		}
 
-	h.waitText("r39")
-	require.NotContains(t, h.text(), "r00")
+		h.waitText("r39")
+		require.NotContains(t, h.text(), "r00")
 
-	h.key(tcell.KeyUp, 0)
-	h.waitFor("stopped following the newest row", func(s string) bool { return !strings.Contains(s, "r39") })
+		h.key(tcell.KeyUp, 0)
+		h.waitFor("stopped following the newest row", func(s string) bool { return !strings.Contains(s, "r39") })
 
-	h.key(tcell.KeyEnd, 0)
-	h.waitText("r39")
+		h.key(tcell.KeyEnd, 0)
+		h.waitText("r39")
 
-	h.key(tcell.KeyHome, 0)
-	h.waitText("r00")
+		h.key(tcell.KeyHome, 0)
+		h.waitText("r00")
 
-	h.key(tcell.KeyPgDn, 0)
-	h.waitFor("paged down a screenful", func(s string) bool { return !strings.Contains(s, "r00") })
+		h.key(tcell.KeyPgDn, 0)
+		h.waitFor("paged down a screenful", func(s string) bool { return !strings.Contains(s, "r00") })
 
-	h.key(tcell.KeyPgUp, 0)
-	h.waitText("r00")
+		h.key(tcell.KeyPgUp, 0)
+		h.waitText("r00")
+	})
 }
 
 // TestClearKeyResetsTrafficAndCountersKeepsLeasesAndLog pins down that 'c'
@@ -1027,17 +1094,19 @@ func TestScrollingMovesByRowsHomeEndPgUpPgDn(t *testing.T) {
 func TestClearKeyResetsTrafficAndCountersKeepsLeasesAndLog(t *testing.T) {
 	t.Parallel()
 
-	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
-	h := newHarness(t, 160, 35, tui.WithClock(newClock(at).now))
+	synctest.Test(t, func(t *testing.T) {
+		at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+		h := newHarness(t, 160, 35, tui.WithClock(newClock(at).now))
 
-	seed(t, h.ui, at)
-	h.waitText("2 confirmed")
-	h.waitText("lease file reloaded")
+		seed(t, h.ui, at)
+		h.waitText("2 confirmed")
+		h.waitText("lease file reloaded")
 
-	h.key(tcell.KeyRune, 'c')
+		h.key(tcell.KeyRune, 'c')
 
-	h.waitText("waiting for the first request")
-	require.NotContains(t, h.text(), "DISCOVER")
-	require.Contains(t, h.text(), "2 confirmed")
-	require.Contains(t, h.text(), "lease file reloaded")
+		h.waitText("waiting for the first request")
+		require.NotContains(t, h.text(), "DISCOVER")
+		require.Contains(t, h.text(), "2 confirmed")
+		require.Contains(t, h.text(), "lease file reloaded")
+	})
 }

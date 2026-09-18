@@ -87,7 +87,7 @@ func TestProtoVersionCheck(t *testing.T) {
 
 func TestParsePlugins(t *testing.T) {
 	t.Run("empty list", func(t *testing.T) {
-		got, err := parsePlugins([]any{})
+		got, err := parsePlugins(protocolV6, []any{})
 		require.NoError(t, err)
 		assert.Empty(t, got)
 	})
@@ -97,7 +97,7 @@ func TestParsePlugins(t *testing.T) {
 		// (string/int/bool): it falls back to an empty, non-nil map, so
 		// this hits the "exactly one plugin" branch rather than "not a
 		// string map".
-		_, err := parsePlugins([]any{42})
+		_, err := parsePlugins(protocolV6, []any{42})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "exactly one plugin")
 	})
@@ -109,13 +109,13 @@ func TestParsePlugins(t *testing.T) {
 		// YAML null list entry decodes to an untyped nil, which cast
 		// turns into an empty non-nil map instead), so this path is
 		// only reachable via a direct call like this one.
-		_, err := parsePlugins([]any{map[string]any(nil)})
+		_, err := parsePlugins(protocolV6, []any{map[string]any(nil)})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "is not a string map")
 	})
 
 	t.Run("multiple keys rejected", func(t *testing.T) {
-		_, err := parsePlugins([]any{
+		_, err := parsePlugins(protocolV6, []any{
 			map[string]any{"foo": "a", "bar": "b"},
 		})
 		require.Error(t, err)
@@ -123,13 +123,13 @@ func TestParsePlugins(t *testing.T) {
 	})
 
 	t.Run("empty map rejected", func(t *testing.T) {
-		_, err := parsePlugins([]any{map[string]any{}})
+		_, err := parsePlugins(protocolV6, []any{map[string]any{}})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "exactly one plugin")
 	})
 
 	t.Run("single plugin with string args", func(t *testing.T) {
-		got, err := parsePlugins([]any{
+		got, err := parsePlugins(protocolV6, []any{
 			map[string]any{"dns": "8.8.8.8 8.8.4.4"},
 		})
 		require.NoError(t, err)
@@ -139,7 +139,7 @@ func TestParsePlugins(t *testing.T) {
 	})
 
 	t.Run("single plugin with a non-string args value", func(t *testing.T) {
-		got, err := parsePlugins([]any{
+		got, err := parsePlugins(protocolV6, []any{
 			map[string]any{"lease_time": 3600},
 		})
 		require.NoError(t, err)
@@ -149,7 +149,7 @@ func TestParsePlugins(t *testing.T) {
 	})
 
 	t.Run("single plugin with no args", func(t *testing.T) {
-		got, err := parsePlugins([]any{
+		got, err := parsePlugins(protocolV6, []any{
 			map[string]any{"server_id": nil},
 		})
 		require.NoError(t, err)
@@ -158,7 +158,7 @@ func TestParsePlugins(t *testing.T) {
 	})
 
 	t.Run("multiple plugins preserve order", func(t *testing.T) {
-		got, err := parsePlugins([]any{
+		got, err := parsePlugins(protocolV6, []any{
 			map[string]any{"a": "1"},
 			map[string]any{"b": "2"},
 		})

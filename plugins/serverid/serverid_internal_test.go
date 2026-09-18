@@ -81,7 +81,9 @@ func TestPluginState6Handler6(t *testing.T) {
 		require.NotNil(t, resp)
 		assert.False(t, stop)
 
-		opt := resp.(*dhcpv6.Message).Options.ServerID()
+		msg, ok := resp.(*dhcpv6.Message)
+		require.True(t, ok)
+		opt := msg.Options.ServerID()
 		require.NotNil(t, opt)
 		assert.True(t, opt.Equal(serverID))
 	})
@@ -112,7 +114,9 @@ func TestPluginState6Handler6(t *testing.T) {
 		resp, _ := p.Handler6(req, stub)
 		require.NotNil(t, resp)
 
-		opt := resp.(*dhcpv6.Message).Options.ServerID()
+		msg, ok := resp.(*dhcpv6.Message)
+		require.True(t, ok)
+		opt := msg.Options.ServerID()
 		require.NotNil(t, opt)
 		assert.True(t, opt.Equal(serverID))
 	})

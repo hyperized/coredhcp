@@ -80,7 +80,7 @@ func Load(pathOverride string) (*Config, error) {
 		return nil, err
 	}
 	if c.Server6 == nil && c.Server4 == nil {
-		return nil, ErrorFromString("need at least one valid config for DHCPv6 or DHCPv4")
+		return nil, ErrorFromString("need at least one valid config for DHCPv6 or DHCPv4; add a server4 or server6 section with its own listen and plugins keys")
 	}
 	return c, nil
 }
@@ -92,17 +92,17 @@ func protoVersionCheck(v protocolVersion) error {
 	return nil
 }
 
-func parsePlugins(pluginList []any) ([]PluginConfig, error) {
+func parsePlugins(ver protocolVersion, pluginList []any) ([]PluginConfig, error) {
 	plugins := make([]PluginConfig, 0, len(pluginList))
 	for idx, val := range pluginList {
 		conf := cast.ToStringMap(val)
 		if conf == nil {
-			return nil, ErrorFromString("dhcpv6: plugin #%d is not a string map", idx)
+			return nil, ErrorFromString("dhcpv%d: plugins entry #%d is not a string map; write each plugin as one `- <name>: <args>` item under server%d.plugins", ver, idx, ver)
 		}
 		// make sure that only one item is specified, since it's a
 		// map name -> args
 		if len(conf) != 1 {
-			return nil, ErrorFromString("dhcpv6: exactly one plugin per item can be specified")
+			return nil, ErrorFromString("dhcpv%d: plugins entry #%d holds %d plugin names, exactly one plugin per item can be specified; write it as `- <name>: <args>`", ver, idx, len(conf))
 		}
 		var (
 			name string
@@ -125,9 +125,9 @@ func (c *Config) getPlugins(ver protocolVersion) ([]PluginConfig, error) {
 	}
 	pluginList := cast.ToSlice(c.v.Get(fmt.Sprintf("server%d.plugins", ver)))
 	if pluginList == nil {
-		return nil, ErrorFromString("dhcpv%d: invalid plugins section, not a list or no plugin specified", ver)
+		return nil, ErrorFromString("dhcpv%d: invalid plugins section, server%d.plugins is not a list; write it as a YAML list of `- <name>: <args>` items, at least one", ver, ver)
 	}
-	return parsePlugins(pluginList)
+	return parsePlugins(ver, pluginList)
 }
 
 func (c *Config) parseConfig(ver protocolVersion) error {

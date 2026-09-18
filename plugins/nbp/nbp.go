@@ -58,9 +58,13 @@ type pluginState struct {
 
 func parseArgs(args ...string) (*url.URL, error) {
 	if len(args) != 1 {
-		return nil, fmt.Errorf("exactly one argument must be passed to NBP plugin, got %d", len(args))
+		return nil, fmt.Errorf("need exactly one argument, got %d; give one boot program URL, for example tftp://10.0.0.254/nbp", len(args))
 	}
-	return url.Parse(args[0])
+	u, err := url.Parse(args[0])
+	if err != nil {
+		return nil, fmt.Errorf("argument %q is not a URL: %w; give the boot program as a URL, for example tftp://10.0.0.254/nbp", args[0], err)
+	}
+	return u, nil
 }
 
 func setup6(args ...string) (handler.Handler6, error) {
@@ -111,23 +115,21 @@ func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	}
 	decap, err := req.GetInnerMessage()
 	if err != nil {
-		log.Errorf("Could not decapsulate request: %v", err)
+		log.Errorf("cannot read the client message inside the relayed request, dropping it: %v; the client will retry, check the relay that forwarded it", err)
 		// drop the request, this is probably a critical error in the packet.
 		return nil, true
 	}
-	for _, code := range decap.Options.RequestedOptions() {
-		switch code {
-		case dhcpv6.OptionBootfileURL:
-			// bootfile URL is requested
-			resp.AddOption(p.opt59)
-		case dhcpv6.OptionBootfileParam:
-			// optionally add opt60, bootfile params, if requested
-			if p.opt60 != nil {
-				resp.AddOption(p.opt60)
-			}
-		}
+	// Contains per code rather than a loop over the ORO: a client may repeat
+	// a code, and a repeat must not add the option twice.
+	requested := decap.Options.RequestedOptions()
+	if requested.Contains(dhcpv6.OptionBootfileURL) {
+		resp.UpdateOption(p.opt59)
+		log.Debugf("Added NBP %s to request", p.opt59)
 	}
-	log.Debugf("Added NBP %s to request", p.opt59)
+	if p.opt60 != nil && requested.Contains(dhcpv6.OptionBootfileParam) {
+		resp.UpdateOption(p.opt60)
+		log.Debugf("Added NBP %s to request", p.opt60)
+	}
 	return resp, true
 }
 

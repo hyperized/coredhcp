@@ -167,7 +167,7 @@ func TestParseCode(t *testing.T) {
 			if tc.want == 0 {
 				require.Error(t, err)
 				if tc.wantErr != nil {
-					assert.ErrorIs(t, err, tc.wantErr)
+					require.ErrorIs(t, err, tc.wantErr)
 				}
 				return
 			}
@@ -202,7 +202,7 @@ func TestParseSpec(t *testing.T) {
 			if tc.want.code == 0 {
 				require.Error(t, err)
 				if tc.wantErr != nil {
-					assert.ErrorIs(t, err, tc.wantErr)
+					require.ErrorIs(t, err, tc.wantErr)
 				}
 				return
 			}
@@ -215,7 +215,7 @@ func TestParseSpec(t *testing.T) {
 func TestParseSpecUnknownTypeNamesTheAllowList(t *testing.T) {
 	_, err := parseSpec(family4, "15:str:home.lan")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `unknown type "str"`)
+	assert.Contains(t, err.Error(), `type "str" is not a known option type`)
 	assert.Contains(t, err.Error(), knownTypes())
 }
 

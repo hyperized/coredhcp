@@ -111,7 +111,7 @@ var Plugin = plugins.Plugin{
 // Setup errors that callers and tests can match with errors.Is. Errors that
 // have to quote the offending input wrap one of these with fmt.Errorf.
 var (
-	errNoEntries      = errors.New("need at least one <key>=<url> entry")
+	errNoEntries      = errors.New("no bootfile entries given; write each as <key>=<url>, for example x86-64-uefi=tftp://10.0.0.5/ipxe.efi")
 	errMalformedEntry = errors.New("expected <key>=<url>")
 	errUnknownKey     = errors.New("unknown key")
 	errBadArchCode    = errors.New("architecture code must be a number from 0 to 65535")
@@ -230,11 +230,11 @@ func parseArgs(args ...string) (*bootFiles, error) {
 	for _, arg := range args {
 		key, raw, ok := strings.Cut(arg, "=")
 		if !ok {
-			return nil, fmt.Errorf("%q: %w", arg, errMalformedEntry)
+			return nil, fmt.Errorf("%q: %w; add the '=' and the URL, for example x86-bios=tftp://10.0.0.5/undionly.kpxe", arg, errMalformedEntry)
 		}
 		u, err := parseURL(raw)
 		if err != nil {
-			return nil, fmt.Errorf("%q: %w", key, err)
+			return nil, fmt.Errorf("entry %q: %w", key, err)
 		}
 		if err := b.assign(key, u); err != nil {
 			return nil, err
@@ -258,7 +258,7 @@ func (b *bootFiles) assign(key string, u *url.URL) error {
 		return err
 	}
 	if _, dup := b.byArch[arch]; dup {
-		return fmt.Errorf("%q (architecture %d): %w", key, uint16(arch), errDuplicateKey)
+		return fmt.Errorf("%q (architecture %d): %w; remove one of the two entries for that architecture", key, uint16(arch), errDuplicateKey)
 	}
 	b.byArch[arch] = u
 	return nil
@@ -267,7 +267,7 @@ func (b *bootFiles) assign(key string, u *url.URL) error {
 // assignOnce writes u to dst unless dst already holds an entry.
 func assignOnce(dst **url.URL, u *url.URL, key string) error {
 	if *dst != nil {
-		return fmt.Errorf("%q: %w", key, errDuplicateKey)
+		return fmt.Errorf("%q: %w; remove one of the two entries", key, errDuplicateKey)
 	}
 	*dst = u
 	return nil
@@ -281,11 +281,11 @@ func parseArch(key string) (iana.Arch, error) {
 	}
 	digits, ok := strings.CutPrefix(key, archPrefix)
 	if !ok {
-		return 0, fmt.Errorf("%q: %w (known keys: %s)", key, errUnknownKey, knownKeys())
+		return 0, fmt.Errorf("%q: %w; use one of: %s", key, errUnknownKey, knownKeys())
 	}
 	code, err := strconv.ParseUint(digits, 10, 16)
 	if err != nil {
-		return 0, fmt.Errorf("%q: %w", key, errBadArchCode)
+		return 0, fmt.Errorf("%q: %w; write a numeric code as arch:<n>, for example arch:7", key, errBadArchCode)
 	}
 	return iana.Arch(code), nil
 }
@@ -305,10 +305,10 @@ func knownKeys() string {
 func parseURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", errBadURL, err)
+		return nil, fmt.Errorf("%w: %w; give an absolute URL, for example tftp://10.0.0.5/undionly.kpxe", errBadURL, err)
 	}
 	if !slices.Contains(bootSchemes, u.Scheme) {
-		return nil, fmt.Errorf("%w %q (want one of: %s)", errBadScheme, u.Scheme,
+		return nil, fmt.Errorf("%w %q; use one of: %s, for example tftp://10.0.0.5/undionly.kpxe", errBadScheme, u.Scheme,
 			strings.Join(bootSchemes, ", "))
 	}
 	return u, nil
@@ -492,7 +492,7 @@ type state6 struct {
 func (s *state6) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	msg, err := req.GetInnerMessage()
 	if err != nil {
-		log.Errorf("could not decapsulate request: %v", err)
+		log.Errorf("cannot read the client message inside the relayed request, dropping it: %v; the client will retry, check the relay that forwarded it", err)
 		// Drop the request, this is probably a critical error in the packet.
 		return nil, true
 	}

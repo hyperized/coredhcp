@@ -101,9 +101,13 @@ func register(t *testing.T, s leases.Source) {
 
 // socketPath returns a path for a unix socket in a directory of its own, short
 // enough to bind: a socket path is capped at 104 bytes on darwin.
+//
+// t.TempDir() names the directory after the test (and any subtest), which
+// several callers here run under names long enough to blow that limit on its
+// own, so this keeps its own short directory instead.
 func socketPath(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "cdhcp")
+	dir, err := os.MkdirTemp("", "cdhcp") //nolint:usetesting // t.TempDir() path is too long for a unix socket
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return filepath.Join(dir, "a.sock")
@@ -131,9 +135,16 @@ func unixClient(path string) *http.Client {
 	}}
 }
 
+// response holds the parts of an http.Response that outlive its body, so
+// callers can't read a body get() has already drained and closed.
+type response struct {
+	StatusCode int
+	Header     http.Header
+}
+
 // get performs one request and returns the response with its body read and
 // closed.
-func get(t *testing.T, client *http.Client, method, url string) (*http.Response, string) {
+func get(t *testing.T, client *http.Client, method, url string) (response, string) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(t.Context(), method, url, nil)
 	require.NoError(t, err)
@@ -142,7 +153,7 @@ func get(t *testing.T, client *http.Client, method, url string) (*http.Response,
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	return resp, string(body)
+	return response{StatusCode: resp.StatusCode, Header: resp.Header.Clone()}, string(body)
 }
 
 // serveOnSocket starts the plugin on a fresh unix socket and returns a client
@@ -284,12 +295,12 @@ func TestRejectedRequests(t *testing.T) {
 		query string
 		want  string
 	}{
-		{name: "a family that is not a family", query: "family=5", want: "family must be 4 or 6"},
-		{name: "a family in another notation", query: "family=ipv4", want: "family must be 4 or 6"},
-		{name: "an empty family", query: "family=", want: "family must be 4 or 6"},
-		{name: "a source that is not registered", query: "source=range+other.sqlite3", want: "no such source"},
-		{name: "an unknown parameter", query: "limit=10", want: "unknown query parameter, want family or source"},
-		{name: "a misspelt parameter", query: "familly=4", want: "unknown query parameter, want family or source"},
+		{name: "a family that is not a family", query: "family=5", want: leaseapi.ErrUnknownFamily.Error()},
+		{name: "a family in another notation", query: "family=ipv4", want: leaseapi.ErrUnknownFamily.Error()},
+		{name: "an empty family", query: "family=", want: leaseapi.ErrUnknownFamily.Error()},
+		{name: "a source that is not registered", query: "source=range+other.sqlite3", want: leaseapi.ErrUnknownSource.Error()},
+		{name: "an unknown parameter", query: "limit=10", want: leaseapi.ErrUnknownParameter.Error()},
+		{name: "a misspelt parameter", query: "familly=4", want: leaseapi.ErrUnknownParameter.Error()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, path := range []string{"/v1/leases", "/v1/pools"} {
@@ -421,7 +432,9 @@ func TestStaleSocketIsReplaced(t *testing.T) {
 	// behind. Starting again must not need an operator to remove it.
 	stale, err := net.Listen("unix", path)
 	require.NoError(t, err)
-	stale.(*net.UnixListener).SetUnlinkOnClose(false)
+	unixStale, ok := stale.(*net.UnixListener)
+	require.True(t, ok, "unix listener must be a *net.UnixListener")
+	unixStale.SetUnlinkOnClose(false)
 	require.NoError(t, stale.Close())
 	require.FileExists(t, path)
 
@@ -479,7 +492,7 @@ func TestASecondAddressIsRefused(t *testing.T) {
 	// the same answers on another socket.
 	_, err = leaseapi.Plugin.Setup6("unix:" + second)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "refusing to also listen on")
+	assert.Contains(t, err.Error(), "cannot also be served")
 	assert.NoFileExists(t, second)
 }
 

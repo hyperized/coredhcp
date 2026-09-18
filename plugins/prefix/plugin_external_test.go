@@ -23,6 +23,13 @@ func testDUID() dhcpv6.DUID {
 	}
 }
 
+func asMessage(t *testing.T, result dhcpv6.DHCPv6) *dhcpv6.Message {
+	t.Helper()
+	msg, ok := result.(*dhcpv6.Message)
+	require.True(t, ok, "expected *dhcpv6.Message, got %T", result)
+	return msg
+}
+
 // solicitWith runs one SOLICIT, carrying a single IA_PD (IAID 1,2,3,4) with
 // the given prefix hints, through an already set-up handler. Reusing the same
 // handler across calls lets scenarios exercise several sequential exchanges
@@ -37,7 +44,7 @@ func solicitWith(t *testing.T, handle func(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCP
 	require.NoError(t, err)
 
 	result, _ := handle(req, resp)
-	return result.(*dhcpv6.Message)
+	return asMessage(t, result)
 }
 
 // solicitManyIAPDs runs one SOLICIT carrying n distinct IA_PDs, one per IAID
@@ -57,7 +64,7 @@ func solicitManyIAPDs(t *testing.T, handle func(req, resp dhcpv6.DHCPv6) (dhcpv6
 	require.NoError(t, err)
 
 	result, _ := handle(req, resp)
-	return result.(*dhcpv6.Message)
+	return asMessage(t, result)
 }
 
 // releaseManyIAPDs runs one RELEASE carrying n distinct, empty IA_PDs, one per
@@ -79,7 +86,7 @@ func releaseManyIAPDs(t *testing.T, handle func(req, resp dhcpv6.DHCPv6) (dhcpv6
 	resp.MessageType = dhcpv6.MessageTypeReply
 
 	result, _ := handle(req, resp)
-	return result.(*dhcpv6.Message)
+	return asMessage(t, result)
 }
 
 // duidOfLength returns a client DUID whose wire form (ToBytes) is exactly n
@@ -132,12 +139,12 @@ func TestRoundTrip(t *testing.T) {
 		require.Equal(t, dhcpIana.StatusSuccess, mo.Status().StatusCode)
 	}
 
-	iapds := result.(*dhcpv6.Message).Options.IAPD()
+	iapds := asMessage(t, result).Options.IAPD()
 	require.Len(t, iapds, 1, "expected exactly 1 IAPD")
 	iapd := iapds[0]
 	assert.Equal(t, reqIAID, iapd.IaId)
 
-	if status := result.(*dhcpv6.Message).Options.Status(); status != nil {
+	if status := asMessage(t, result).Options.Status(); status != nil {
 		assert.Equal(t, dhcpIana.StatusSuccess, status.StatusCode)
 	}
 
@@ -150,20 +157,20 @@ func TestSetupPrefixArgValidation(t *testing.T) {
 		args    []string
 		wantErr string
 	}{
-		{"no args", nil, "need both a subnet and an allocation max size"},
-		{"one arg", []string{"2001:db8::/48"}, "need both a subnet and an allocation max size"},
-		{"invalid CIDR", []string{"not-a-cidr", "64"}, "invalid pool subnet"},
-		{"non-numeric alloc size", []string{"2001:db8::/48", "abc"}, "invalid prefix length"},
-		{"alloc size above 128", []string{"2001:db8::/48", "200"}, "invalid prefix length"},
-		{"alloc size negative", []string{"2001:db8::/48", "-1"}, "invalid prefix length"},
-		{"alloc size smaller than pool", []string{"2001:db8::/48", "40"}, "could not initialize prefix allocator"},
-		{"malformed lease duration", []string{"2001:db8::/48", "64", "forever"}, "invalid lease duration"},
-		{"zero lease duration", []string{"2001:db8::/48", "64", "0s"}, "lease duration has to be positive"},
-		{"negative lease duration", []string{"2001:db8::/48", "64", "-1h"}, "lease duration has to be positive"},
-		{"unknown trailing argument", []string{"2001:db8::/48", "64", "1h", "reap:5m"}, "unexpected argument"},
-		{"duplicate sweep argument", []string{"2001:db8::/48", "64", "1h", "sweep:5m", "sweep:6m"}, "argument sweep given more than once"},
-		{"malformed sweep interval", []string{"2001:db8::/48", "64", "1h", "sweep:soon"}, "invalid sweep interval"},
-		{"zero sweep interval", []string{"2001:db8::/48", "64", "1h", "sweep:0s"}, "sweep interval has to be positive"},
+		{"no args", nil, "want at least two arguments, the pool prefix and the allocation size"},
+		{"one arg", []string{"2001:db8::/48"}, "want at least two arguments, the pool prefix and the allocation size"},
+		{"invalid CIDR", []string{"not-a-cidr", "64"}, `pool subnet "not-a-cidr" is not a CIDR`},
+		{"non-numeric alloc size", []string{"2001:db8::/48", "abc"}, `allocation size "abc" is not a prefix length between 0 and 128`},
+		{"alloc size above 128", []string{"2001:db8::/48", "200"}, `allocation size "200" is not a prefix length between 0 and 128`},
+		{"alloc size negative", []string{"2001:db8::/48", "-1"}, `allocation size "-1" is not a prefix length between 0 and 128`},
+		{"alloc size smaller than pool", []string{"2001:db8::/48", "40"}, "could not build the prefix allocator"},
+		{"malformed lease duration", []string{"2001:db8::/48", "64", "forever"}, `lease duration "forever" is not a duration`},
+		{"zero lease duration", []string{"2001:db8::/48", "64", "0s"}, `lease duration "0s" is not above zero`},
+		{"negative lease duration", []string{"2001:db8::/48", "64", "-1h"}, `lease duration "-1h" is not above zero`},
+		{"unknown trailing argument", []string{"2001:db8::/48", "64", "1h", "reap:5m"}, `argument "reap:5m" is not one this plugin takes`},
+		{"duplicate sweep argument", []string{"2001:db8::/48", "64", "1h", "sweep:5m", "sweep:6m"}, "argument sweep is given more than once"},
+		{"malformed sweep interval", []string{"2001:db8::/48", "64", "1h", "sweep:soon"}, "sweep:soon is not a duration"},
+		{"zero sweep interval", []string{"2001:db8::/48", "64", "1h", "sweep:0s"}, "sweep:0s is not above zero"},
 		{"ipv4 pool subnet", []string{"192.0.2.0/24", "24"}, "not IPv6"},
 	}
 	for _, tt := range tests {
@@ -220,7 +227,7 @@ func TestHandlePrefixNilOptionDefaultsToEmptyHint(t *testing.T) {
 	require.NoError(t, err)
 
 	result, _ := h(req, resp)
-	msg := result.(*dhcpv6.Message)
+	msg := asMessage(t, result)
 	iapds := msg.Options.IAPD()
 	require.Len(t, iapds, 1)
 	assert.Len(t, iapds[0].Options.Prefixes(), 1)
@@ -433,7 +440,7 @@ func releaseWith(t *testing.T, handle func(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCP
 	result, stop := handle(req, resp)
 	require.NotNil(t, result, "later plugins must still see the release")
 	assert.False(t, stop)
-	return result.(*dhcpv6.Message)
+	return asMessage(t, result)
 }
 
 // iapdStatus reads the status code option of the IA_PD answering iaid.
@@ -539,7 +546,7 @@ func TestHandleDeclineIsIgnored(t *testing.T) {
 	result, stop := h(req, resp)
 	require.NotNil(t, result)
 	assert.False(t, stop)
-	assert.Empty(t, result.(*dhcpv6.Message).Options.IAPD(), "a decline is not about prefixes")
+	assert.Empty(t, asMessage(t, result).Options.IAPD(), "a decline is not about prefixes")
 }
 
 // TestHandleCapsIAPDsAnsweredPerMessage pins the per-message IA_PD cap: a
@@ -564,6 +571,33 @@ func TestHandleReleaseCapsIAPDsAnsweredPerMessage(t *testing.T) {
 
 	resp := releaseManyIAPDs(t, h, testDUID(), 12)
 	assert.Len(t, resp.Options.IAPD(), 8, "the reply must not grow past the per-message cap")
+}
+
+// TestHandleCapsHintsPerIAPD repeats a hint the client already holds, which
+// renewExactMatches renews and adds to the reply on every match: the shape
+// that used to grow the reply with whatever the sender put in the request.
+func TestHandleCapsHintsPerIAPD(t *testing.T) {
+	// 8 mirrors the plugin's unexported maxHintsPerIAPD.
+	const maxHintsPerIAPD = 8
+
+	h, err := prefix.Plugin.Setup6("2001:db8::/64", "64")
+	require.NoError(t, err)
+
+	duid := testDUID()
+	first := solicitWith(t, h, duid)
+	held := first.Options.IAPD()[0].Options.Prefixes()
+	require.Len(t, held, 1)
+
+	const repeated = 2000
+	hints := make([]*dhcpv6.OptIAPrefix, repeated)
+	for i := range hints {
+		hints[i] = &dhcpv6.OptIAPrefix{Prefix: held[0].Prefix}
+	}
+
+	second := solicitWith(t, h, duid, hints...)
+	iapds := second.Options.IAPD()
+	require.Len(t, iapds, 1)
+	assert.Len(t, iapds[0].Options.Prefixes(), maxHintsPerIAPD, "the reply must not grow with the number of repeated hints")
 }
 
 // TestHandleCapsNewAllocationsPerClient pins the per-client cap: with the

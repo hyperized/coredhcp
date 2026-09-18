@@ -8,6 +8,7 @@ package ntp
 
 import (
 	"errors"
+	"fmt"
 	"net"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -35,13 +36,13 @@ type pluginState struct {
 
 func setup6(args ...string) (handler.Handler6, error) {
 	if len(args) < 1 {
-		return nil, errors.New("need at least one NTP server")
+		return nil, errors.New("no NTP server given; list one or more server addresses as arguments, for example 2001:db8::123")
 	}
 	p := pluginState{}
 	for _, arg := range args {
 		server := net.ParseIP(arg)
 		if server == nil || server.To4() != nil {
-			return nil, errors.New("expected an NTP server IPv6 address, got: " + arg)
+			return nil, fmt.Errorf("argument %q is not an IPv6 address; under server6 give each NTP server as an IPv6 address such as 2001:db8::123", arg)
 		}
 		p.ntpServers = append(p.ntpServers, server)
 	}
@@ -52,13 +53,13 @@ func setup6(args ...string) (handler.Handler6, error) {
 func setup4(args ...string) (handler.Handler4, error) {
 	log.Printf("loaded plugin for DHCPv4.")
 	if len(args) < 1 {
-		return nil, errors.New("need at least one NTP server")
+		return nil, errors.New("no NTP server given; list one or more server addresses as arguments, for example 192.0.2.123")
 	}
 	p := pluginState{}
 	for _, arg := range args {
 		server := net.ParseIP(arg)
 		if server.To4() == nil {
-			return nil, errors.New("expected an NTP server IPv4 address, got: " + arg)
+			return nil, fmt.Errorf("argument %q is not an IPv4 address; under server4 give each NTP server as a dotted address such as 192.0.2.123", arg)
 		}
 		p.ntpServers = append(p.ntpServers, server)
 	}

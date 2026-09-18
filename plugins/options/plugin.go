@@ -68,7 +68,7 @@ var Plugin = plugins.Plugin{
 // Setup errors that callers and tests can match with errors.Is. Errors that
 // need to quote the offending input are built with fmt.Errorf instead.
 var (
-	errNoSpecs       = errors.New("need at least one option specification")
+	errNoSpecs       = errors.New("no option specifications given; write each as code:type:value, for example 15:string:home.lan")
 	errMalformedSpec = errors.New("expected code:type:value")
 	errZeroCode      = errors.New("option code 0 is the pad option and cannot be set")
 	errEmptyValue    = errors.New("empty option value")
@@ -97,7 +97,7 @@ var family6 = &family{maxCode: math.MaxUint16, parseAddr: parseAddr6}
 func parseAddr4(value string) ([]byte, error) {
 	ip := net.ParseIP(value).To4()
 	if ip == nil {
-		return nil, fmt.Errorf("expected an IPv4 address, got %q", value)
+		return nil, fmt.Errorf("value %q is not an IPv4 address; give a dotted address, for example 192.0.2.10", value)
 	}
 	return ip, nil
 }
@@ -108,7 +108,7 @@ func parseAddr4(value string) ([]byte, error) {
 func parseAddr6(value string) ([]byte, error) {
 	ip := net.ParseIP(value)
 	if ip == nil || ip.To4() != nil {
-		return nil, fmt.Errorf("expected an IPv6 address, got %q", value)
+		return nil, fmt.Errorf("value %q is not an IPv6 address; give an address, for example 2001:db8::1", value)
 	}
 	return ip.To16(), nil
 }
@@ -175,7 +175,7 @@ func uintParser(bits int) valueParser {
 	return func(_ *family, value string) ([]byte, error) {
 		n, err := strconv.ParseUint(value, 10, bits)
 		if err != nil {
-			return nil, fmt.Errorf("invalid uint%d value %q: %w", bits, value, err)
+			return nil, fmt.Errorf("value %q is not an unsigned %d-bit number: %w; give a decimal number that fits, for example 1500", value, bits, err)
 		}
 		var buf [8]byte
 		binary.BigEndian.PutUint64(buf[:], n)
@@ -188,7 +188,7 @@ func uintParser(bits int) valueParser {
 func parseHexValue(_ *family, value string) ([]byte, error) {
 	raw, err := hex.DecodeString(value)
 	if err != nil {
-		return nil, fmt.Errorf("invalid hex value %q: %w", value, err)
+		return nil, fmt.Errorf("value %q is not hexadecimal: %w; give an even number of hex digits, for example 0a1b2c", value, err)
 	}
 	return raw, nil
 }
@@ -199,7 +199,7 @@ func parseHexValue(_ *family, value string) ([]byte, error) {
 func parseBoolValue(_ *family, value string) ([]byte, error) {
 	set, err := strconv.ParseBool(value)
 	if err != nil {
-		return nil, fmt.Errorf("invalid bool value %q: %w", value, err)
+		return nil, fmt.Errorf("value %q is not a boolean: %w; use true or false, or 1 or 0", value, err)
 	}
 	if set {
 		return []byte{1}, nil
@@ -218,13 +218,13 @@ type spec struct {
 func parseCode(fam *family, raw string) (uint16, error) {
 	code, err := strconv.ParseUint(raw, 10, 16)
 	if err != nil {
-		return 0, fmt.Errorf("invalid option code %q: %w", raw, err)
+		return 0, fmt.Errorf("option code %q is not a number from 1 to %d: %w; give a decimal code in that range", raw, fam.maxCode, err)
 	}
 	if code == 0 {
-		return 0, errZeroCode
+		return 0, fmt.Errorf("%w; pick a code from 1 to %d", errZeroCode, fam.maxCode)
 	}
 	if code > fam.maxCode {
-		return 0, fmt.Errorf("option code %d out of range, want 1-%d", code, fam.maxCode)
+		return 0, fmt.Errorf("option code %d is outside the range 1 to %d; pick a code in that range", code, fam.maxCode)
 	}
 	return uint16(code), nil
 }
@@ -233,7 +233,7 @@ func parseCode(fam *family, raw string) (uint16, error) {
 func parseSpec(fam *family, arg string) (spec, error) {
 	fields := strings.SplitN(arg, ":", specFields)
 	if len(fields) != specFields {
-		return spec{}, errMalformedSpec
+		return spec{}, fmt.Errorf("%w; split it on two colons, for example 15:string:home.lan", errMalformedSpec)
 	}
 	code, err := parseCode(fam, fields[0])
 	if err != nil {
@@ -241,10 +241,10 @@ func parseSpec(fam *family, arg string) (spec, error) {
 	}
 	parse, ok := valueParsers[fields[1]]
 	if !ok {
-		return spec{}, fmt.Errorf("unknown type %q, want one of: %s", fields[1], knownTypes())
+		return spec{}, fmt.Errorf("type %q is not a known option type; use one of: %s", fields[1], knownTypes())
 	}
 	if fields[2] == "" {
-		return spec{}, errEmptyValue
+		return spec{}, fmt.Errorf("%w; put the value after the second colon, for example 15:string:home.lan", errEmptyValue)
 	}
 	data, err := parse(fam, fields[2])
 	if err != nil {
@@ -263,7 +263,7 @@ func parseSpecs(fam *family, args []string) ([]spec, error) {
 	for _, arg := range args {
 		parsed, err := parseSpec(fam, arg)
 		if err != nil {
-			return nil, fmt.Errorf("invalid option specification %q: %w", arg, err)
+			return nil, fmt.Errorf("option specification %q: %w", arg, err)
 		}
 		specs = append(specs, parsed)
 	}

@@ -8,6 +8,7 @@ package dns
 
 import (
 	"errors"
+	"fmt"
 	"net"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -35,13 +36,13 @@ type pluginState struct {
 
 func setup6(args ...string) (handler.Handler6, error) {
 	if len(args) < 1 {
-		return nil, errors.New("need at least one DNS server")
+		return nil, errors.New("no DNS server given; list one or more server addresses as arguments, for example 2001:4860:4860::8888")
 	}
 	p := pluginState{}
 	for _, arg := range args {
 		server := net.ParseIP(arg)
 		if server.To16() == nil {
-			return nil, errors.New("expected an DNS server address, got: " + arg)
+			return nil, fmt.Errorf("argument %q is not an IP address; give each DNS server as an address such as 2001:4860:4860::8888", arg)
 		}
 		p.dnsServers = append(p.dnsServers, server)
 	}
@@ -52,13 +53,13 @@ func setup6(args ...string) (handler.Handler6, error) {
 func setup4(args ...string) (handler.Handler4, error) {
 	log.Printf("loaded plugin for DHCPv4.")
 	if len(args) < 1 {
-		return nil, errors.New("need at least one DNS server")
+		return nil, errors.New("no DNS server given; list one or more server addresses as arguments, for example 8.8.8.8")
 	}
 	p := pluginState{}
 	for _, arg := range args {
 		DNSServer := net.ParseIP(arg)
 		if DNSServer.To4() == nil {
-			return nil, errors.New("expected an DNS server address, got: " + arg)
+			return nil, fmt.Errorf("argument %q is not an IPv4 address; give each DNS server as a dotted address such as 8.8.8.8", arg)
 		}
 		p.dnsServers = append(p.dnsServers, DNSServer)
 	}
@@ -70,7 +71,7 @@ func setup4(args ...string) (handler.Handler4, error) {
 func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	decap, err := req.GetInnerMessage()
 	if err != nil {
-		log.Errorf("Could not decapsulate relayed message, aborting: %v", err)
+		log.Errorf("cannot read the client message inside the relayed request, dropping it: %v; the client will retry, check the relay that forwarded it", err)
 		return nil, true
 	}
 

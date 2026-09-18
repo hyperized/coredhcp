@@ -70,7 +70,8 @@ func parseKeyMode(raw string) (keyMode, error) {
 			return k.mode, nil
 		}
 	}
-	return keyMAC, fmt.Errorf("unknown %s%s, want one of mac, duid, client-id", keyArg, raw)
+	return keyMAC, fmt.Errorf("%q is not a key mode; use %smac, %sduid under server6 or %sclient-id under server4, or leave it out for mac",
+		keyArg+raw, keyArg, keyArg, keyArg)
 }
 
 // defaultPrefix is the key prefix this mode uses when the config line gives
@@ -89,9 +90,9 @@ func (m keyMode) label() any {
 func (m keyMode) checkFamily(v6 bool) error {
 	switch {
 	case m == keyDUID && !v6:
-		return errors.New("key:duid works under server6 only, a DHCPv4 client has no DUID")
+		return errors.New("key:duid works under server6 only, a DHCPv4 client has no DUID; use key:mac or key:client-id under server4")
 	case m == keyClientID && v6:
-		return errors.New("key:client-id works under server4 only, DHCPv6 has no option 61")
+		return errors.New("key:client-id works under server4 only, DHCPv6 has no option 61; use key:mac or key:duid under server6")
 	default:
 		return nil
 	}

@@ -6,6 +6,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -225,13 +226,9 @@ func (u *UI) Run(ctx context.Context) error {
 
 	var draws sync.WaitGroup
 
-	draws.Add(1)
-
-	go func() {
-		defer draws.Done()
-
+	draws.Go(func() {
 		u.redraw(ctx, app, p)
-	}()
+	})
 
 	runDone := make(chan struct{})
 	watcher := u.watch(ctx, app, cancel, &draws, entered, runDone)
@@ -244,7 +241,19 @@ func (u *UI) Run(ctx context.Context) error {
 	<-watcher
 	draws.Wait()
 
-	return err
+	return screenErr(err)
+}
+
+func screenErr(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"cannot open the terminal screen: %w; run coredhcp-tui from a real terminal, "+
+			"or use the plain coredhcp binary when there is none",
+		err,
+	)
 }
 
 // watch runs the shutdown in one place and in one order: wait for the first
@@ -346,7 +355,7 @@ func (u *UI) build(app *tview.Application) *panes {
 		rate:     newPane(" rate (last 60 s) "),
 	}
 
-	for id := paneTraffic; id < paneCount; id++ {
+	for id := range paneCount {
 		p.scroll[id] = newPane(" " + id.title() + " ")
 	}
 

@@ -1,0 +1,37 @@
+# The build stage does `COPY . .`, so whatever is left here lands in a
+# builder layer. No package uses go:embed, so nothing but go.mod, go.sum and
+# the Go packages is needed to build.
+
+.git
+.gitignore
+.github
+.idea
+.vscode
+.claude
+.golangci.yml
+
+# A host-built binary copied in would bust the layer cache on every run.
+bin/
+coverage.out
+coverage.txt
+server6
+
+# The harnesses under test/ pull in configs and scripts the server never
+# reads.
+test/
+
+**/*.md
+tui.png
+LICENSE
+
+# A config or lease database baked into the image would shadow what is
+# mounted at /etc/coredhcp and /var/lib/coredhcp, and a leaked lease file is
+# customer data.
+.env
+.env.*
+**/config.yml
+**/config.yaml
+**/leases.txt
+**/leases4.txt
+**/*.sqlite3
+**/*.db

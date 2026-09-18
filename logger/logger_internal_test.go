@@ -71,7 +71,7 @@ func TestSwitchableWriterWrite(t *testing.T) {
 		boom := errors.New("console boom")
 		w := switchableWriter{console: failWriter{err: boom}, file: &f}
 		n, err := w.Write([]byte("hello"))
-		assert.ErrorIs(t, err, boom)
+		require.ErrorIs(t, err, boom)
 		assert.Equal(t, 0, n)
 		assert.Empty(t, f.String())
 	})
@@ -81,7 +81,7 @@ func TestSwitchableWriterWrite(t *testing.T) {
 		boom := errors.New("file boom")
 		w := switchableWriter{console: &c, file: failWriter{err: boom}}
 		n, err := w.Write([]byte("hello"))
-		assert.ErrorIs(t, err, boom)
+		require.ErrorIs(t, err, boom)
 		assert.Equal(t, 0, n)
 		assert.Equal(t, "hello", c.String())
 	})
@@ -410,7 +410,7 @@ func TestFatalExits(t *testing.T) {
 	err := cmd.Run()
 
 	var exitErr *exec.ExitError
-	require.True(t, errors.As(err, &exitErr), "expected an *exec.ExitError, got %v", err)
+	require.ErrorAs(t, err, &exitErr, "expected an *exec.ExitError, got %v", err)
 	assert.Equal(t, 1, exitErr.ExitCode())
 	assert.Contains(t, stderr.String(), "level=FATAL")
 	assert.Contains(t, stderr.String(), "boom-fatal")
@@ -430,7 +430,7 @@ func TestFatalfExits(t *testing.T) {
 	err := cmd.Run()
 
 	var exitErr *exec.ExitError
-	require.True(t, errors.As(err, &exitErr), "expected an *exec.ExitError, got %v", err)
+	require.ErrorAs(t, err, &exitErr, "expected an *exec.ExitError, got %v", err)
 	assert.Equal(t, 1, exitErr.ExitCode())
 	assert.Contains(t, stderr.String(), "level=FATAL")
 	assert.Contains(t, stderr.String(), "boom-fatalf 42")

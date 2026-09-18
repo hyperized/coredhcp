@@ -282,7 +282,7 @@ func TestHandler6(t *testing.T) {
 
 		result, stop := h6(req, resp)
 		assert.False(t, stop)
-		assert.Equal(t, 0, len(result.GetOption(dhcpv6.OptionIANA)))
+		assert.Empty(t, result.GetOption(dhcpv6.OptionIANA))
 	})
 
 	t.Run("known MAC", func(t *testing.T) {
@@ -294,7 +294,7 @@ func TestHandler6(t *testing.T) {
 
 		result, stop := h6(req, resp)
 		assert.False(t, stop)
-		if assert.Equal(t, 1, len(result.GetOption(dhcpv6.OptionIANA))) {
+		if assert.Len(t, result.GetOption(dhcpv6.OptionIANA), 1) {
 			opt := result.GetOneOption(dhcpv6.OptionIANA)
 			assert.Contains(t, opt.String(), "IP=2001:db8::10:1")
 		}
@@ -321,7 +321,7 @@ func TestHandler6(t *testing.T) {
 			result, stop := h6(req, resp)
 			assert.Same(t, resp, result)
 			assert.False(t, stop)
-			assert.Equal(t, 0, len(result.GetOption(dhcpv6.OptionIANA)))
+			assert.Empty(t, result.GetOption(dhcpv6.OptionIANA))
 		})
 	}
 
@@ -337,7 +337,7 @@ func TestHandler6(t *testing.T) {
 
 		result, stop := h6(req, resp)
 		assert.False(t, stop)
-		if assert.Equal(t, 1, len(result.GetOption(dhcpv6.OptionIANA))) {
+		if assert.Len(t, result.GetOption(dhcpv6.OptionIANA), 1) {
 			opt := result.GetOneOption(dhcpv6.OptionIANA)
 			assert.Contains(t, opt.String(), "IP=2001:db8::10:1")
 		}
@@ -377,7 +377,7 @@ func TestHandler6(t *testing.T) {
 		result, stop := h6(req, resp)
 		assert.Same(t, resp, result)
 		assert.False(t, stop)
-		assert.Equal(t, 0, len(result.GetOption(dhcpv6.OptionIANA)))
+		assert.Empty(t, result.GetOption(dhcpv6.OptionIANA))
 	})
 }
 
@@ -439,7 +439,7 @@ func TestAutorefresh(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		return strings.Contains(string(data), "failed to refresh from")
+		return strings.Contains(string(data), "the leases already loaded stay in force")
 	}, 5*time.Second, 20*time.Millisecond, "expected a refresh-failure warning to be logged")
 	assert.True(t, resolves(mac1)(), "previously loaded lease must keep resolving after a bad reload")
 	assert.True(t, resolves(mac2)(), "previously loaded lease must keep resolving after a bad reload")
@@ -449,6 +449,49 @@ func TestAutorefresh(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte(mac1+" 2001:db8::10:1\n"+mac3+" 2001:db8::10:3\n"), 0o600))
 	require.Eventually(t, resolves(mac3), 5*time.Second, 20*time.Millisecond,
 		"autorefresh did not recover after a bad reload")
+}
+
+// TestAutorefreshAcrossRename pins the directory watch: a tool that replaces
+// the file by renaming a sibling over it leaves the name on a new inode, and
+// a watch on the file itself would stay on the old one.
+func TestAutorefreshAcrossRename(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "leases.txt")
+	mac1, mac2 := "aa:11:22:33:44:55", "aa:11:22:33:44:66"
+
+	require.NoError(t, os.WriteFile(path, []byte(mac1+" 2001:db8::10:1\n"), 0o600))
+
+	h6, err := file.Plugin.Setup6(path, "autorefresh")
+	require.NoError(t, err)
+
+	resolves := func(mac string) func() bool {
+		return func() bool {
+			claddr, err := net.ParseMAC(mac)
+			if err != nil {
+				return false
+			}
+			req, err := dhcpv6.NewSolicit(claddr)
+			if err != nil {
+				return false
+			}
+			resp, err := dhcpv6.NewAdvertiseFromSolicit(req)
+			if err != nil {
+				return false
+			}
+			result, _ := h6(req, resp)
+			return len(result.GetOption(dhcpv6.OptionIANA)) == 1
+		}
+	}
+
+	require.True(t, resolves(mac1)(), "initial lease must resolve right after setup")
+
+	replacement := filepath.Join(dir, "leases.txt.new")
+	require.NoError(t, os.WriteFile(replacement,
+		[]byte(mac1+" 2001:db8::10:1\n"+mac2+" 2001:db8::10:2\n"), 0o600))
+	require.NoError(t, os.Rename(replacement, path))
+
+	require.Eventually(t, resolves(mac2), 5*time.Second, 20*time.Millisecond,
+		"autorefresh did not pick up a lease file replaced by a rename")
 }
 
 // overwrite replaces the start of path with data without truncating it, so a
@@ -643,7 +686,7 @@ func TestHandler6KeyDUID(t *testing.T) {
 
 			result, stop := h6(newReq(t), resp)
 			assert.False(t, stop)
-			if assert.Equal(t, 1, len(result.GetOption(dhcpv6.OptionIANA))) {
+			if assert.Len(t, result.GetOption(dhcpv6.OptionIANA), 1) {
 				opt := result.GetOneOption(dhcpv6.OptionIANA)
 				assert.Contains(t, opt.String(), "IP=2001:db8::10:1")
 			}
@@ -829,7 +872,7 @@ func TestAutorefreshDUID(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		return strings.Contains(string(data), "failed to refresh from")
+		return strings.Contains(string(data), "the leases already loaded stay in force")
 	}, 5*time.Second, 20*time.Millisecond, "expected a refresh-failure warning to be logged")
 	assert.True(t, resolves(duid1)(), "previously loaded lease must keep resolving after a bad reload")
 	assert.True(t, resolves(duid2)(), "previously loaded lease must keep resolving after a bad reload")

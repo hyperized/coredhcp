@@ -141,7 +141,7 @@ func (p *respReader) readBulk(arg []byte) (any, error) {
 		return nil, protocolErrorf("malformed bulk length %q", arg)
 	}
 	if n == -1 {
-		return nil, nil
+		return nil, nil //nolint:nilnil // RESP2's nil bulk and nil array are an untyped nil
 	}
 	if n < 0 || n > maxBulkLen {
 		return nil, protocolErrorf("bulk length %d out of range", n)
@@ -166,7 +166,7 @@ func (p *respReader) readArray(arg []byte, depth int) (any, error) {
 		return nil, protocolErrorf("malformed array length %q", arg)
 	}
 	if n == -1 {
-		return nil, nil
+		return nil, nil //nolint:nilnil // RESP2's nil bulk and nil array are an untyped nil
 	}
 	if n < 0 || n > maxArrayLen {
 		return nil, protocolErrorf("array length %d out of range", n)
@@ -322,7 +322,7 @@ func (c *client) dial() (*conn, error) {
 	d := net.Dialer{Timeout: c.cfg.timeout}
 	nc, err := d.Dial("tcp", c.cfg.addr)
 	if err != nil {
-		return nil, fmt.Errorf("dialing redis at %s: %w", c.cfg.addr, err)
+		return nil, fmt.Errorf("dialing redis at %s failed: %w; check the address on the redis line and that the server is reachable", c.cfg.addr, err)
 	}
 	if c.cfg.tls != nil {
 		if nc, err = c.handshake(nc); err != nil {
@@ -347,7 +347,8 @@ func (c *client) handshake(nc net.Conn) (net.Conn, error) {
 	tc := tls.Client(nc, c.cfg.tls)
 	if err := tc.Handshake(); err != nil {
 		_ = nc.Close()
-		return nil, fmt.Errorf("TLS handshake with %s: %w", c.cfg.addr, err)
+		return nil, fmt.Errorf("the TLS handshake with %s failed: %w; check the certificate covers %q and is signed by a CA this host trusts",
+			c.cfg.addr, err, c.cfg.tls.ServerName)
 	}
 	return tc, nil
 }
@@ -361,12 +362,14 @@ func (c *client) authenticate(cn *conn) error {
 			args = []string{"AUTH", c.cfg.username, c.cfg.password}
 		}
 		if _, err := cn.do(c.cfg.timeout, args...); err != nil {
-			return fmt.Errorf("authenticating to redis at %s: %w", c.cfg.addr, err)
+			return fmt.Errorf("authenticating to redis at %s failed: %w; check the password, best given as password:env:NAME, and any username in the URL",
+				c.cfg.addr, err)
 		}
 	}
 	if c.cfg.db != 0 {
 		if _, err := cn.do(c.cfg.timeout, "SELECT", strconv.Itoa(c.cfg.db)); err != nil {
-			return fmt.Errorf("selecting redis database %d at %s: %w", c.cfg.db, c.cfg.addr, err)
+			return fmt.Errorf("selecting redis database %d at %s failed: %w; use a database the server has, the path of the redis:// URL picks it",
+				c.cfg.db, c.cfg.addr, err)
 		}
 	}
 	return nil

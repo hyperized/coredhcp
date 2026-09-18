@@ -9,14 +9,17 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -43,38 +46,76 @@ const (
 
 	// envPrefix is put in front of every variable the exec target sets.
 	envPrefix = "LEASEHOOK_"
+
+	// localePrefix marks the LC_* locale overrides, passed through to a hook
+	// program the same way the fixed allow list below is.
+	localePrefix = "LC_"
+
+	dialTimeout         = 2 * time.Second
+	tlsHandshakeTimeout = 2 * time.Second
 )
 
-// target delivers one event. The interface is declared here, where the worker
-// consumes it, so a test can drive the worker without a webhook or a program.
-//
-// deliver is called from the single worker goroutine and never concurrently
-// with itself. ctx carries the configured per-delivery timeout.
+// allowedEnv is a short list rather than the whole environment because the
+// server's own carries the secrets operators are told to pass as env:NAME:
+// this plugin's secret, the ddns TSIG key, the redis password, the netbox API
+// token. PATH is here so the program can find whatever it shells out to
+// itself; the exec path leasehook runs has to be absolute either way.
+var allowedEnv = []string{"PATH", "HOME", "TMPDIR", "LANG"}
+
+// target delivers one event. deliver is called from the single worker
+// goroutine and never concurrently with itself; ctx carries the configured
+// per-delivery timeout.
 type target interface {
 	deliver(ctx context.Context, d delivery) error
 }
 
-// webhook posts events to an HTTP endpoint.
 type webhook struct {
 	url    string
 	secret []byte
 	hc     *http.Client
 }
 
-// newWebhook returns a target posting to rawURL. The client is given no
-// timeout of its own: every delivery is already bounded by the context the
-// worker passes, and a second deadline would only be a second thing to keep
-// in step with the configured one.
+// newWebhook returns a target posting to rawURL.
+//
+// The client gets no timeout of its own: the context the worker passes
+// already bounds every delivery, and the per-phase timeouts below only keep a
+// stuck TLS handshake from spending that whole budget on its own.
+//
+// CheckRedirect returns http.ErrUseLastResponse so a 3xx comes back as the
+// response instead of the request, signature included, silently landing on
+// whatever host the redirect pointed at.
+//
+// ForceAttemptHTTP2 has to be set explicitly, because giving the transport
+// its own TLSClientConfig otherwise turns HTTP/2 off.
 func newWebhook(rawURL string, secret []byte) *webhook {
-	return &webhook{url: rawURL, secret: secret, hc: &http.Client{}}
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   dialTimeout,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   tlsHandshakeTimeout,
+		ExpectContinueTimeout: 1 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		MaxConnsPerHost:       2,
+		MaxIdleConns:          2,
+		MaxIdleConnsPerHost:   2,
+		ForceAttemptHTTP2:     true,
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+	}
+	client := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	return &webhook{url: rawURL, secret: secret, hc: client}
 }
 
-// deliver posts one event and reads back enough of the answer to keep the
-// connection reusable.
 func (w *webhook) deliver(ctx context.Context, d delivery) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.url, bytes.NewReader(d.payload))
 	if err != nil {
-		return fmt.Errorf("building the request: %w", err)
+		return fmt.Errorf("building the request for the webhook failed: %w; check the url: argument on the leasehook line", err)
 	}
 	req.Header.Set("Content-Type", contentType)
 	if len(w.secret) > 0 {
@@ -82,17 +123,16 @@ func (w *webhook) deliver(ctx context.Context, d delivery) error {
 	}
 	resp, err := w.hc.Do(req)
 	if err != nil {
-		return fmt.Errorf("posting the event: %w", err)
+		return fmt.Errorf("posting the event failed: %w; check the webhook host is reachable from this server and its certificate is valid", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBytes))
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("the endpoint answered %s", resp.Status)
+		return fmt.Errorf("the endpoint answered %s; redirects are not followed, so point url: at the final URL and check it accepts a POST", resp.Status)
 	}
 	return nil
 }
 
-// sign returns the signature header value for one body.
 func sign(secret, payload []byte) string {
 	mac := hmac.New(sha256.New, secret)
 	// hash.Hash documents that Write never returns an error.
@@ -100,35 +140,57 @@ func sign(secret, payload []byte) string {
 	return signaturePrefix + hex.EncodeToString(mac.Sum(nil))
 }
 
-// command runs a local program once per event.
 type command struct {
 	path string
+
+	// extraEnv is never set in production: a hook program takes no arguments,
+	// so a test that re-executes the test binary as the program has no other
+	// way to tell it what to do.
+	extraEnv []string
 }
 
-// deliver runs the program with the JSON body on stdin and the event's main
-// fields in the environment.
-//
-// Nothing from the packet reaches a command line: the program is executed
-// directly, with no arguments and no shell, so a hostname full of shell
-// metacharacters is only ever data.
+// deliver lets nothing from the packet reach a command line: the program is
+// executed directly, with no arguments and no shell, so a hostname full of
+// shell metacharacters is only ever data.
 func (c *command) deliver(ctx context.Context, d delivery) error {
 	// #nosec G204 -- the path comes from config.yml, is required to be
 	// absolute, and no part of it is derived from a packet.
 	cmd := exec.CommandContext(ctx, c.path)
 	cmd.Stdin = bytes.NewReader(d.payload)
-	cmd.Env = append(os.Environ(), d.env()...)
+	cmd.Env = childEnv(append(d.env(), c.extraEnv...))
 	cmd.Stdout = io.Discard
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("running %s: %w%s", c.path, err, stderrSuffix(stderr.Bytes()))
+		return fmt.Errorf("running %s failed: %w%s; check the file exists and is executable by the user coredhcp runs as",
+			c.path, err, stderrSuffix(stderr.Bytes()))
 	}
 	return nil
 }
 
-// env returns the LEASEHOOK_* variables for one event. Delegated prefixes are
-// deliberately not among them; a script that needs those reads the body on
-// stdin.
+// childEnv invents nothing: a variable the parent does not have is left out
+// rather than given a default.
+func childEnv(extra []string) []string {
+	env := make([]string, 0, len(allowedEnv)+len(extra))
+	for _, name := range allowedEnv {
+		value, ok := os.LookupEnv(name)
+		if !ok {
+			continue
+		}
+		env = append(env, name+"="+value)
+	}
+	for _, kv := range os.Environ() {
+		name, _, ok := strings.Cut(kv, "=")
+		if !ok || !strings.HasPrefix(name, localePrefix) {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, extra...)
+}
+
+// env leaves delegated prefixes out; a script that needs those reads the body
+// on stdin.
 func (d delivery) env() []string {
 	return []string{
 		envPrefix + "EVENT=" + sanitizeEnv(d.ev.Event),
@@ -139,11 +201,9 @@ func (d delivery) env() []string {
 	}
 }
 
-// sanitizeEnv replaces the control characters in a value with underscores.
-// Only the hostname can carry any: it comes straight out of a packet, where a
-// NUL would stop os/exec from starting the program at all and an escape
-// sequence would be acted on by whatever reads the script's own output.
-// Nothing else needs quoting, because a variable is not a command line.
+// sanitizeEnv guards the hostname, the one value that comes straight out of a
+// packet: a NUL in it would stop os/exec from starting the program at all, and
+// an escape sequence would be acted on by whatever reads the script's output.
 func sanitizeEnv(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f {
@@ -153,8 +213,6 @@ func sanitizeEnv(s string) string {
 	}, s)
 }
 
-// stderrSuffix renders what a failed program wrote to stderr, or nothing when
-// it wrote nothing.
 func stderrSuffix(b []byte) string {
 	if len(b) == 0 {
 		return ""

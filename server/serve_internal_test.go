@@ -8,7 +8,10 @@ import (
 	"errors"
 	"net"
 	"runtime"
+	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
@@ -211,6 +214,22 @@ func closedUDPConn(t *testing.T, network string, addr *net.UDPAddr) *net.UDPConn
 	return c
 }
 
+// asListener4 unwraps a listener: Servers.listeners holds the interface, and
+// fields like observer and gate are only reachable on the concrete type.
+func asListener4(t *testing.T, l listener) *listener4 {
+	t.Helper()
+	l4, ok := l.(*listener4)
+	require.True(t, ok, "listener is not a *listener4: %T", l)
+	return l4
+}
+
+func asListener6(t *testing.T, l listener) *listener6 {
+	t.Helper()
+	l6, ok := l.(*listener6)
+	require.True(t, ok, "listener is not a *listener6: %T", l)
+	return l6
+}
+
 // countingConn is a socket that counts how often it was closed, so a test can
 // tell a leak from a close and a close from a double close. It embeds the
 // real *net.UDPConn because golang.org/x/net/ipv4.NewPacketConn asserts its
@@ -238,16 +257,20 @@ func (c *countingConn) Close() error {
 func TestNewUDPConnWrappersReturnANilInterfaceOnFailure(t *testing.T) {
 	const zone = "nonexistent-zzz-iface"
 
+	// assert.Nil reaches through the interface and passes for a typed nil
+	// pointer too, which is the very thing these wrappers exist to prevent.
 	t.Run("v4", func(t *testing.T) {
 		c, err := newIPv4UDPConn(zone, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0, Zone: zone})
 		require.Error(t, err)
-		assert.True(t, c == nil, "want a nil interface, got %#v", c)
+		//nolint:testifylint // assert.Nil would pass for a typed nil pointer
+		assert.Equal(t, nil, c, "want a nil interface, got %#v", c)
 	})
 
 	t.Run("v6", func(t *testing.T) {
 		c, err := newIPv6UDPConn(zone, &net.UDPAddr{IP: net.ParseIP("::1"), Port: 0, Zone: zone})
 		require.Error(t, err)
-		assert.True(t, c == nil, "want a nil interface, got %#v", c)
+		//nolint:testifylint // assert.Nil would pass for a typed nil pointer
+		assert.Equal(t, nil, c, "want a nil interface, got %#v", c)
 	})
 }
 
@@ -679,16 +702,16 @@ func TestStartPassesObserverToListeners(t *testing.T) {
 	srv, err := Start(cfg, WithObserver(obs))
 	require.NoError(t, err)
 	require.Len(t, srv.listeners, 2)
-	assert.Same(t, obs, srv.listeners[0].(*listener6).observer)
-	assert.Same(t, obs, srv.listeners[1].(*listener4).observer)
+	assert.Same(t, obs, asListener6(t, srv.listeners[0]).observer)
+	assert.Same(t, obs, asListener4(t, srv.listeners[1]).observer)
 	srv.Close()
 	require.NoError(t, srv.Wait())
 
 	plain, err := Start(cfg)
 	require.NoError(t, err)
 	require.Len(t, plain.listeners, 2)
-	assert.Nil(t, plain.listeners[0].(*listener6).observer)
-	assert.Nil(t, plain.listeners[1].(*listener4).observer)
+	assert.Nil(t, asListener6(t, plain.listeners[0]).observer)
+	assert.Nil(t, asListener4(t, plain.listeners[1]).observer)
 	plain.Close()
 	require.NoError(t, plain.Wait())
 }
@@ -735,4 +758,241 @@ func TestReportListenerNamesTheInterface(t *testing.T) {
 	assert.Equal(t, []events.Listener{
 		{Family: events.FamilyV6, Address: "[::]:547", Interface: "eth0"},
 	}, obs.listeners)
+}
+
+// --- shutdown: handlers first, sockets after ---
+
+// closeRecorder is a listener double that only records that it was closed.
+type closeRecorder struct {
+	onClose func()
+}
+
+func (c *closeRecorder) Close() error {
+	c.onClose()
+	return nil
+}
+
+func (c *closeRecorder) Serve() error { return nil }
+
+func TestCloseWaitsForHandlersBeforeClosingSockets(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var mu sync.Mutex
+		var order []string
+		record := func(what string) {
+			mu.Lock()
+			defer mu.Unlock()
+			order = append(order, what)
+		}
+
+		srv := &Servers{
+			listeners:    []listener{&closeRecorder{onClose: func() { record("socket closed") }}},
+			gate:         newGate(4),
+			drainTimeout: time.Minute,
+		}
+
+		hold := make(chan struct{})
+		require.True(t, srv.gate.run(func() {
+			<-hold
+			record("handler done")
+		}))
+
+		closed := make(chan struct{})
+		go func() {
+			srv.Close()
+			close(closed)
+		}()
+
+		synctest.Wait()
+		select {
+		case <-closed:
+			t.Fatal("Close returned while a handler was still running")
+		default:
+		}
+
+		close(hold)
+		<-closed
+
+		mu.Lock()
+		defer mu.Unlock()
+		assert.Equal(t, []string{"handler done", "socket closed"}, order)
+	})
+}
+
+func TestCloseGivesUpAtTheDrainTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		buf := captureLog(t)
+		closes := 0
+		srv := &Servers{
+			listeners:    []listener{&closeRecorder{onClose: func() { closes++ }}},
+			gate:         newGate(4),
+			drainTimeout: 2 * time.Second,
+		}
+
+		hold := make(chan struct{})
+		done := make(chan struct{})
+		require.True(t, srv.gate.run(func() {
+			<-hold
+			close(done)
+		}))
+
+		start := time.Now()
+		srv.Close()
+		assert.Equal(t, 2*time.Second, time.Since(start))
+		assert.Equal(t, 1, closes)
+		assert.Contains(t, buf.String(), "handlers still running after 2s")
+
+		close(hold)
+		<-done
+	})
+}
+
+func TestCloseDrainsOnlyOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		captureLog(t)
+		closes := 0
+		srv := &Servers{
+			listeners:    []listener{&closeRecorder{onClose: func() { closes++ }}},
+			gate:         newGate(4),
+			drainTimeout: time.Second,
+		}
+
+		hold := make(chan struct{})
+		done := make(chan struct{})
+		require.True(t, srv.gate.run(func() {
+			<-hold
+			close(done)
+		}))
+
+		srv.Close()
+		start := time.Now()
+		srv.Close()
+		assert.Zero(t, time.Since(start), "the second Close must not wait again")
+		assert.Equal(t, 2, closes, "every listener is still closed on every call")
+
+		close(hold)
+		<-done
+	})
+}
+
+func TestZeroValueServersShutsDownQuietly(t *testing.T) {
+	s := &Servers{}
+	assert.NotPanics(t, s.Close)
+	assert.Equal(t, Drops{}, s.Drops())
+}
+
+// --- options ---
+
+func TestWithMaxInFlight(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		n    int
+		want int
+	}{
+		{name: "a usable limit is taken", n: 3, want: 3},
+		{name: "zero keeps the default", n: 0, want: 64},
+		{name: "negative keeps the default", n: -1, want: 64},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Servers{maxInFlight: 64}
+			WithMaxInFlight(tc.n)(s)
+			assert.Equal(t, tc.want, s.maxInFlight)
+		})
+	}
+}
+
+func TestWithDrainTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		d    time.Duration
+		want time.Duration
+	}{
+		{name: "a usable timeout is taken", d: time.Minute, want: time.Minute},
+		{name: "zero keeps the default", d: 0, want: time.Second},
+		{name: "negative keeps the default", d: -time.Hour, want: time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Servers{drainTimeout: time.Second}
+			WithDrainTimeout(tc.d)(s)
+			assert.Equal(t, tc.want, s.drainTimeout)
+		})
+	}
+}
+
+func TestStartSharesOneGateAcrossListeners(t *testing.T) {
+	cfg := testConfig(t,
+		[]net.UDPAddr{{IP: net.ParseIP("::1"), Port: 0}},
+		[]net.UDPAddr{{IP: net.ParseIP("127.0.0.1"), Port: 0}},
+	)
+	srv, err := Start(cfg, WithMaxInFlight(5), WithDrainTimeout(time.Minute))
+	require.NoError(t, err)
+	defer srv.Close()
+
+	require.Len(t, srv.listeners, 2)
+	require.NotNil(t, srv.gate)
+	assert.Equal(t, 5, cap(srv.gate.sem))
+	assert.Same(t, srv.gate, asListener6(t, srv.listeners[0]).gate)
+	assert.Same(t, srv.gate, asListener4(t, srv.listeners[1]).gate)
+	assert.Equal(t, Drops{}, srv.Drops())
+}
+
+// --- relay allow list at startup ---
+
+func TestStartWarnsOncePerFamilyWithoutRelayPlugin(t *testing.T) {
+	buf := captureLog(t)
+	cfg := testConfig(t,
+		[]net.UDPAddr{{IP: net.ParseIP("::1"), Port: 0}, {IP: net.ParseIP("::1"), Port: 0}},
+		[]net.UDPAddr{{IP: net.ParseIP("127.0.0.1"), Port: 0}, {IP: net.ParseIP("127.0.0.1"), Port: 0}},
+	)
+	srv, err := Start(cfg)
+	require.NoError(t, err)
+	defer srv.Close()
+
+	assert.Equal(t, 1, buf.count("DHCPv6: no `relay` plugin configured"))
+	assert.Equal(t, 1, buf.count("DHCPv4: no `relay` plugin configured"))
+
+	require.Len(t, srv.listeners, 4)
+	assert.False(t, asListener6(t, srv.listeners[0]).relayChecked)
+	assert.False(t, asListener4(t, srv.listeners[2]).relayChecked)
+}
+
+func TestStartWithRelayPluginLeavesRelayedRequestsToIt(t *testing.T) {
+	registerTestPlugin(t, &plugins.Plugin{
+		Name: relayPluginName,
+		Setup6: func(...string) (handler.Handler6, error) {
+			return func(_, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) { return resp, false }, nil
+		},
+		Setup4: func(...string) (handler.Handler4, error) {
+			return func(_, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) { return resp, false }, nil
+		},
+	})
+
+	buf := captureLog(t)
+	cfg := &config.Config{
+		Server6: &config.ServerConfig{
+			Addresses: []net.UDPAddr{{IP: net.ParseIP("::1"), Port: 0}},
+			Plugins:   []config.PluginConfig{{Name: relayPluginName, Args: []string{"allow", "fe80::/10"}}},
+		},
+		Server4: &config.ServerConfig{
+			Addresses: []net.UDPAddr{{IP: net.ParseIP("127.0.0.1"), Port: 0}},
+			Plugins:   []config.PluginConfig{{Name: relayPluginName, Args: []string{"allow", "10.0.1.1"}}},
+		},
+	}
+	srv, err := Start(cfg)
+	require.NoError(t, err)
+	defer srv.Close()
+
+	assert.NotContains(t, buf.String(), "no `relay` plugin configured")
+	require.Len(t, srv.listeners, 2)
+	assert.True(t, asListener6(t, srv.listeners[0]).relayChecked)
+	assert.True(t, asListener4(t, srv.listeners[1]).relayChecked)
+}
+
+func TestHasRelayPlugin(t *testing.T) {
+	assert.False(t, hasRelay4(nil))
+	assert.False(t, hasRelay4([]plugins.Link4{{Name: "server_id"}, {Name: "range"}}))
+	assert.True(t, hasRelay4([]plugins.Link4{{Name: "ratelimit"}, {Name: relayPluginName}}))
+
+	assert.False(t, hasRelay6(nil))
+	assert.False(t, hasRelay6([]plugins.Link6{{Name: "server_id"}}))
+	assert.True(t, hasRelay6([]plugins.Link6{{Name: relayPluginName}, {Name: "dns"}}))
 }

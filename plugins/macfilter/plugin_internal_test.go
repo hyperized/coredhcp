@@ -32,22 +32,22 @@ func TestSetupState(t *testing.T) {
 		{
 			name:    "no args",
 			args:    nil,
-			wantErr: "need a mode argument",
+			wantErr: "no mode given",
 		},
 		{
 			name:    "invalid mode",
 			args:    []string{"maybe", "aa:bb:cc:dd:ee:ff"},
-			wantErr: "invalid mode",
+			wantErr: `"maybe" is not recognised`,
 		},
 		{
 			name:    "no MAC arguments",
 			args:    []string{"allow"},
-			wantErr: "need at least one MAC address",
+			wantErr: "no MAC addresses given",
 		},
 		{
 			name:    "invalid MAC argument",
 			args:    []string{"allow", "not-a-mac"},
-			wantErr: "invalid MAC address",
+			wantErr: `"not-a-mac" is not a MAC address`,
 		},
 		{
 			name:      "valid allow, single MAC",
@@ -98,13 +98,13 @@ func TestSetupStateFileSource(t *testing.T) {
 	t.Run("empty file path", func(t *testing.T) {
 		_, err := setupState("allow", "file:")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "empty file path")
+		assert.Contains(t, err.Error(), "the file: entry has no path")
 	})
 
 	t.Run("nonexistent file", func(t *testing.T) {
 		_, err := setupState("allow", "file:"+filepath.Join(t.TempDir(), "missing.txt"))
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to read")
+		assert.Contains(t, err.Error(), "cannot read the MAC list")
 	})
 
 	t.Run("invalid MAC in file names the line", func(t *testing.T) {
@@ -119,7 +119,7 @@ func TestSetupStateFileSource(t *testing.T) {
 		path := writeMACFile(t, "# nothing here\n\n")
 		_, err := setupState("allow", "file:"+path)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "need at least one MAC address")
+		assert.Contains(t, err.Error(), "no MAC addresses given")
 	})
 }
 

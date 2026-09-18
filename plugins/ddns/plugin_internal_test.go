@@ -5,6 +5,8 @@
 package ddns
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -12,6 +14,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -196,7 +199,7 @@ func (p *pluginState) drainOne(t *testing.T) {
 	t.Helper()
 	select {
 	case j := <-p.queue:
-		p.apply(j)
+		p.apply(t.Context(), j)
 	default:
 		t.Fatal("nothing was queued")
 	}
@@ -236,7 +239,7 @@ func TestHostFQDN(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := hostFQDN(tc.in, testZone)
 			if tc.wantErr != nil {
-				assert.ErrorIs(t, err, tc.wantErr)
+				require.ErrorIs(t, err, tc.wantErr)
 				assert.Empty(t, got)
 				return
 			}
@@ -406,7 +409,7 @@ func TestTSIGAgainstNsupdate(t *testing.T) {
 // the golden file checks, driven from the other end.
 func TestSignRoundTrip(t *testing.T) {
 	key := newTestKey(t)
-	msg, err := buildUpdate(0x1234, testZone, []change{deleteRRset("host.home.lan.", dnsmessage.TypeA)})
+	msg, err := buildUpdate(0x1234, testZone, nil, []change{deleteRRset("host.home.lan.", dnsmessage.TypeA)})
 	require.NoError(t, err)
 	before := len(msg)
 
@@ -479,7 +482,7 @@ func TestFindTSIGErrors(t *testing.T) {
 		assert.Error(t, err)
 	})
 	t.Run("no additional records", func(t *testing.T) {
-		msg, err := buildUpdate(1, testZone, nil)
+		msg, err := buildUpdate(1, testZone, nil, nil)
 		require.NoError(t, err)
 		_, err = findTSIG(msg)
 		assert.ErrorIs(t, err, ErrNoTSIG)
@@ -509,7 +512,7 @@ func TestFindTSIGErrors(t *testing.T) {
 		assert.Equal(t, "ddns-key.", rec.name)
 	})
 	t.Run("truncated sections", func(t *testing.T) {
-		msg, err := buildUpdate(1, testZone, []change{deleteRRset("host.home.lan.", dnsmessage.TypeA)})
+		msg, err := buildUpdate(1, testZone, nil, []change{deleteRRset("host.home.lan.", dnsmessage.TypeA)})
 		require.NoError(t, err)
 		_, err = findTSIG(msg[:len(msg)-4])
 		assert.Error(t, err)
@@ -587,7 +590,7 @@ func TestRDATAReader(t *testing.T) {
 
 func TestVerify(t *testing.T) {
 	key := newTestKey(t)
-	msg, err := buildUpdate(0x1234, testZone, nil)
+	msg, err := buildUpdate(0x1234, testZone, nil, nil)
 	require.NoError(t, err)
 	signed, mac := key.sign(msg, time.Unix(1788589641, 0), 0x1234)
 	good, err := findTSIG(signed)
@@ -610,7 +613,7 @@ func TestVerify(t *testing.T) {
 		rec := good
 		rec.rcode = 18
 		err := key.verify(signed, rec, nil)
-		assert.ErrorIs(t, err, ErrTSIGError)
+		require.ErrorIs(t, err, ErrTSIGError)
 		assert.Contains(t, err.Error(), "BADTIME")
 	})
 	t.Run("a MAC that does not verify", func(t *testing.T) {
@@ -715,7 +718,7 @@ func TestBuildUpdateGolden(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := buildUpdate(0x1234, tc.zone, tc.changes)
+			got, err := buildUpdate(0x1234, tc.zone, nil, tc.changes)
 			require.NoError(t, err)
 			assert.Equal(t, fromHex(t, tc.want), got)
 		})
@@ -724,19 +727,19 @@ func TestBuildUpdateGolden(t *testing.T) {
 
 func TestBuildUpdateErrors(t *testing.T) {
 	t.Run("a zone name that is too long for the encoder", func(t *testing.T) {
-		_, err := buildUpdate(1, strings.Repeat("a", 300), nil)
+		_, err := buildUpdate(1, strings.Repeat("a", 300), nil, nil)
 		assert.Error(t, err)
 	})
 	t.Run("a zone without a trailing dot", func(t *testing.T) {
-		_, err := buildUpdate(1, "home.lan", nil)
+		_, err := buildUpdate(1, "home.lan", nil, nil)
 		assert.Error(t, err)
 	})
 	t.Run("a record name that is too long for the encoder", func(t *testing.T) {
-		_, err := buildUpdate(1, testZone, []change{deleteRRset(strings.Repeat("a", 300), dnsmessage.TypeA)})
+		_, err := buildUpdate(1, testZone, nil, []change{deleteRRset(strings.Repeat("a", 300), dnsmessage.TypeA)})
 		assert.Error(t, err)
 	})
 	t.Run("a record name without a trailing dot", func(t *testing.T) {
-		_, err := buildUpdate(1, testZone, []change{deleteRRset("host.home.lan", dnsmessage.TypeA)})
+		_, err := buildUpdate(1, testZone, nil, []change{deleteRRset("host.home.lan", dnsmessage.TypeA)})
 		assert.Error(t, err)
 	})
 }
@@ -746,23 +749,49 @@ func TestForwardChanges(t *testing.T) {
 	v6a := netip.MustParseAddr("2001:db8::1")
 	v6b := netip.MustParseAddr("2001:db8::2")
 
+	dhcid := []byte{0, 2, 1, 0xaa, 0xbb}
+
 	t.Run("one address", func(t *testing.T) {
-		got := forwardChanges(job{name: "host.home.lan.", addrs: []netip.Addr{v4}}, 300)
-		require.Len(t, got, 2)
+		got := forwardChanges(job{name: "host.home.lan.", addrs: []netip.Addr{v4}, dhcid: dhcid}, 300)
+		require.Len(t, got, 3)
 		assert.Equal(t, deleteRRset("host.home.lan.", dnsmessage.TypeA), got[0])
 		assert.Equal(t, addRecord("host.home.lan.", dnsmessage.TypeA, 300, v4.AsSlice()), got[1])
+		assert.Equal(t, addRecord("host.home.lan.", typeDHCID, 300, dhcid), got[2],
+			"the DHCID goes in the same transaction as the address")
 	})
 	t.Run("several addresses share one delete", func(t *testing.T) {
-		got := forwardChanges(job{name: "host.home.lan.", addrs: []netip.Addr{v6a, v6b}}, 60)
-		require.Len(t, got, 3)
+		got := forwardChanges(job{name: "host.home.lan.", addrs: []netip.Addr{v6a, v6b}, dhcid: dhcid}, 60)
+		require.Len(t, got, 4)
 		assert.Equal(t, dnsmessage.ClassANY, got[0].class)
 		assert.Equal(t, dnsmessage.TypeAAAA, got[0].rtype)
 		assert.Equal(t, v6b.AsSlice(), got[2].data)
+		assert.Equal(t, typeDHCID, got[3].rtype)
 	})
-	t.Run("a removal is the delete on its own", func(t *testing.T) {
-		got := forwardChanges(job{name: "host.home.lan.", addrs: []netip.Addr{v4}, remove: true}, 300)
-		assert.Equal(t, []change{deleteRRset("host.home.lan.", dnsmessage.TypeA)}, got)
-	})
+}
+
+func TestWithdrawChanges(t *testing.T) {
+	v4 := netip.MustParseAddr("10.0.0.5")
+	dhcid := []byte{0, 2, 1, 0xaa, 0xbb}
+
+	got := withdrawChanges(job{name: "host.home.lan.", addrs: []netip.Addr{v4}, dhcid: dhcid, remove: true})
+	require.Len(t, got, 2)
+	assert.Equal(t, deleteRRset("host.home.lan.", dnsmessage.TypeA), got[0])
+	assert.Equal(t, deleteRecord("host.home.lan.", typeDHCID, dhcid), got[1],
+		"the DHCID goes as a single record delete, not as an RRset delete")
+}
+
+func TestPrerequisites(t *testing.T) {
+	j := job{name: "host.home.lan.", dhcid: []byte{0, 2, 1, 0xaa}}
+
+	fresh := freshPrereqs(j)
+	require.Len(t, fresh, 1)
+	assert.Equal(t, change{name: j.name, rtype: typeDHCID, class: classNone}, fresh[0],
+		"an RRset that has to be absent carries class NONE and no data")
+
+	owned := ownedPrereqs(j)
+	require.Len(t, owned, 1)
+	assert.Equal(t, change{name: j.name, rtype: typeDHCID, class: dnsmessage.ClassINET, data: j.dhcid}, owned[0],
+		"an RRset that has to match carries the zone class and the value")
 }
 
 func TestReverseChanges(t *testing.T) {
@@ -809,7 +838,7 @@ func TestUpdateAgainstFakeServer(t *testing.T) {
 	f := startFakeDNS(t, newTestKey(t))
 	p := newTestPlugin(t, f)
 
-	require.NoError(t, p.update(testZone, []change{deleteRRset("host.home.lan.", dnsmessage.TypeA)}))
+	require.NoError(t, p.update(t.Context(), testZone, nil, []change{deleteRRset("host.home.lan.", dnsmessage.TypeA)}))
 	require.Len(t, f.received(), 1)
 
 	// What reached the server has to be a signed message this package would
@@ -861,7 +890,7 @@ func TestUpdateFailures(t *testing.T) {
 			f := startFakeDNS(t, newTestKey(t))
 			f.set(tc.arrange)
 			p := newTestPlugin(t, f, "timeout:100ms")
-			err := p.update(testZone, nil)
+			err := p.update(t.Context(), testZone, nil, nil)
 			assert.ErrorIs(t, err, tc.wantErr)
 		})
 	}
@@ -872,14 +901,14 @@ func TestUpdateRetriesOnce(t *testing.T) {
 	f.set(func(f *fakeDNS) { f.ignore = 1 })
 	p := newTestPlugin(t, f, "timeout:100ms")
 
-	require.NoError(t, p.update(testZone, nil))
+	require.NoError(t, p.update(t.Context(), testZone, nil, nil))
 	assert.Len(t, f.received(), 2, "the first datagram was dropped, the second was answered")
 }
 
 func TestUpdateBuildFailure(t *testing.T) {
 	f := startFakeDNS(t, newTestKey(t))
 	p := newTestPlugin(t, f)
-	assert.Error(t, p.update("home.lan", nil), "a zone without a trailing dot cannot be encoded")
+	require.Error(t, p.update(t.Context(), "home.lan", nil, nil), "a zone without a trailing dot cannot be encoded")
 	assert.Empty(t, f.received())
 }
 
@@ -887,7 +916,7 @@ func TestExchangeDialFailure(t *testing.T) {
 	f := startFakeDNS(t, newTestKey(t))
 	p := newTestPlugin(t, f)
 	p.server = "not an address"
-	_, err := p.exchange([]byte{0})
+	_, err := p.exchange(t.Context(), []byte{0})
 	assert.ErrorContains(t, err, "dialling")
 }
 
@@ -920,8 +949,8 @@ func TestRoundTripConnFailures(t *testing.T) {
 		{"the read fails for something other than the timeout", stubConn{readErr: boom}, "reading from"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := p.roundTrip(tc.conn, []byte{0})
-			assert.ErrorContains(t, err, tc.want)
+			_, err := p.roundTrip(t.Context(), tc.conn, []byte{0})
+			require.ErrorContains(t, err, tc.want)
 			assert.ErrorIs(t, err, boom)
 		})
 	}
@@ -996,29 +1025,41 @@ func TestApplyReverse(t *testing.T) {
 	p := newTestPlugin(t, f, "reverse:10.0.0.0/24", "reverse:2001:db8::/32")
 
 	t.Run("an address inside a reverse network gets a second message", func(t *testing.T) {
-		p.apply(job{name: "host.home.lan.", addrs: []netip.Addr{netip.MustParseAddr("10.0.0.5")}})
+		p.apply(t.Context(), job{name: "host.home.lan.", addrs: []netip.Addr{netip.MustParseAddr("10.0.0.5")}})
 		assert.Len(t, f.received(), 2)
 	})
 	t.Run("an address outside every reverse network does not", func(t *testing.T) {
 		before := len(f.received())
-		p.apply(job{name: "host.home.lan.", addrs: []netip.Addr{netip.MustParseAddr("192.0.2.1")}})
+		p.apply(t.Context(), job{name: "host.home.lan.", addrs: []netip.Addr{netip.MustParseAddr("192.0.2.1")}})
 		assert.Len(t, f.received(), before+1)
 	})
 	t.Run("an IPv6 address finds its own zone", func(t *testing.T) {
 		before := len(f.received())
-		p.apply(job{name: "host.home.lan.", addrs: []netip.Addr{netip.MustParseAddr("2001:db8::1")}})
+		p.apply(t.Context(), job{name: "host.home.lan.", addrs: []netip.Addr{netip.MustParseAddr("2001:db8::1")}})
 		assert.Len(t, f.received(), before+2)
 	})
 }
 
 func TestApplyReverseNameFailure(t *testing.T) {
-	f := startFakeDNS(t, newTestKey(t))
-	p := newTestPlugin(t, f, "reverse:10.0.0.0/24")
-	// A name that no longer has its trailing dot cannot be packed into the
-	// PTR record, so the reverse half is skipped and the forward half is not.
-	p.apply(job{name: "host.home.lan", addrs: []netip.Addr{netip.MustParseAddr("10.0.0.5")}})
-	assert.Empty(t, f.received(), "neither message could be built")
-	assert.Equal(t, uint64(1), p.stats.failed.Load())
+	bad := job{name: "host.home.lan", addrs: []netip.Addr{netip.MustParseAddr("10.0.0.5")}}
+
+	t.Run("a forward update that cannot be built stops there", func(t *testing.T) {
+		f := startFakeDNS(t, newTestKey(t))
+		p := newTestPlugin(t, f, "reverse:10.0.0.0/24")
+		// A name that has lost its trailing dot cannot be encoded at all,
+		// so nothing leaves and the reverse zone is never reached.
+		p.apply(t.Context(), bad)
+		assert.Empty(t, f.received(), "neither message could be built")
+		assert.Equal(t, uint64(1), p.stats.failed.Load())
+	})
+	t.Run("a PTR target that cannot be packed is skipped", func(t *testing.T) {
+		f := startFakeDNS(t, newTestKey(t))
+		p := newTestPlugin(t, f, "reverse:10.0.0.0/24")
+		// The same name reaching the reverse half on its own: the PTR it
+		// would point at cannot be written, so that zone is left out.
+		p.sendReverse(t.Context(), bad)
+		assert.Empty(t, f.received())
+	})
 }
 
 func TestReverseZoneForPrefersTheFirstMatch(t *testing.T) {
@@ -1036,7 +1077,7 @@ func TestReverseZoneForPrefersTheFirstMatch(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestSendUpdateCounters(t *testing.T) {
+func TestTallyCounters(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		arrange func(*fakeDNS)
@@ -1046,12 +1087,16 @@ func TestSendUpdateCounters(t *testing.T) {
 		{"truncated", func(f *fakeDNS) { f.truncated = true }, func(p *pluginState) uint64 { return p.stats.truncated.Load() }},
 		{"refused", func(f *fakeDNS) { f.rcode = 5 }, func(p *pluginState) uint64 { return p.stats.refused.Load() }},
 		{"failed", func(f *fakeDNS) { f.ignore = attempts }, func(p *pluginState) uint64 { return p.stats.failed.Load() }},
+		// A prerequisite that did not hold is still a refusal when it
+		// reaches the counters, which only the reverse zone does: the
+		// forward path counts it as a conflict before it gets here.
+		{"a prerequisite counts as a refusal", func(f *fakeDNS) { f.rcode = rcodeYXRRSET }, func(p *pluginState) uint64 { return p.stats.refused.Load() }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := startFakeDNS(t, newTestKey(t))
 			f.set(tc.arrange)
 			p := newTestPlugin(t, f, "timeout:100ms")
-			p.sendUpdate(testZone, nil)
+			p.tally(testZone, p.update(t.Context(), testZone, nil, nil))
 			assert.Equal(t, uint64(1), tc.counter(p))
 		})
 	}
@@ -1080,6 +1125,7 @@ func TestParseArgsEverything(t *testing.T) {
 		"queue:5", "reverse:2001:db8::/32", "ttl:60", "algo:hmac-sha512",
 		"key:ddns-key:" + testKeySecret, "zone:HOME.LAN.", "timeout:5s",
 		"reverse:10.0.0.0/24", "server:[2001:db8::53]:5353", "remove-on-release:off",
+		"protect: gateway , vpn", "protect:NS.home.lan.",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "[2001:db8::53]:5353", s.server)
@@ -1092,6 +1138,11 @@ func TestParseArgsEverything(t *testing.T) {
 	require.Len(t, s.reverse, 2)
 	assert.Equal(t, "8.b.d.0.1.0.0.2.ip6.arpa.", s.reverse[0].zone)
 	assert.Equal(t, "0.0.10.in-addr.arpa.", s.reverse[1].zone)
+	assert.Equal(t, map[string]bool{
+		"gateway.home.lan.": true,
+		"vpn.home.lan.":     true,
+		"ns.home.lan.":      true,
+	}, s.protect)
 }
 
 func TestParseArgsErrors(t *testing.T) {
@@ -1103,35 +1154,35 @@ func TestParseArgsErrors(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"no arguments", nil, "server:<ip> is required"},
-		{"no zone", []string{"server:10.0.0.53"}, "zone:<name> is required"},
-		{"no key", []string{"server:10.0.0.53", "zone:home.lan"}, "key:<name>:<secret> is required"},
-		{"unknown argument", with("nonsense"), "unknown argument"},
-		{"a repeated argument", with("ttl:60", "ttl:90"), "ttl given more than once"},
-		{"a repeated server", with("server:10.0.0.54"), "server given more than once"},
-		{"a server that is a name", []string{"server:ns.example.com", "zone:home.lan"}, "has to be an IP address"},
-		{"a server with a bad port", []string{"server:10.0.0.53:dns"}, "invalid port"},
-		{"a server with port zero", []string{"server:10.0.0.53:0"}, "invalid port"},
-		{"a zone that is not a name", []string{"server:10.0.0.53", "zone:home_lan"}, "invalid zone"},
+		{"no arguments", nil, "server:<ip> is missing"},
+		{"no zone", []string{"server:10.0.0.53"}, "zone:<name> is missing"},
+		{"no key", []string{"server:10.0.0.53", "zone:home.lan"}, "key:<name>:<secret> is missing"},
+		{"unknown argument", with("nonsense"), `argument "nonsense" is not one this plugin takes`},
+		{"a repeated argument", with("ttl:60", "ttl:90"), "ttl is given more than once"},
+		{"a repeated server", with("server:10.0.0.54"), "server is given more than once"},
+		{"a server that is a name", []string{"server:ns.example.com", "zone:home.lan"}, "is not an IP address"},
+		{"a server with a bad port", []string{"server:10.0.0.53:dns"}, `port "dns" in server:10.0.0.53:dns is not a port number`},
+		{"a server with port zero", []string{"server:10.0.0.53:0"}, `port "0" in server:10.0.0.53:0 is not a port number`},
+		{"a zone that is not a name", []string{"server:10.0.0.53", "zone:home_lan"}, `zone "home_lan" is not a DNS name`},
 		{"a key without a secret", []string{"server:10.0.0.53", "zone:home.lan", "key:ddns-key"}, "needs <name>:<secret>"},
 		{"a key without a name", []string{"server:10.0.0.53", "zone:home.lan", "key::secret"}, "needs <name>:<secret>"},
 		{"a key name that is not a DNS name", []string{"server:10.0.0.53", "zone:home.lan", "key:ddns..key:" + testKeySecret}, "key name"},
 		{"a secret that is not base64", []string{"server:10.0.0.53", "zone:home.lan", "key:ddns-key:not base64"}, "not usable base64"},
 		{"an empty secret", []string{"server:10.0.0.53", "zone:home.lan", "key:ddns-key:"}, "not usable base64"},
-		{"an env: form with no variable name", []string{"server:10.0.0.53", "zone:home.lan", "key:ddns-key:env:"}, "needs the name of an environment variable"},
+		{"an env: form with no variable name", []string{"server:10.0.0.53", "zone:home.lan", "key:ddns-key:env:"}, "names no environment variable"},
 		{"an env: form naming an unset variable", []string{"server:10.0.0.53", "zone:home.lan", "key:ddns-key:env:DDNS_NOT_SET_ANYWHERE"}, "is unset or empty"},
 		{"an unknown algorithm", with("algo:hmac-md5"), "unknown TSIG algorithm"},
-		{"a TTL that is not a number", with("ttl:soon"), "invalid ttl:"},
-		{"a TTL over the limit", with("ttl:4294967295"), "invalid ttl:"},
-		{"a reverse that is not a CIDR", with("reverse:10.0.0.0"), "it has to be a CIDR"},
+		{"a TTL that is not a number", with("ttl:soon"), "ttl:soon is not a TTL"},
+		{"a TTL over the limit", with("ttl:4294967295"), "ttl:4294967295 is not a TTL"},
+		{"a reverse that is not a CIDR", with("reverse:10.0.0.0"), "reverse:10.0.0.0 is not a CIDR"},
 		{"a reverse off a label boundary", with("reverse:10.0.0.0/25"), "multiple of 8"},
-		{"a timeout that is not a duration", with("timeout:soon"), "want a positive duration"},
-		{"a timeout of zero", with("timeout:0s"), "want a positive duration"},
-		{"a queue that is not a number", with("queue:lots"), "want a number between"},
-		{"a queue of zero", with("queue:0"), "want a number between"},
-		{"a queue over the limit", with("queue:99999999"), "want a number between"},
-		{"a remove-on-release that is neither", with("remove-on-release:maybe"), "want on or off"},
-		{"a remove-on-release with nothing after it", with("remove-on-release:"), "want on or off"},
+		{"a timeout that is not a duration", with("timeout:soon"), "timeout:soon is not a positive duration"},
+		{"a timeout of zero", with("timeout:0s"), "timeout:0s is not a positive duration"},
+		{"a queue that is not a number", with("queue:lots"), "queue:lots is not a queue length"},
+		{"a queue of zero", with("queue:0"), "queue:0 is not a queue length"},
+		{"a queue over the limit", with("queue:99999999"), "queue:99999999 is not a queue length"},
+		{"a remove-on-release that is neither", with("remove-on-release:maybe"), "remove-on-release:maybe is neither on nor off"},
+		{"a remove-on-release with nothing after it", with("remove-on-release:"), "remove-on-release: is neither on nor off"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1253,6 +1304,16 @@ func TestHandler4Skips(t *testing.T) {
 			name: "the client asked for no update",
 			mods: []dhcpv4.Modifier{withFQDN4(fqdn4FlagN, []byte("laptop"))},
 		},
+		{
+			// With no hardware address and no option 61 there is nothing to
+			// build a DHCID out of, and a name nobody can be held to is a
+			// name anyone can take.
+			name: "a client with nothing to identify it",
+			mods: []dhcpv4.Modifier{
+				dhcpv4.WithOption(dhcpv4.OptHostName("laptop")),
+				func(d *dhcpv4.DHCPv4) { d.ClientHWAddr = nil },
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1279,10 +1340,23 @@ func TestHandler4Skips(t *testing.T) {
 	})
 }
 
+// lease4 puts a name in the register so a later release has something to be
+// weighed against.
+func lease4(t *testing.T, p *pluginState, host string, addr net.IP, mods ...dhcpv4.Modifier) {
+	t.Helper()
+	req, resp := v4(t, dhcpv4.MessageTypeRequest,
+		append([]dhcpv4.Modifier{dhcpv4.WithOption(dhcpv4.OptHostName(host))}, mods...)...)
+	resp.YourIPAddr = addr
+	p.Handler4(req, resp)
+	p.drainOne(t)
+}
+
 func TestHandler4Release(t *testing.T) {
-	t.Run("removes the records", func(t *testing.T) {
+	t.Run("removes the records of a lease this server wrote", func(t *testing.T) {
 		f := startFakeDNS(t, newTestKey(t))
 		p := newTestPlugin(t, f, "reverse:10.0.0.0/24")
+		lease4(t, p, "laptop", net.IP{10, 0, 0, 5})
+
 		req, resp := v4(t, dhcpv4.MessageTypeRelease, dhcpv4.WithOption(dhcpv4.OptHostName("laptop")))
 		req.ClientIPAddr = net.IP{10, 0, 0, 5}
 
@@ -1293,6 +1367,46 @@ func TestHandler4Release(t *testing.T) {
 		j := <-p.queue
 		assert.True(t, j.remove)
 		assert.Equal(t, "laptop.home.lan.", j.name)
+	})
+	t.Run("a release for a name this server never wrote is dropped", func(t *testing.T) {
+		f := startFakeDNS(t, newTestKey(t))
+		p := newTestPlugin(t, f)
+		req, resp := v4(t, dhcpv4.MessageTypeRelease, dhcpv4.WithOption(dhcpv4.OptHostName("laptop")))
+		req.ClientIPAddr = net.IP{10, 0, 0, 5}
+		p.Handler4(req, resp)
+		assert.Empty(t, p.queue, "an empty register means nothing to withdraw")
+	})
+	t.Run("a release naming an address this server did not write is dropped", func(t *testing.T) {
+		f := startFakeDNS(t, newTestKey(t))
+		p := newTestPlugin(t, f)
+		lease4(t, p, "laptop", net.IP{10, 0, 0, 5})
+
+		req, resp := v4(t, dhcpv4.MessageTypeRelease, dhcpv4.WithOption(dhcpv4.OptHostName("laptop")))
+		req.ClientIPAddr = net.IP{10, 0, 0, 9}
+		p.Handler4(req, resp)
+		assert.Empty(t, p.queue)
+	})
+	t.Run("a release from another client is dropped", func(t *testing.T) {
+		f := startFakeDNS(t, newTestKey(t))
+		p := newTestPlugin(t, f)
+		lease4(t, p, "laptop", net.IP{10, 0, 0, 5})
+
+		// Same name, same address, a different hardware address: the DHCID
+		// this builds is not the one in the register.
+		req, resp := v4(t, dhcpv4.MessageTypeRelease, dhcpv4.WithOption(dhcpv4.OptHostName("laptop")))
+		req.ClientHWAddr = net.HardwareAddr{0x02, 0, 0, 0, 0, 9}
+		req.ClientIPAddr = net.IP{10, 0, 0, 5}
+		p.Handler4(req, resp)
+		assert.Empty(t, p.queue, "the name belongs to the client that was given it")
+	})
+	t.Run("a release from a client with nothing to identify it is dropped", func(t *testing.T) {
+		f := startFakeDNS(t, newTestKey(t))
+		p := newTestPlugin(t, f)
+		req, resp := v4(t, dhcpv4.MessageTypeRelease, dhcpv4.WithOption(dhcpv4.OptHostName("laptop")))
+		req.ClientHWAddr = nil
+		req.ClientIPAddr = net.IP{10, 0, 0, 5}
+		p.Handler4(req, resp)
+		assert.Empty(t, p.queue)
 	})
 	t.Run("with remove-on-release off it does nothing", func(t *testing.T) {
 		f := startFakeDNS(t, newTestKey(t))
@@ -1438,7 +1552,7 @@ func TestHandler6Lease(t *testing.T) {
 	assert.Equal(t, "laptop.home.lan.", j.name)
 	require.Len(t, j.addrs, 2)
 
-	p.apply(j)
+	p.apply(t.Context(), j)
 	assert.Len(t, f.received(), 3, "one forward message and one reverse message per address")
 }
 
@@ -1491,10 +1605,22 @@ func TestHandler6Skips(t *testing.T) {
 	})
 }
 
+// lease6 puts a name in the register so a later release has something to be
+// weighed against.
+func lease6(t *testing.T, p *pluginState, host, addr string) {
+	t.Helper()
+	req, resp := v6(t, withFQDN6(0, host))
+	withIANA(addr)(resp)
+	p.Handler6(req, resp)
+	p.drainOne(t)
+}
+
 func TestHandler6Release(t *testing.T) {
 	t.Run("removes the records named in the Release", func(t *testing.T) {
 		f := startFakeDNS(t, newTestKey(t))
 		p := newTestPlugin(t, f)
+		lease6(t, p, "laptop", "2001:db8::1")
+
 		req, resp := v6(t, withFQDN6(0, "laptop"), withIANA("2001:db8::1"))
 		req.MessageType = dhcpv6.MessageTypeRelease
 
@@ -1502,6 +1628,33 @@ func TestHandler6Release(t *testing.T) {
 		j := <-p.queue
 		assert.True(t, j.remove)
 		assert.Equal(t, "laptop.home.lan.", j.name)
+	})
+	t.Run("a Release from another DUID is dropped", func(t *testing.T) {
+		f := startFakeDNS(t, newTestKey(t))
+		p := newTestPlugin(t, f)
+		lease6(t, p, "laptop", "2001:db8::1")
+
+		other := &dhcpv6.DUIDLL{HWType: iana.HWTypeEthernet, LinkLayerAddr: net.HardwareAddr{2, 0, 0, 0, 0, 9}}
+		req, err := dhcpv6.NewMessage(dhcpv6.WithClientID(other), withFQDN6(0, "laptop"), withIANA("2001:db8::1"))
+		require.NoError(t, err)
+		req.MessageType = dhcpv6.MessageTypeRelease
+		resp, err := dhcpv6.NewMessage()
+		require.NoError(t, err)
+
+		p.Handler6(req, resp)
+		assert.Empty(t, p.queue, "the name belongs to the DUID it was written for")
+	})
+	t.Run("a Release from a client with no DUID is dropped", func(t *testing.T) {
+		f := startFakeDNS(t, newTestKey(t))
+		p := newTestPlugin(t, f)
+		req, err := dhcpv6.NewMessage(withFQDN6(0, "laptop"), withIANA("2001:db8::1"))
+		require.NoError(t, err)
+		req.MessageType = dhcpv6.MessageTypeRelease
+		resp, err := dhcpv6.NewMessage()
+		require.NoError(t, err)
+
+		p.Handler6(req, resp)
+		assert.Empty(t, p.queue)
 	})
 	t.Run("with remove-on-release off it does nothing", func(t *testing.T) {
 		f := startFakeDNS(t, newTestKey(t))
@@ -1563,4 +1716,587 @@ func TestAddress6(t *testing.T) {
 func TestInnerMessage(t *testing.T) {
 	_, err := innerMessage(nil)
 	assert.Error(t, err)
+}
+
+// -------------------------------------------------------------------------
+// Who holds a name
+// -------------------------------------------------------------------------
+
+type rrsetKey struct {
+	name  string
+	rtype dnsmessage.Type
+}
+
+// zoneServer is a name server with enough of RFC 2136 in it to be worth
+// testing against: it keeps a zone in memory, weighs the prerequisites of
+// every message the way section 3.2 says to, and applies the changes only
+// when they hold.
+//
+// fakeDNS says yes to everything, which is what most of these tests want. A
+// claim on a name is only worth as much as a server that really does refuse
+// it, though, so the tests below use this one instead.
+type zoneServer struct {
+	conn net.PacketConn
+	key  tsigKey
+
+	mu sync.Mutex
+	// RDATA is kept as hex so records compare and sort as plain values.
+	rrsets map[rrsetKey][]string
+	msgs   int
+}
+
+func startZoneServer(t *testing.T, key tsigKey) *zoneServer {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	z := &zoneServer{conn: conn, key: key, rrsets: map[rrsetKey][]string{}}
+	done := make(chan struct{})
+	go z.serve(done)
+	t.Cleanup(func() {
+		assert.NoError(t, conn.Close())
+		<-done
+	})
+	return z
+}
+
+func (z *zoneServer) addr() string { return z.conn.LocalAddr().String() }
+
+func (z *zoneServer) serve(done chan struct{}) {
+	defer close(done)
+	buf := make([]byte, 4096)
+	for {
+		n, peer, err := z.conn.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		req := make([]byte, n)
+		copy(req, buf[:n])
+		if resp := z.answer(req); resp != nil {
+			_, _ = z.conn.WriteTo(resp, peer)
+		}
+	}
+}
+
+func (z *zoneServer) answer(req []byte) []byte {
+	rec, err := findTSIG(req)
+	if err != nil {
+		return nil
+	}
+	z.mu.Lock()
+	z.msgs++
+	code := z.applyUpdate(req)
+	z.mu.Unlock()
+
+	id := binary.BigEndian.Uint16(req[:2])
+	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{
+		ID: id, Response: true, OpCode: opCodeUpdate, RCode: code,
+	})
+	msg, err := b.Finish()
+	if err != nil {
+		return nil
+	}
+	return signAs(z.key, msg, rec.mac, id)
+}
+
+// applyUpdate runs under z.mu.
+func (z *zoneServer) applyUpdate(req []byte) dnsmessage.RCode {
+	prereqs, changes, err := readUpdate(req)
+	if err != nil {
+		return dnsmessage.RCodeFormatError
+	}
+	if code := z.weigh(prereqs); code != dnsmessage.RCodeSuccess {
+		return code
+	}
+	for _, c := range changes {
+		z.applyChange(c)
+	}
+	return dnsmessage.RCodeSuccess
+}
+
+func (z *zoneServer) weigh(prereqs []change) dnsmessage.RCode {
+	want := map[rrsetKey][]string{}
+	for _, c := range prereqs {
+		key := rrsetKey{c.name, c.rtype}
+		if c.class == classNone {
+			if len(z.rrsets[key]) > 0 {
+				return rcodeYXRRSET
+			}
+			continue
+		}
+		want[key] = append(want[key], hex.EncodeToString(c.data))
+	}
+	for key, rdata := range want {
+		if !sameRRset(z.rrsets[key], rdata) {
+			return rcodeNXRRSET
+		}
+	}
+	return dnsmessage.RCodeSuccess
+}
+
+func sameRRset(a, b []string) bool {
+	x, y := slices.Clone(a), slices.Clone(b)
+	slices.Sort(x)
+	slices.Sort(y)
+	return slices.Equal(x, y)
+}
+
+// An add of a record that is already there changes nothing, which is what
+// RFC 2136 section 3.4.2.2 says and what matters here: the second attempt
+// at a name writes the same DHCID again and must not end up with two.
+func (z *zoneServer) applyChange(c change) {
+	key := rrsetKey{c.name, c.rtype}
+	value := hex.EncodeToString(c.data)
+	switch {
+	case c.class == dnsmessage.ClassANY:
+		delete(z.rrsets, key)
+	case c.class == classNone:
+		z.rrsets[key] = slices.DeleteFunc(z.rrsets[key], func(s string) bool { return s == value })
+	case !slices.Contains(z.rrsets[key], value):
+		z.rrsets[key] = append(z.rrsets[key], value)
+	}
+}
+
+func (z *zoneServer) rrset(name string, rtype dnsmessage.Type) []string {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	out := slices.Clone(z.rrsets[rrsetKey{name, rtype}])
+	slices.Sort(out)
+	return out
+}
+
+// put stands in for whatever was in the zone before this plugin ever saw it.
+func (z *zoneServer) put(name string, rtype dnsmessage.Type, rdata ...[]byte) {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	key := rrsetKey{name, rtype}
+	z.rrsets[key] = nil
+	for _, d := range rdata {
+		z.rrsets[key] = append(z.rrsets[key], hex.EncodeToString(d))
+	}
+}
+
+func (z *zoneServer) messages() int {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	return z.msgs
+}
+
+func readUpdate(req []byte) (prereqs, changes []change, err error) {
+	var p dnsmessage.Parser
+	if _, startErr := p.Start(req); startErr != nil {
+		return nil, nil, startErr
+	}
+	if skipErr := p.SkipAllQuestions(); skipErr != nil {
+		return nil, nil, skipErr
+	}
+	if prereqs, err = readSection(p.AnswerHeader, p.UnknownResource); err != nil {
+		return nil, nil, err
+	}
+	changes, err = readSection(p.AuthorityHeader, p.UnknownResource)
+	return prereqs, changes, err
+}
+
+func readSection(
+	header func() (dnsmessage.ResourceHeader, error),
+	body func() (dnsmessage.UnknownResource, error),
+) ([]change, error) {
+	var out []change
+	for {
+		hdr, err := header()
+		if errors.Is(err, dnsmessage.ErrSectionDone) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		res, err := body()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, change{
+			name: hdr.Name.String(), rtype: hdr.Type, class: hdr.Class, ttl: hdr.TTL, data: res.Data,
+		})
+	}
+}
+
+// signAs puts a TSIG on a response, with the request's MAC digested in front
+// of it the way RFC 8945 section 5.4 has it.
+func signAs(key tsigKey, msg, requestMAC []byte, id uint16) []byte {
+	ts := unixSeconds(time.Unix(1788589641, 0))
+	mac := key.digest(msg, ts, requestMAC)
+	out := key.appendRR(msg, ts, mac, id)
+	binary.BigEndian.PutUint16(out[arcountOff:], binary.BigEndian.Uint16(out[arcountOff:])+1)
+	return out
+}
+
+// newZonePlugin builds an instance pointed at z, without starting the
+// worker.
+func newZonePlugin(t *testing.T, z *zoneServer, extra ...string) *pluginState {
+	t.Helper()
+	args := append([]string{
+		"server:" + z.addr(),
+		"zone:home.lan",
+		"key:" + testKeyName + ":" + testKeySecret,
+		"timeout:2s",
+	}, extra...)
+	p, err := newPluginState(args...)
+	require.NoError(t, err)
+	return p
+}
+
+func hexOf(b []byte) []string { return []string{hex.EncodeToString(b)} }
+
+func dhcidFor(t *testing.T, mac net.HardwareAddr, fqdn string) []byte {
+	t.Helper()
+	req, err := dhcpv4.New(dhcpv4.WithHwAddr(mac), dhcpv4.WithMessageType(dhcpv4.MessageTypeRequest))
+	require.NoError(t, err)
+	rdata, err := identity4(req).record(fqdn)
+	require.NoError(t, err)
+	return rdata
+}
+
+func TestClaimAFreshName(t *testing.T) {
+	z := startZoneServer(t, newTestKey(t))
+	p := newZonePlugin(t, z)
+	lease4(t, p, "laptop", net.IP{10, 0, 0, 5})
+
+	assert.Equal(t, hexOf([]byte{10, 0, 0, 5}), z.rrset("laptop.home.lan.", dnsmessage.TypeA))
+	assert.Equal(t, hexOf(dhcidFor(t, testMAC, "laptop.home.lan.")),
+		z.rrset("laptop.home.lan.", typeDHCID), "the client's DHCID is written alongside the address")
+	assert.Equal(t, 1, z.messages(), "a name nobody holds takes one message")
+	assert.Equal(t, uint64(1), p.stats.sent.Load())
+	assert.Zero(t, p.stats.conflicts.Load())
+}
+
+func TestClaimANameTheSameClientAlreadyHolds(t *testing.T) {
+	z := startZoneServer(t, newTestKey(t))
+	p := newZonePlugin(t, z)
+	lease4(t, p, "laptop", net.IP{10, 0, 0, 5})
+
+	// The same client comes back on a different address. Its first message
+	// is refused because a DHCID is there now, and the second one, which
+	// names that DHCID as its own, is taken.
+	lease4(t, p, "laptop", net.IP{10, 0, 0, 6})
+
+	assert.Equal(t, hexOf([]byte{10, 0, 0, 6}), z.rrset("laptop.home.lan.", dnsmessage.TypeA),
+		"the address is replaced, not added to")
+	assert.Equal(t, hexOf(dhcidFor(t, testMAC, "laptop.home.lan.")), z.rrset("laptop.home.lan.", typeDHCID),
+		"writing the same DHCID twice leaves one")
+	assert.Equal(t, 3, z.messages(), "one for the first lease, two for the second")
+	assert.Zero(t, p.stats.conflicts.Load())
+}
+
+func TestANameHeldByAnotherClientIsLeftAlone(t *testing.T) {
+	z := startZoneServer(t, newTestKey(t))
+	p := newZonePlugin(t, z, "reverse:10.0.0.0/24")
+	lease4(t, p, "laptop", net.IP{10, 0, 0, 5})
+	before := z.messages()
+
+	other := net.HardwareAddr{0x02, 0, 0, 0, 0, 9}
+	lease4(t, p, "laptop", net.IP{10, 0, 0, 7}, dhcpv4.WithHwAddr(other))
+
+	assert.Equal(t, hexOf([]byte{10, 0, 0, 5}), z.rrset("laptop.home.lan.", dnsmessage.TypeA),
+		"the address of the client that holds the name is still there")
+	assert.Equal(t, hexOf(dhcidFor(t, testMAC, "laptop.home.lan.")), z.rrset("laptop.home.lan.", typeDHCID))
+	assert.Empty(t, z.rrset("7.0.0.10.in-addr.arpa.", dnsmessage.TypePTR),
+		"a forward update that was refused writes no PTR either")
+	assert.Equal(t, before+2, z.messages(), "both attempts were made and both were refused")
+	assert.Equal(t, uint64(1), p.stats.conflicts.Load())
+}
+
+func TestANameWithNoDHCIDIsClaimed(t *testing.T) {
+	z := startZoneServer(t, newTestKey(t))
+	p := newZonePlugin(t, z)
+	// A record an operator wrote by hand, or one this plugin wrote before
+	// it sent DHCIDs: nothing holds it, so the first client to ask gets it.
+	z.put("printer.home.lan.", dnsmessage.TypeA, []byte{10, 0, 0, 99})
+
+	lease4(t, p, "printer", net.IP{10, 0, 0, 5})
+
+	assert.Equal(t, hexOf([]byte{10, 0, 0, 5}), z.rrset("printer.home.lan.", dnsmessage.TypeA))
+	assert.Equal(t, 1, z.messages())
+}
+
+func TestProtectedNamesAreNeverWritten(t *testing.T) {
+	z := startZoneServer(t, newTestKey(t))
+	p := newZonePlugin(t, z, "protect:gateway,vpn", "protect:ns.home.lan")
+	z.put("gateway.home.lan.", dnsmessage.TypeA, []byte{10, 0, 0, 1})
+
+	for _, host := range []string{"gateway", "vpn", "ns"} {
+		t.Run(host, func(t *testing.T) {
+			req, resp := v4(t, dhcpv4.MessageTypeRequest, dhcpv4.WithOption(dhcpv4.OptHostName(host)))
+			resp.YourIPAddr = net.IP{10, 0, 0, 5}
+			p.Handler4(req, resp)
+			assert.Empty(t, p.queue, "a protected name never reaches the queue")
+		})
+	}
+	assert.Equal(t, hexOf([]byte{10, 0, 0, 1}), z.rrset("gateway.home.lan.", dnsmessage.TypeA))
+	assert.Zero(t, z.messages(), "nothing was sent at all")
+}
+
+func TestProtectedNamesSurviveARelease(t *testing.T) {
+	z := startZoneServer(t, newTestKey(t))
+	p := newZonePlugin(t, z, "protect:gateway")
+
+	req, resp := v4(t, dhcpv4.MessageTypeRelease, dhcpv4.WithOption(dhcpv4.OptHostName("gateway")))
+	req.ClientIPAddr = net.IP{10, 0, 0, 1}
+	p.Handler4(req, resp)
+
+	assert.Empty(t, p.queue)
+	assert.Zero(t, z.messages())
+}
+
+func TestReleaseByTheHolder(t *testing.T) {
+	z := startZoneServer(t, newTestKey(t))
+	p := newZonePlugin(t, z, "reverse:10.0.0.0/24")
+	lease4(t, p, "laptop", net.IP{10, 0, 0, 5})
+	require.NotEmpty(t, z.rrset("laptop.home.lan.", typeDHCID))
+
+	req, resp := v4(t, dhcpv4.MessageTypeRelease, dhcpv4.WithOption(dhcpv4.OptHostName("laptop")))
+	req.ClientIPAddr = net.IP{10, 0, 0, 5}
+	p.Handler4(req, resp)
+	p.drainOne(t)
+
+	assert.Empty(t, z.rrset("laptop.home.lan.", dnsmessage.TypeA))
+	assert.Empty(t, z.rrset("laptop.home.lan.", typeDHCID), "the DHCID goes with the address")
+	assert.Empty(t, z.rrset("5.0.0.10.in-addr.arpa.", dnsmessage.TypePTR))
+}
+
+func TestReleaseByANonHolderChangesNothing(t *testing.T) {
+	z := startZoneServer(t, newTestKey(t))
+	p := newZonePlugin(t, z)
+	lease4(t, p, "laptop", net.IP{10, 0, 0, 5})
+	before := z.messages()
+
+	req, resp := v4(t, dhcpv4.MessageTypeRelease, dhcpv4.WithOption(dhcpv4.OptHostName("laptop")))
+	req.ClientHWAddr = net.HardwareAddr{0x02, 0, 0, 0, 0, 9}
+	req.ClientIPAddr = net.IP{10, 0, 0, 5}
+	p.Handler4(req, resp)
+
+	assert.Empty(t, p.queue)
+	assert.Equal(t, before, z.messages())
+	assert.Equal(t, hexOf([]byte{10, 0, 0, 5}), z.rrset("laptop.home.lan.", dnsmessage.TypeA))
+}
+
+func TestReleaseTheRegisterAgreesToButTheZoneDoesNot(t *testing.T) {
+	z := startZoneServer(t, newTestKey(t))
+	p := newZonePlugin(t, z)
+	lease4(t, p, "laptop", net.IP{10, 0, 0, 5})
+
+	// The register still says the name is this client's, but the DHCID in
+	// the zone has changed underneath it. The prerequisite on the delete is
+	// the second gate, and it holds.
+	z.put("laptop.home.lan.", typeDHCID, []byte{0, 1, 1, 0xde, 0xad})
+
+	req, resp := v4(t, dhcpv4.MessageTypeRelease, dhcpv4.WithOption(dhcpv4.OptHostName("laptop")))
+	req.ClientIPAddr = net.IP{10, 0, 0, 5}
+	p.Handler4(req, resp)
+	p.drainOne(t)
+
+	assert.Equal(t, hexOf([]byte{10, 0, 0, 5}), z.rrset("laptop.home.lan.", dnsmessage.TypeA),
+		"a delete whose prerequisite fails removes nothing")
+	assert.Equal(t, uint64(1), p.stats.conflicts.Load())
+}
+
+func TestIdentity4(t *testing.T) {
+	cases := []struct {
+		name     string
+		mods     []dhcpv4.Modifier
+		wantCode uint16
+		wantData []byte
+	}{
+		{
+			name:     "the hardware address when there is no option 61",
+			wantCode: idHTypeChaddr,
+			wantData: append([]byte{byte(iana.HWTypeEthernet)}, testMAC...),
+		},
+		{
+			name:     "option 61 wins over the hardware address",
+			mods:     []dhcpv4.Modifier{dhcpv4.WithOption(dhcpv4.OptClientIdentifier([]byte{1, 2, 3}))},
+			wantCode: idClientID,
+			wantData: []byte{1, 2, 3},
+		},
+		{
+			name: "an RFC 4361 option 61 is unwrapped to its DUID",
+			mods: []dhcpv4.Modifier{dhcpv4.WithOption(dhcpv4.OptClientIdentifier(
+				[]byte{0xff, 0, 0, 0, 1, 0, 3, 0xaa, 0xbb}))},
+			wantCode: idDUID,
+			wantData: []byte{0, 3, 0xaa, 0xbb},
+		},
+		{
+			name: "an option 61 that claims RFC 4361 but is too short is taken whole",
+			mods: []dhcpv4.Modifier{dhcpv4.WithOption(dhcpv4.OptClientIdentifier(
+				[]byte{0xff, 0, 0, 0, 1}))},
+			wantCode: idClientID,
+			wantData: []byte{0xff, 0, 0, 0, 1},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, _ := v4(t, dhcpv4.MessageTypeRequest, tc.mods...)
+			id := identity4(req)
+			assert.Equal(t, tc.wantCode, id.code)
+			assert.Equal(t, tc.wantData, id.data)
+		})
+	}
+
+	t.Run("a chaddr longer than BOOTP has room for is trimmed", func(t *testing.T) {
+		req, _ := v4(t, dhcpv4.MessageTypeRequest)
+		req.ClientHWAddr = make(net.HardwareAddr, 32)
+		assert.Len(t, identity4(req).data, maxChaddr+1)
+	})
+	t.Run("nothing to identify the client by", func(t *testing.T) {
+		req, _ := v4(t, dhcpv4.MessageTypeRequest)
+		req.ClientHWAddr = nil
+		assert.Empty(t, identity4(req).data)
+	})
+}
+
+func TestIdentity6(t *testing.T) {
+	req, _ := v6(t)
+	id := identity6(req)
+	assert.Equal(t, uint16(idDUID), id.code)
+	duid := &dhcpv6.DUIDLL{HWType: iana.HWTypeEthernet, LinkLayerAddr: testMAC}
+	assert.Equal(t, duid.ToBytes(), id.data)
+
+	t.Run("a message with no client identifier", func(t *testing.T) {
+		msg, err := dhcpv6.NewMessage()
+		require.NoError(t, err)
+		assert.Empty(t, identity6(msg).data)
+	})
+}
+
+func TestIdentityRecord(t *testing.T) {
+	// RFC 4701 section 3.5: the two octet identifier type, the digest type,
+	// then SHA-256 over the identifier and the name in wire form.
+	id := identity{code: idClientID, data: []byte{1, 2, 3}}
+	got, err := id.record("host.home.lan.")
+	require.NoError(t, err)
+
+	want := sha256.Sum256(append([]byte{1, 2, 3}, fromHex(t, wireHostHomeLan)...))
+	assert.Equal(t, append([]byte{0x00, 0x01, 0x01}, want[:]...), got)
+	assert.Len(t, got, 3+sha256.Size)
+
+	t.Run("the name is part of the digest", func(t *testing.T) {
+		other, err := id.record("other.home.lan.")
+		require.NoError(t, err)
+		assert.NotEqual(t, got, other)
+	})
+	t.Run("a client with no identity gets no record", func(t *testing.T) {
+		_, err := identity{code: idClientID}.record("host.home.lan.")
+		assert.ErrorIs(t, err, ErrNoIdentity)
+	})
+	t.Run("a name that cannot be packed", func(t *testing.T) {
+		_, err := id.record("host.home.lan")
+		assert.ErrorIs(t, err, ErrBadName)
+	})
+}
+
+func TestOwners(t *testing.T) {
+	a := netip.MustParseAddr("10.0.0.5")
+	b := netip.MustParseAddr("10.0.0.6")
+	mine := []byte{0, 0, 1, 0xaa}
+	theirs := []byte{0, 0, 1, 0xbb}
+
+	t.Run("a name that was never written is held by nobody", func(t *testing.T) {
+		o := newOwners(maxOwners)
+		assert.False(t, o.holds("host.home.lan.", mine, []netip.Addr{a}))
+	})
+	t.Run("the client it was written for holds it", func(t *testing.T) {
+		o := newOwners(maxOwners)
+		o.record("host.home.lan.", mine, []netip.Addr{a, b})
+		assert.True(t, o.holds("host.home.lan.", mine, []netip.Addr{a}))
+		assert.True(t, o.holds("host.home.lan.", mine, []netip.Addr{a, b}))
+	})
+	t.Run("another client does not", func(t *testing.T) {
+		o := newOwners(maxOwners)
+		o.record("host.home.lan.", mine, []netip.Addr{a})
+		assert.False(t, o.holds("host.home.lan.", theirs, []netip.Addr{a}))
+	})
+	t.Run("an address that was never written does not", func(t *testing.T) {
+		o := newOwners(maxOwners)
+		o.record("host.home.lan.", mine, []netip.Addr{a})
+		assert.False(t, o.holds("host.home.lan.", mine, []netip.Addr{b}))
+		assert.False(t, o.holds("host.home.lan.", mine, []netip.Addr{a, b}))
+	})
+	t.Run("a release naming no address at all", func(t *testing.T) {
+		o := newOwners(maxOwners)
+		o.record("host.home.lan.", mine, []netip.Addr{a})
+		assert.False(t, o.holds("host.home.lan.", mine, nil))
+	})
+	t.Run("forgetting a name gives it up", func(t *testing.T) {
+		o := newOwners(maxOwners)
+		o.record("host.home.lan.", mine, []netip.Addr{a})
+		o.forget("host.home.lan.")
+		assert.False(t, o.holds("host.home.lan.", mine, []netip.Addr{a}))
+		assert.NotPanics(t, func() { o.forget("host.home.lan.") })
+	})
+	t.Run("writing a name again replaces what is held", func(t *testing.T) {
+		o := newOwners(maxOwners)
+		o.record("host.home.lan.", mine, []netip.Addr{a})
+		o.record("host.home.lan.", theirs, []netip.Addr{b})
+		assert.False(t, o.holds("host.home.lan.", mine, []netip.Addr{a}))
+		assert.True(t, o.holds("host.home.lan.", theirs, []netip.Addr{b}))
+	})
+	t.Run("the caller's slices are copied", func(t *testing.T) {
+		o := newOwners(maxOwners)
+		dhcid := slices.Clone(mine)
+		addrs := []netip.Addr{a}
+		o.record("host.home.lan.", dhcid, addrs)
+		dhcid[3] = 0xcc
+		addrs[0] = b
+		assert.True(t, o.holds("host.home.lan.", mine, []netip.Addr{a}))
+	})
+	t.Run("the oldest name is dropped once the register is full", func(t *testing.T) {
+		o := newOwners(2)
+		o.record("a.home.lan.", mine, []netip.Addr{a})
+		o.record("b.home.lan.", mine, []netip.Addr{a})
+		// Writing a again moves it to the back, so b is the oldest.
+		o.record("a.home.lan.", mine, []netip.Addr{a})
+		o.record("c.home.lan.", mine, []netip.Addr{a})
+
+		assert.False(t, o.holds("b.home.lan.", mine, []netip.Addr{a}))
+		assert.True(t, o.holds("a.home.lan.", mine, []netip.Addr{a}))
+		assert.True(t, o.holds("c.home.lan.", mine, []netip.Addr{a}))
+	})
+}
+
+func TestRefusalNamesPrerequisiteFailures(t *testing.T) {
+	for _, code := range []dnsmessage.RCode{rcodeYXRRSET, rcodeNXRRSET} {
+		t.Run(rcodeName(code), func(t *testing.T) {
+			err := refusal(code)
+			assert.True(t, prereqFailed(err))
+			require.ErrorIs(t, err, ErrRCode, "a prerequisite that did not hold is still a refusal")
+			assert.Contains(t, err.Error(), rcodeName(code))
+		})
+	}
+	t.Run("any other code is a plain refusal", func(t *testing.T) {
+		err := refusal(dnsmessage.RCodeRefused)
+		assert.False(t, prereqFailed(err))
+		assert.ErrorIs(t, err, ErrRCode)
+	})
+	t.Run("no error is not a failure", func(t *testing.T) {
+		assert.False(t, prereqFailed(nil))
+	})
+}
+
+func TestExchangeStopsOnACancelledContext(t *testing.T) {
+	f := startFakeDNS(t, newTestKey(t))
+	p := newTestPlugin(t, f, "timeout:2s")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := p.exchange(ctx, []byte{0})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, f.received(), "a cancelled context does not reach the wire")
+}
+
+func TestRoundTripStopsOnACancelledContext(t *testing.T) {
+	f := startFakeDNS(t, newTestKey(t))
+	p := newTestPlugin(t, f)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := p.roundTrip(ctx, stubConn{}, []byte{0})
+	assert.ErrorIs(t, err, context.Canceled)
 }

@@ -14,7 +14,7 @@
 //	  plugins:
 //	    - range6: leases6.sqlite3 2001:db8:1::100 2001:db8:1::1ff 12h
 //
-// Three optional arguments may follow, in any order:
+// Four optional arguments may follow, in any order:
 //
 //	sweep:<duration>              how often expired bindings are reclaimed in
 //	                              the background. Defaults to half the lease
@@ -26,6 +26,10 @@
 //	decline-max:<count>           how many declined addresses may be held back
 //	                              at once. Defaults to a tenth of the pool,
 //	                              and never less than one address.
+//	max-leases:<count>            how many bindings this instance may hold at
+//	                              once. Defaults to 65536. 0 turns the bound
+//	                              off, which is only sensible on a pool the
+//	                              machine has the memory for.
 //
 // # Bindings
 //
@@ -80,10 +84,29 @@
 // is nothing else left to reclaim, the address that has been held longest goes
 // back first. None of this survives a restart: probation is tracked in memory
 // only.
+//
+// # How many bindings there can be
+//
+// A binding is made for every DUID and IAID pair that asks for one, and the
+// allocator will take a pool of up to 2^32 addresses, so a client that
+// rotates its DUID can fill the heap and the lease file with bindings nobody
+// will ever renew. Past max-leases a new pair is turned away with
+// NoAddrsAvail while the bindings that already exist carry on renewing, and
+// the bindings loaded at startup count against the bound.
+//
+// # Storage
+//
+// The reply to a client waits until its binding has reached the lease
+// database, and a binding that cannot be written is refused rather than
+// handed out: an address nobody can see after a restart is how two clients
+// end up with the same one. Writes are queued to one writer goroutine, so a
+// slow disk costs queue depth rather than blocking every other client, the
+// sweeper and the lease API behind one insert.
 package range6
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -134,8 +157,12 @@ const (
 	// declined addresses may be held back at once, e.g. "decline-max:32".
 	declineMaxArg = "decline-max"
 
+	// maxLeasesArg names the optional argument that overrides how many
+	// bindings this instance may hold at once, e.g. "max-leases:4096".
+	maxLeasesArg = "max-leases"
+
 	// optionSyntax spells the optional arguments out for error messages.
-	optionSyntax = sweepArg + ":<duration>, " + declineArg + ":<duration> or " + declineMaxArg + ":<count>"
+	optionSyntax = sweepArg + ":<duration>, " + declineArg + ":<duration>, " + declineMaxArg + ":<count> or " + maxLeasesArg + ":<count>"
 
 	// minSweepInterval floors the derived sweep interval. A short lease time
 	// must not turn the sweeper into a hot loop taking the plugin lock.
@@ -150,6 +177,16 @@ const (
 	// declineMaxDivisor sets the default quarantine bound to a tenth of the
 	// pool, so declines can cost a tenth of the addresses at worst.
 	declineMaxDivisor = 10
+
+	// defaultMaxLeases bounds the binding table when max-leases says
+	// nothing. The pool is no bound at all here: a /96 is 2^32 addresses,
+	// and a DUID costs a client nothing to change.
+	defaultMaxLeases = 1 << 16
+
+	// leaseLimitEvery paces the refusal log. Once the table is full every
+	// new client is turned away, and one line per packet would bury the
+	// reason among the symptoms.
+	leaseLimitEvery = time.Minute
 
 	// maxDUIDLen bounds the client DUID we are willing to key a binding by.
 	// RFC 8415 §11.1 caps a DUID at 128 octets plus its two-octet type code,
@@ -176,10 +213,15 @@ const (
 // Record holds one address binding: which client holds which address, until
 // when, and the name the client asked to be known by.
 type Record struct {
-	DUID     []byte
-	IAID     [4]byte
-	IP       net.IP
-	expires  int
+	DUID []byte
+	IAID [4]byte
+	IP   net.IP
+
+	// expires is the Unix second the binding lapses at. It is int64 and not
+	// int because a 32-bit build would wrap it negative on 2038-01-19, at
+	// which point every binding reads as expired and the pool empties
+	// itself.
+	expires  int64
 	hostname string
 }
 
@@ -192,7 +234,28 @@ func (r *Record) key() string {
 // stored with second granularity, so a binding expiring exactly at t counts as
 // expired.
 func (r *Record) expired(t time.Time) bool {
-	return int64(r.expires) <= t.Unix()
+	return r.expires <= t.Unix()
+}
+
+// logThrottle paces a log line that one packet can trigger.
+//
+// Not safe for concurrent use and carries no lock of its own: each instance
+// has one owner, either the plugin lock or the writer goroutine.
+type logThrottle struct {
+	last    time.Time
+	skipped uint64
+}
+
+// ready reports whether a line may go out now, and how many were suppressed
+// since the last one that did. The first call always lets one through.
+func (t *logThrottle) ready(now time.Time, every time.Duration) (uint64, bool) {
+	if !t.last.IsZero() && now.Sub(t.last) < every {
+		t.skipped++
+		return 0, false
+	}
+	skipped := t.skipped
+	t.skipped, t.last = 0, now
+	return skipped, true
 }
 
 // leaseKey builds the map key for one address association. The IAID goes
@@ -232,12 +295,38 @@ type pluginState struct {
 	declined map[string]time.Time
 
 	// sweepInterval is how often the background sweeper reclaims expired
-	// bindings, declineProbation how long a declined address is held back and
-	// declineMax how many may be held at once. All set during setup and
-	// read-only afterwards.
+	// bindings, declineProbation how long a declined address is held back,
+	// declineMax how many may be held at once and maxLeases how many
+	// bindings the instance may hold before it turns new clients away. All
+	// set during setup and read-only afterwards.
 	sweepInterval    time.Duration
 	declineProbation time.Duration
 	declineMax       int
+	maxLeases        int
+
+	// leaseLimit paces the log line saying the binding table is full.
+	// Guarded by the plugin lock, like the table it counts.
+	leaseLimit logThrottle
+
+	// dbCtx is the plugin's own lifetime and not a request's: the writer
+	// outlives the packet that queued a change, and a handler may not hold on
+	// to the context it was called with. dbCancel ends it once the writer has
+	// drained.
+	//nolint:containedctx // the plugin instance's own lifetime, not a request's
+	dbCtx    context.Context
+	dbCancel context.CancelFunc
+
+	// writes carries binding changes to the writer goroutine. All three are
+	// nil until startWriter runs, which is what makes a state built by hand
+	// write inline; see storage.go.
+	writes     chan bindingWrite
+	stopWrites chan struct{}
+	writerDone chan struct{}
+
+	// pending holds the changes queued since the lock was taken. Guarded by
+	// the plugin lock and emptied by withLock before the lock is released, so
+	// it only ever holds one caller's writes.
+	pending []pendingWrite
 
 	// now is the clock seam. It is written once during setup, before the
 	// sweeper goroutine starts, and only read afterwards. Use timeNow rather
@@ -260,6 +349,18 @@ func (p *pluginState) timeNow() time.Time {
 		return time.Now()
 	}
 	return p.now()
+}
+
+// withLock runs fn under the plugin lock and hands back the binding writes
+// it queued, which the caller waits for with settle once the lock is free.
+//
+// Taking the queued writes while the lock is still held is what makes them
+// this caller's and nobody else's.
+func (p *pluginState) withLock(fn func()) []pendingWrite {
+	p.Lock()
+	defer p.Unlock()
+	fn()
+	return p.takePending()
 }
 
 // messageHandlers dispatches on the message type. A type that is not in here,
@@ -285,7 +386,7 @@ var messageHandlers = map[dhcpv6.MessageType]func(*pluginState, *dhcpv6.Message,
 func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	msg, err := req.GetInnerMessage()
 	if err != nil {
-		log.Errorf("Could not decode the request: %v", err)
+		log.Errorf("Dropping a request that could not be decoded: %v; find the client or relay on the link that is sending malformed messages", err)
 		return nil, true
 	}
 
@@ -308,12 +409,12 @@ func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 func clientDUID(msg *dhcpv6.Message) ([]byte, bool) {
 	client := msg.Options.ClientID()
 	if client == nil {
-		log.Error("Invalid packet received, no clientID")
+		log.Error("Dropping a request that carries no client ID option; find the client on the link sending it, every DHCPv6 message has to have one")
 		return nil, false
 	}
 	duid := client.ToBytes()
 	if len(duid) > maxDUIDLen {
-		log.Errorf("Dropping a request with a %d octet client DUID, the maximum is %d", len(duid), maxDUIDLen)
+		log.Errorf("Dropping a request with a %d octet client DUID, the maximum is %d; find the client on the link, RFC 8415 §11.1 allows no more than that", len(duid), maxDUIDLen)
 		return nil, false
 	}
 	return duid, true
@@ -351,19 +452,58 @@ func limitIANAs(ianas []*dhcpv6.OptIANA) []*dhcpv6.OptIANA {
 	return ianas[:maxIANAs]
 }
 
-// eachIANA answers every IA_NA of the message under the plugin lock and adds
-// what comes back to the response. An answer of nil adds nothing, which is how
-// REBIND stays quiet about a binding it does not have.
-func (p *pluginState) eachIANA(msg *dhcpv6.Message, resp dhcpv6.DHCPv6, answer func(*dhcpv6.OptIANA, time.Time) *dhcpv6.OptIANA) {
-	p.Lock()
-	defer p.Unlock()
+// ianaAnswer is one IA_NA's answer and the range of queued writes it stands
+// on, as offsets into the message's pending list.
+type ianaAnswer struct {
+	reply    *dhcpv6.OptIANA
+	iaid     [4]byte
+	from, to int
+}
 
-	now := p.timeNow()
-	for _, ia := range limitIANAs(msg.Options.IANA()) {
-		if reply := answer(ia, now); reply != nil {
-			resp.AddOption(reply)
+// eachIANA answers every IA_NA of the message and adds what comes back to
+// the response. An answer of nil adds nothing, which is how REBIND stays
+// quiet about a binding it does not have.
+//
+// The state changes happen under the plugin lock; the answers go into the
+// response afterwards, once the writes behind them are on disk. An IA whose
+// write failed is answered by refuse instead.
+func (p *pluginState) eachIANA(msg *dhcpv6.Message, resp dhcpv6.DHCPv6,
+	answer func(*dhcpv6.OptIANA, time.Time) *dhcpv6.OptIANA,
+	refuse func([4]byte) *dhcpv6.OptIANA,
+) {
+	var answers []ianaAnswer
+	pending := p.withLock(func() {
+		now := p.timeNow()
+		for _, ia := range limitIANAs(msg.Options.IANA()) {
+			from := len(p.pending)
+			reply := answer(ia, now)
+			answers = append(answers, ianaAnswer{reply: reply, iaid: ia.IaId, from: from, to: len(p.pending)})
+		}
+	})
+
+	results := p.settleAll(pending)
+	for _, a := range answers {
+		if err := firstError(results[a.from:a.to]); err != nil {
+			log.Errorf("Could not record the change for IAID %x: %v; the client is refused and will retry, check the lease database is writable and not held by another process", a.iaid, err)
+			a.reply = refuse(a.iaid)
+		}
+		if a.reply != nil {
+			resp.AddOption(a.reply)
 		}
 	}
+}
+
+// noAddress is the answer for an IA whose change could not be written: a
+// client told nothing is available asks again, which is the right thing for
+// it to do when the server could not record what it just did.
+func noAddress(iaid [4]byte) *dhcpv6.OptIANA {
+	return statusIANA(iaid, dhcpIana.StatusNoAddrsAvail, "the binding could not be recorded")
+}
+
+// notDone is the answer for a RELEASE or a DECLINE whose change could not be
+// written, because saying so beats a Success the client cannot rely on.
+func notDone(iaid [4]byte) *dhcpv6.OptIANA {
+	return statusIANA(iaid, dhcpIana.StatusUnspecFail, "the change could not be recorded")
 }
 
 // handleBind answers a SOLICIT or a REQUEST.
@@ -371,7 +511,7 @@ func (p *pluginState) handleBind(msg *dhcpv6.Message, resp dhcpv6.DHCPv6, duid [
 	hostname := clientHostname(msg)
 	p.eachIANA(msg, resp, func(ia *dhcpv6.OptIANA, now time.Time) *dhcpv6.OptIANA {
 		return p.bind(duid, ia, hostname, now)
-	})
+	}, noAddress)
 }
 
 // handleRenew answers a RENEW: the binding is extended, and an IAID we have
@@ -384,7 +524,7 @@ func (p *pluginState) handleRenew(msg *dhcpv6.Message, resp dhcpv6.DHCPv6, duid 
 			return answer
 		}
 		return statusIANA(ia.IaId, dhcpIana.StatusNoBinding, "no address bound to this IAID")
-	})
+	}, noAddress)
 }
 
 // handleRebind answers a REBIND. Unlike a RENEW it is addressed to every
@@ -394,7 +534,7 @@ func (p *pluginState) handleRebind(msg *dhcpv6.Message, resp dhcpv6.DHCPv6, duid
 	hostname := clientHostname(msg)
 	p.eachIANA(msg, resp, func(ia *dhcpv6.OptIANA, now time.Time) *dhcpv6.OptIANA {
 		return p.extend(duid, ia, hostname, now)
-	})
+	}, noAddress)
 }
 
 // handleRelease frees the addresses a RELEASE names and answers per IA plus a
@@ -402,7 +542,7 @@ func (p *pluginState) handleRebind(msg *dhcpv6.Message, resp dhcpv6.DHCPv6, duid
 func (p *pluginState) handleRelease(msg *dhcpv6.Message, resp dhcpv6.DHCPv6, duid []byte) {
 	p.eachIANA(msg, resp, func(ia *dhcpv6.OptIANA, _ time.Time) *dhcpv6.OptIANA {
 		return p.releaseIANA(duid, ia)
-	})
+	}, notDone)
 	resp.AddOption(&dhcpv6.OptStatusCode{
 		StatusCode:    dhcpIana.StatusSuccess,
 		StatusMessage: "addresses released",
@@ -415,7 +555,7 @@ func (p *pluginState) handleRelease(msg *dhcpv6.Message, resp dhcpv6.DHCPv6, dui
 func (p *pluginState) handleDecline(msg *dhcpv6.Message, resp dhcpv6.DHCPv6, duid []byte) {
 	p.eachIANA(msg, resp, func(ia *dhcpv6.OptIANA, now time.Time) *dhcpv6.OptIANA {
 		return p.declineIANA(duid, ia, now)
-	})
+	}, notDone)
 	resp.AddOption(&dhcpv6.OptStatusCode{
 		StatusCode:    dhcpIana.StatusSuccess,
 		StatusMessage: "addresses declined",
@@ -517,9 +657,9 @@ func requestedAddress(ia *dhcpv6.OptIANA) net.IPNet {
 
 // renewKnown extends the binding for key when there is one. found reports
 // whether the client held one at all, which is what separates "no binding"
-// from "nothing left to give". A nil record with found true means the binding
-// had lapsed and the pool could not give the address back. The caller must
-// hold p's lock.
+// from "nothing left to give". A nil record with found true means the
+// binding had lapsed and the pool could not give the address back, or the
+// extension could not be recorded. The caller must hold p's lock.
 func (p *pluginState) renewKnown(key, hostname string, now time.Time) (rec *Record, found bool) {
 	known, ok := p.Records6[key]
 	if !ok {
@@ -528,7 +668,9 @@ func (p *pluginState) renewKnown(key, hostname string, now time.Time) (rec *Reco
 	if known.expired(now) {
 		return p.reallocateExpired(key, known, hostname, now), true
 	}
-	p.renew(known, hostname, now)
+	if !p.renew(known, hostname, now) {
+		return nil, true
+	}
 	return known, true
 }
 
@@ -536,25 +678,79 @@ func (p *pluginState) renewKnown(key, hostname string, now time.Time) (rec *Reco
 // memory. hint is the zero net.IPNet for a binding we have never seen, the
 // address the client asked for, or the one it held before its binding lapsed;
 // the allocator honours a hint whenever that address is still free. A nil
-// return means the pool is exhausted. The caller must hold p's lock.
+// return means the pool is exhausted, the binding table is at its bound, or
+// the binding could not be persisted. The caller must hold p's lock.
 func (p *pluginState) allocateLease(key string, duid []byte, iaid [4]byte, hint net.IPNet, hostname string, now time.Time) *Record {
+	if p.atLeaseLimit(now) {
+		return nil
+	}
 	ip, err := p.allocate(hint)
 	if err != nil {
-		log.Errorf("Could not allocate an address for DUID %x IAID %x: %v", duid, iaid, err)
+		log.Errorf("Could not allocate an address for DUID %x IAID %x: %v; the client will retry, widen the pool or shorten the lease time if this keeps happening", duid, iaid, err)
 		return nil
 	}
 	rec := &Record{
 		DUID:     duid,
 		IAID:     iaid,
 		IP:       ip.IP,
-		expires:  int(now.Add(p.LeaseTime).Round(time.Second).Unix()),
+		expires:  now.Add(p.LeaseTime).Round(time.Second).Unix(),
 		hostname: hostname,
 	}
-	if err := p.saveIPAddress(rec); err != nil {
-		log.Errorf("Could not persist the binding for DUID %x IAID %x: %v", duid, iaid, err)
+	// Handing out an address we could not record would put a second client
+	// on it after a restart, so the address goes back whether the write is
+	// refused now or fails later.
+	if err := p.saveIPAddress(rec, func() { p.dropUnwritten(key, rec) }); err != nil {
+		log.Errorf("Could not write the binding for DUID %x IAID %x, so it was not handed out: %v; check the lease database is writable and not held by another process", duid, iaid, err)
+		p.freeUnrecorded(rec)
+		return nil
 	}
 	p.Records6[key] = rec
 	return rec
+}
+
+// dropUnwritten takes back a binding whose row did not make it to disk.
+//
+// Only if the record is still the one this write was for: a release, or a
+// later binding for the same client, has already dealt with the address by
+// then, and returning it a second time would take it from whoever holds it
+// now. The caller must hold p's lock.
+func (p *pluginState) dropUnwritten(key string, rec *Record) {
+	if p.Records6[key] != rec {
+		return
+	}
+	delete(p.Records6, key)
+	p.freeUnrecorded(rec)
+}
+
+// freeUnrecorded returns an address to the pool whose binding was never
+// recorded, so nothing else can be holding it. The caller must hold p's
+// lock.
+func (p *pluginState) freeUnrecorded(rec *Record) {
+	if err := p.allocator.Free(net.IPNet{IP: rec.IP}); err != nil {
+		log.Errorf("Could not return the unrecorded address %s to the pool: %v; it stays out of circulation until the server is restarted", rec.IP, err)
+	}
+}
+
+// atLeaseLimit reports whether the binding table has reached max-leases, and
+// logs the refusal at a pace an operator can read. A bound of zero means the
+// operator turned it off. The caller must hold p's lock.
+func (p *pluginState) atLeaseLimit(now time.Time) bool {
+	if p.maxLeases == 0 || len(p.Records6) < p.maxLeases {
+		return false
+	}
+	// A table full of lapsed bindings is a reason to sweep, not to turn a
+	// client away: the sweeper would return them, but not for up to half a
+	// lease time. Same bargain the allocation path makes when the pool looks
+	// exhausted.
+	p.reclaim(now)
+	if len(p.Records6) < p.maxLeases {
+		return false
+	}
+	if skipped, ok := p.leaseLimit.ready(now, leaseLimitEvery); ok {
+		log.Warningf("Holding %d bindings, the %s bound, so new clients are turned away (%d refusal(s) since the last of these); raise %s or shorten the lease time",
+			p.maxLeases, maxLeasesArg, skipped, maxLeasesArg)
+	}
+	return true
 }
 
 // allocate asks the allocator for an address, and on failure reclaims what has
@@ -589,13 +785,15 @@ func (p *pluginState) reallocateExpired(key string, record *Record, hostname str
 	log.Debugf("Binding on %s for DUID %x IAID %x has expired, re-allocating", record.IP, record.DUID, record.IAID)
 	hint := net.IPNet{IP: record.IP}
 	if err := p.releaseLease(record); err != nil {
-		log.Errorf("Could not reclaim the expired binding on %s: %v", record.IP, err)
+		log.Errorf("Could not reclaim the expired binding on %s: %v; the client keeps the address it has and the next sweep will try again", record.IP, err)
 		// The address is still spoken for somewhere (a row we failed to
 		// delete, or an allocator that would not free it), so allocating
 		// again could hand a second client the same address. Keep this client
 		// where it is and let the next sweep retry.
 		p.Records6[key] = record
-		p.renew(record, hostname, now)
+		if !p.renew(record, hostname, now) {
+			return nil
+		}
 		return record
 	}
 	return p.allocateLease(key, record.DUID, record.IAID, hint, hostname, now)
@@ -603,16 +801,32 @@ func (p *pluginState) reallocateExpired(key string, record *Record, hostname str
 
 // renew extends a binding so it outlives the lifetime we are about to
 // advertise, and persists the change. A binding with enough time left is left
-// untouched. The caller must hold p's lock.
-func (p *pluginState) renew(record *Record, hostname string, now time.Time) {
-	if !time.Unix(int64(record.expires), 0).Before(now.Add(p.LeaseTime)) {
-		return
+// untouched. It reports whether the client can be answered with this
+// binding: an extension that cannot be written is rolled back, because the
+// lifetime in the reply would otherwise be one the lease file has never
+// heard of. The caller must hold p's lock.
+func (p *pluginState) renew(record *Record, hostname string, now time.Time) bool {
+	if !time.Unix(record.expires, 0).Before(now.Add(p.LeaseTime)) {
+		return true
 	}
-	record.expires = int(now.Add(p.LeaseTime).Round(time.Second).Unix())
+	was, wasHostname := record.expires, record.hostname
+	record.expires = now.Add(p.LeaseTime).Round(time.Second).Unix()
 	record.hostname = hostname
-	if err := p.saveIPAddress(record); err != nil {
-		log.Errorf("Could not persist the binding on %s: %v", record.IP, err)
+	extended := record.expires
+	undo := func() {
+		// Only if nothing has moved it on since: a renewal that landed
+		// after this one is the client's current binding, not ours to
+		// shorten.
+		if record.expires == extended {
+			record.expires, record.hostname = was, wasHostname
+		}
 	}
+	if err := p.saveIPAddress(record, undo); err != nil {
+		log.Errorf("Could not write the renewed binding on %s: %v; the client will retry, check the lease database is writable and not held by another process", record.IP, err)
+		undo()
+		return false
+	}
+	return true
 }
 
 // releaseLease returns a binding's address to the pool: it deletes the row
@@ -661,7 +875,7 @@ func (p *pluginState) releaseIANA(duid []byte, ia *dhcpv6.OptIANA) *dhcpv6.OptIA
 		return statusIANA(ia.IaId, dhcpIana.StatusNoBinding, "no such address bound to this IAID")
 	}
 	if err := p.releaseLease(record); err != nil {
-		log.Errorf("Could not release %s for DUID %x: %v", record.IP, duid, err)
+		log.Errorf("Could not release %s for DUID %x: %v; the binding stays until it expires, check the lease database is writable and not held by another process", record.IP, duid, err)
 		return statusIANA(ia.IaId, dhcpIana.StatusUnspecFail, "could not release the address")
 	}
 	log.Printf("Released %s for DUID %x IAID %x", record.IP, duid, ia.IaId)
@@ -677,7 +891,7 @@ func (p *pluginState) declineIANA(duid []byte, ia *dhcpv6.OptIANA, now time.Time
 		return statusIANA(ia.IaId, dhcpIana.StatusNoBinding, "no such address bound to this IAID")
 	}
 	if err := p.quarantine(record, now); err != nil {
-		log.Errorf("Could not quarantine %s for DUID %x: %v", record.IP, duid, err)
+		log.Errorf("Could not quarantine %s for DUID %x: %v; the address stays bound until it expires, check the lease database is writable", record.IP, duid, err)
 		return statusIANA(ia.IaId, dhcpIana.StatusUnspecFail, "could not decline the address")
 	}
 	return statusIANA(ia.IaId, dhcpIana.StatusSuccess, "address declined")
@@ -743,7 +957,7 @@ func (p *pluginState) evictOldestDeclined() bool {
 // lock.
 func (p *pluginState) freeDeclined(ip string) {
 	if err := p.allocator.Free(net.IPNet{IP: net.ParseIP(ip)}); err != nil {
-		log.Errorf("Could not return the declined address %s to the pool: %v", ip, err)
+		log.Errorf("Could not return the declined address %s to the pool: %v; it stays out of circulation until the server is restarted", ip, err)
 	}
 	delete(p.declined, ip)
 }
@@ -796,7 +1010,7 @@ func (p *pluginState) sweepExpired(t time.Time) int {
 			continue
 		}
 		if err := p.releaseLease(record); err != nil {
-			log.Errorf("Could not reclaim the expired binding on %s: %v", record.IP, err)
+			log.Errorf("Could not reclaim the expired binding on %s while sweeping: %v; check the lease database is writable and not held by another process", record.IP, err)
 			continue
 		}
 		freed++
@@ -833,9 +1047,12 @@ func (p *pluginState) reclaim(t time.Time) int {
 // sweepOnce takes the lock and reclaims every expired binding and every
 // declined address whose probation has run out.
 func (p *pluginState) sweepOnce() {
-	p.Lock()
-	defer p.Unlock()
-	if freed := p.reclaim(p.timeNow()); freed > 0 {
+	var freed int
+	pending := p.withLock(func() { freed = p.reclaim(p.timeNow()) })
+	if err := p.settle(pending); err != nil {
+		log.Errorf("Could not clear a reclaimed binding from storage: %v; check the lease database is writable and not held by another process", err)
+	}
+	if freed > 0 {
 		log.Printf("Returned %d DHCPv6 address(es) to the pool", freed)
 	}
 }
@@ -865,6 +1082,19 @@ func (p *pluginState) startSweeper(interval time.Duration) {
 func (p *pluginState) stopSweeper() {
 	close(p.stop)
 	<-p.done
+}
+
+// Close stops this instance's background goroutines and flushes the binding
+// writes it still has queued. Call it once, and only on an instance setup
+// built.
+//
+// Nothing in the server calls it: plugins are set up once and live as long
+// as the process. It is here for an embedding program and for the black-box
+// tests, which would otherwise leave a sweeper and a writer running over a
+// lease file they are about to delete.
+func (p *pluginState) Close() {
+	p.stopSweeper()
+	p.stopWriter()
 }
 
 // defaultSweepInterval derives the sweep period from the lease time: half a
@@ -897,6 +1127,7 @@ type pluginOptions struct {
 	sweepInterval    time.Duration
 	declineProbation time.Duration
 	declineMax       int
+	maxLeases        int
 }
 
 // optionParsers dispatches on the argument key. parseOptions handles ordering,
@@ -906,6 +1137,7 @@ var optionParsers = map[string]func(*pluginOptions, string) error{
 	sweepArg:      parseSweepInterval,
 	declineArg:    parseDeclineProbation,
 	declineMaxArg: parseDeclineMax,
+	maxLeasesArg:  parseMaxLeases,
 }
 
 // parseOptions reads the optional key:value arguments, which may come in any
@@ -918,16 +1150,17 @@ func parseOptions(leaseTime time.Duration, poolSize uint64, extra []string) (plu
 		sweepInterval:    defaultSweepInterval(leaseTime),
 		declineProbation: defaultDeclineProbation,
 		declineMax:       defaultDeclineMax(poolSize),
+		maxLeases:        defaultMaxLeases,
 	}
 	seen := make(map[string]bool, len(extra))
 	for _, arg := range extra {
 		key, value, hasValue := strings.Cut(arg, ":")
 		parse, known := optionParsers[key]
 		if !hasValue || !known {
-			return pluginOptions{}, fmt.Errorf("unexpected argument %q, want %s", arg, optionSyntax)
+			return pluginOptions{}, fmt.Errorf("argument %q is not one this plugin takes; use %s, or leave them out for their defaults", arg, optionSyntax)
 		}
 		if seen[key] {
-			return pluginOptions{}, fmt.Errorf("argument %s given more than once", key)
+			return pluginOptions{}, fmt.Errorf("argument %s is given more than once; keep one and remove the rest", key)
 		}
 		seen[key] = true
 		if err := parse(&opts, value); err != nil {
@@ -941,10 +1174,12 @@ func parseOptions(leaseTime time.Duration, poolSize uint64, extra []string) (plu
 func parseSweepInterval(opts *pluginOptions, raw string) error {
 	interval, err := time.ParseDuration(raw)
 	if err != nil {
-		return fmt.Errorf("invalid sweep interval %q: %w", raw, err)
+		return fmt.Errorf("%s:%s is not a duration: %w; use a Go duration such as 5m, or leave it out for half the lease time, floored at %s",
+			sweepArg, raw, err, minSweepInterval)
 	}
 	if interval <= 0 {
-		return fmt.Errorf("sweep interval has to be positive, got: %v", raw)
+		return fmt.Errorf("%s:%s is not above zero; use a duration such as 5m, or leave it out for half the lease time, floored at %s",
+			sweepArg, raw, minSweepInterval)
 	}
 	opts.sweepInterval = interval
 	return nil
@@ -956,10 +1191,12 @@ func parseSweepInterval(opts *pluginOptions, raw string) error {
 func parseDeclineProbation(opts *pluginOptions, raw string) error {
 	probation, err := time.ParseDuration(raw)
 	if err != nil {
-		return fmt.Errorf("invalid decline probation %q: %w", raw, err)
+		return fmt.Errorf("%s:%s is not a duration: %w; use a Go duration such as 1h, or leave it out for the default of %s",
+			declineArg, raw, err, defaultDeclineProbation)
 	}
 	if probation < 0 {
-		return fmt.Errorf("decline probation cannot be negative, got: %v", raw)
+		return fmt.Errorf("%s:%s is negative; use 0 to hand a declined address straight back, or a duration such as 1h",
+			declineArg, raw)
 	}
 	opts.declineProbation = probation
 	return nil
@@ -970,12 +1207,29 @@ func parseDeclineProbation(opts *pluginOptions, raw string) error {
 func parseDeclineMax(opts *pluginOptions, raw string) error {
 	held, err := strconv.Atoi(raw)
 	if err != nil {
-		return fmt.Errorf("invalid decline maximum %q: %w", raw, err)
+		return fmt.Errorf("%s:%s is not a number: %w; use a count such as 8, 0 to turn the quarantine off, or leave it out for a tenth of the pool",
+			declineMaxArg, raw, err)
 	}
 	if held < 0 {
-		return fmt.Errorf("decline maximum cannot be negative, got: %v", raw)
+		return fmt.Errorf("%s:%s is negative; use 0 to turn the quarantine off, or a count such as 8", declineMaxArg, raw)
 	}
 	opts.declineMax = held
+	return nil
+}
+
+// parseMaxLeases reads the value of a "max-leases:" argument. Zero turns the
+// bound off; a negative count is refused because it would read as a limit
+// and act as none at all.
+func parseMaxLeases(opts *pluginOptions, raw string) error {
+	held, err := strconv.Atoi(raw)
+	if err != nil {
+		return fmt.Errorf("%s:%s is not a number: %w; use a count such as 4096, 0 to turn the bound off, or leave it out for the default of %d",
+			maxLeasesArg, raw, err, defaultMaxLeases)
+	}
+	if held < 0 {
+		return fmt.Errorf("%s:%s is negative; use 0 to turn the bound off, or a count such as 4096", maxLeasesArg, raw)
+	}
+	opts.maxLeases = held
 	return nil
 }
 
@@ -985,7 +1239,7 @@ func parseDeclineMax(opts *pluginOptions, raw string) error {
 func parseIPv6(arg string) (net.IP, error) {
 	ip := net.ParseIP(arg)
 	if ip == nil || ip.To16() == nil || ip.To4() != nil {
-		return nil, fmt.Errorf("invalid IPv6 address: %v", arg)
+		return nil, fmt.Errorf("pool address %q is not IPv6; write an IPv6 address, such as 2001:db8:1::100", arg)
 	}
 	return ip.To16(), nil
 }
@@ -999,7 +1253,7 @@ func poolBounds(firstArg, lastArg string) (first, last net.IP, err error) {
 		return nil, nil, err
 	}
 	if bytes.Compare(first, last) > 0 {
-		return nil, nil, errors.New("start of IP range has to be lower than or equal to the end of an IP range")
+		return nil, nil, errors.New("the first pool address is above the last; swap the two arguments")
 	}
 	return first, last, nil
 }
@@ -1008,10 +1262,10 @@ func poolBounds(firstArg, lastArg string) (first, last net.IP, err error) {
 func parseLeaseTime(arg string) (time.Duration, error) {
 	leaseTime, err := time.ParseDuration(arg)
 	if err != nil {
-		return 0, fmt.Errorf("invalid lease duration: %v", arg)
+		return 0, fmt.Errorf("lease time %q is not a duration; use a Go duration such as 12h or 30m", arg)
 	}
 	if leaseTime <= 0 {
-		return 0, fmt.Errorf("lease duration has to be positive, got: %v", arg)
+		return 0, fmt.Errorf("lease time %q is not above zero; use a duration such as 12h", arg)
 	}
 	return leaseTime, nil
 }
@@ -1022,14 +1276,20 @@ func setup6(args ...string) (handler.Handler6, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Started only once setup has fully succeeded: a failed setup must not
-	// leave a goroutine behind sweeping a half-built plugin.
+	// Both started only once setup has fully succeeded: a failed setup must
+	// not leave goroutines behind serving a half-built plugin. The writer
+	// goes first, because from here on the sweeper can queue deletes.
+	p.startWriter()
 	p.startSweeper(p.sweepInterval)
 	// Registered last, once everything that could fail has succeeded: a
 	// reader must never find a half-built instance in the registry.
 	leases.Register(p)
-	log.Printf("Reclaiming expired DHCPv6 bindings every %s, declined addresses after %s (at most %d held back)",
-		p.sweepInterval, p.declineProbation, p.declineMax)
+	log.Printf("Reclaiming expired DHCPv6 bindings every %s, declined addresses after %s (at most %d held back), holding at most %d bindings",
+		p.sweepInterval, p.declineProbation, p.declineMax, p.maxLeases)
+	if p.maxLeases > 0 && p.poolSize > uint64(p.maxLeases) {
+		log.Warningf("The pool holds %d addresses but %s bounds the binding table at %d, so the rest will never be handed out; raise %s or narrow the pool",
+			p.poolSize, maxLeasesArg, p.maxLeases, maxLeasesArg)
+	}
 	return p.Handler6, nil
 }
 
@@ -1039,11 +1299,11 @@ func setup6(args ...string) (handler.Handler6, error) {
 // goroutine's lifetime call this directly.
 func newPluginState(args ...string) (*pluginState, error) {
 	if len(args) < 4 {
-		return nil, fmt.Errorf("invalid number of arguments, want: 4 (file name, first address, last address, lease time), got: %d", len(args))
+		return nil, fmt.Errorf("got %d arguments, want at least 4; pass <lease file> <first address> <last address> <lease time>, such as leases6.sqlite3 2001:db8:1::100 2001:db8:1::1ff 12h", len(args))
 	}
 	filename := args[0]
 	if filename == "" {
-		return nil, errors.New("file name cannot be empty")
+		return nil, errors.New("the lease file name is empty; give a path the server's user may write, such as /var/lib/coredhcp/leases6.sqlite3")
 	}
 
 	first, last, err := poolBounds(args[1], args[2])
@@ -1052,7 +1312,7 @@ func newPluginState(args ...string) (*pluginState, error) {
 	}
 	allocator, err := newIPv6Allocator(first, last)
 	if err != nil {
-		return nil, fmt.Errorf("could not create an allocator: %w", err)
+		return nil, fmt.Errorf("could not build the address allocator: %w; check the two pool addresses", err)
 	}
 	leaseTime, err := parseLeaseTime(args[3])
 	if err != nil {
@@ -1075,11 +1335,13 @@ func newPluginState(args ...string) (*pluginState, error) {
 		sweepInterval:    opts.sweepInterval,
 		declineProbation: opts.declineProbation,
 		declineMax:       opts.declineMax,
+		maxLeases:        opts.maxLeases,
 		now:              time.Now,
 		stop:             make(chan struct{}),
 		done:             make(chan struct{}),
 	}
-	if err := p.restore(filename); err != nil {
+	p.dbCtx, p.dbCancel = context.WithCancel(context.Background())
+	if err := p.restore(p.dbCtx, filename); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -1087,13 +1349,16 @@ func newPluginState(args ...string) (*pluginState, error) {
 
 // restore opens the lease database and puts every stored binding back where it
 // was, both in the map and in the allocator.
-func (p *pluginState) restore(filename string) error {
-	if err := p.registerBackingDB(filename); err != nil {
+//
+// What comes off disk counts against max-leases: a table already over the
+// bound keeps renewing what it holds and hands out nothing new.
+func (p *pluginState) restore(ctx context.Context, filename string) error {
+	if err := p.registerBackingDB(ctx, filename); err != nil {
 		return fmt.Errorf("could not setup lease storage: %w", err)
 	}
-	records, err := loadRecords(p.leasedb)
+	records, err := loadRecords(ctx, p.leasedb)
 	if err != nil {
-		return fmt.Errorf("could not load records from file: %w", err)
+		return fmt.Errorf("could not load the bindings in %s: %w; check the server's user may read the file and that no other process holds it", filename, err)
 	}
 	p.Records6 = records
 	log.Printf("Loaded %d DHCPv6 bindings from %s", len(records), filename)
@@ -1101,13 +1366,13 @@ func (p *pluginState) restore(filename string) error {
 	for _, record := range records {
 		ip, err := p.allocator.Allocate(net.IPNet{IP: record.IP})
 		if err != nil {
-			return fmt.Errorf("failed to re-allocate leased ip %v: %w", record.IP, err)
+			return fmt.Errorf("the stored binding on %v does not fit the configured pool: %w; widen the pool, or delete that row from %s", record.IP, err, filename)
 		}
 		// A stored address outside today's pool is not refused by the
 		// allocator, it is quietly replaced by one inside it, so the answer
 		// has to be checked rather than the error alone.
 		if !ip.IP.Equal(record.IP) {
-			return fmt.Errorf("allocator did not re-allocate requested leased ip %v: %v", record.IP, ip.IP)
+			return fmt.Errorf("the stored binding on %v sits outside the configured pool, the allocator offered %v instead; widen the pool, or delete that row from %s", record.IP, ip.IP, filename)
 		}
 	}
 	return nil

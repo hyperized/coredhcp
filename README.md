@@ -93,6 +93,25 @@ bind, so a service manager sees a failure instead of a silent stop. `-h` lists
 the flags: config path, log level, log file and a `-P` that prints the built-in
 plugin list.
 
+Each datagram is handled on its own goroutine, and how many of those run at
+once is capped: eight per processor by default. A datagram that arrives while
+they are all busy is dropped and counted instead of queued, and a DHCP client
+answers that with a retransmission. Shutdown waits up to five seconds
+for the handlers that are still running before closing the sockets under them,
+so a reply that is halfway through a slow plugin still goes out. Both numbers
+are options on `server.Start` for anyone embedding the package
+(`WithMaxInFlight`, `WithDrainTimeout`), and `Servers.Drops` reads the counts
+back.
+
+Relayed requests need the [relay](plugins/relay/) plugin. A DHCPv4 reply goes
+to `giaddr` and the sender is the one who writes `giaddr`, so a server that
+answers relays it was never told about will send a full reply wherever any
+host on the segment points it. Without `relay` in a family's plugin chain the
+server therefore drops relayed requests for that family, a non-zero `giaddr`
+on DHCPv4 and a Relay-forward on DHCPv6, and warns once at startup. On-link
+clients are unaffected. A deployment that has relays and no `relay` plugin has
+to add one, naming the relay addresses, before its relays work again.
+
 ## Terminal UI
 
 `coredhcp-tui` is the same server with a screen in front of it. It shows the
@@ -187,13 +206,25 @@ DNS server ([test/ddns/](test/ddns/)): one container for Knot holding a
 forward zone and two reverse zones that accept a TSIG key, one `golang`
 container running the tests tagged `integration` against it. The tests drive
 the plugin's handlers in-process and then query Knot to see that the records
-really landed and that a release took them away again.
+really landed and that a release took them away again. Knot weighs the DHCID
+prerequisites too, so the case that matters most is checked against a real
+name server: a second client asking for a name the first one holds gets
+neither the name nor the ability to delete it.
 
 ## Docker
 
 The [Dockerfile](./Dockerfile) builds a cgo-free binary and ships it on
 distroless static. `make docker-image` builds it, and the entrypoint reads its
 configuration from `/etc/coredhcp/config.yaml`, so mount one there.
+
+The published image is signed with cosign keyless signing, so a pull can be
+checked against the workflow that built it:
+
+```
+$ cosign verify ghcr.io/hyperized/coredhcp@<digest> \
+    --certificate-identity-regexp '^https://github.com/hyperized/coredhcp/' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
 
 The server runs as uid 65532, not as root, so the two things it needs from the
 kernel have to be granted. Binding udp/67 needs `NET_BIND_SERVICE`, and
@@ -248,7 +279,12 @@ This fork adds fifteen plugins upstream does not have built in:
   (`15:string:home.lan`), typed and validated, instead of one plugin per
   option
 * [metrics](plugins/metrics/) serves request counters in Prometheus text
-  format, with no new dependencies
+  format, with no new dependencies, on a unix socket or a loopback port. The
+  exposition is unauthenticated, so it is held to the same addresses as the
+  lease API: `metrics: 127.0.0.1:9754`, `metrics: tcp:127.0.0.1:9754` or
+  `metrics: unix:/run/coredhcp/metrics.sock mode:0660`. A wildcard or routable
+  bind is refused at startup, and a scraper on another host reads it through a
+  reverse proxy that authenticates
 * [macfilter](plugins/macfilter/) allows or denies clients by MAC, inline or
   from a file, with the caveat spelled out in its package doc: a MAC is not a
   credential, so allow mode is tidiness rather than authentication
@@ -266,7 +302,8 @@ This fork adds fifteen plugins upstream does not have built in:
   where the reply goes), and drops a DHCPRELEASE whose ciaddr is not the
   address it was sent from, so a neighbour's lease cannot be freed by
   forging one; DHCPv6 matches the relay's source address instead and caps
-  relay nesting and hop count
+  relay nesting and hop count. Without it in the chain the server answers no
+  relay at all, see above
 * [ratelimit](plugins/ratelimit/) drops requests that arrive faster than a
   configured rate, one token bucket per client in a bounded LRU, keyed by MAC,
   source address or both, with an optional bucket shared by all traffic; the
@@ -285,8 +322,12 @@ This fork adds fifteen plugins upstream does not have built in:
   came in on rather than by the client that sent it, keyed on the circuit-id,
   remote-id or subscriber-id in option 82 or on the DHCPv6 relay's
   interface-id or remote-id, from a file the operator can have reloaded on
-  change; the package doc is blunt that it needs a relay allow list in front
-  of it
+  change; a required `allow` list of relay addresses, spelled the way the
+  `relay` plugin spells it, decides whose relay information is believed, so a
+  request presenting an option 82, a giaddr or a Relay-forward from any other
+  source is dropped before the mapping is read, while a client on the
+  server's own link, presenting none of those, passes on down the chain
+  untouched
 * [bootfile](plugins/bootfile/) serves a different network boot program per
   client architecture, so BIOS, UEFI and HTTP boot machines on one network
   each get a file they can run, with an `ipxe=` entry for clients that have
@@ -295,13 +336,20 @@ This fork adds fifteen plugins upstream does not have built in:
   RFC 2136 updates signed with a TSIG key (upstream issue #92, open since
   2020: Kea does this, dnsmasq does not). Forward and reverse zones, both
   families, names allow-listed before they reach a zone, and delivery off
-  the packet path through a bounded queue
+  the packet path through a bounded queue. A name is held against the
+  client it was written for with a DHCID record (RFC 4701) and the conflict
+  resolution of RFC 4703, so one client cannot take another's name or
+  delete it; `protect:` keeps named hosts such as `gateway` out of reach
+  entirely
 * [leasehook](plugins/leasehook/) reports every lease event to a webhook or a
   local program, the way Kea's `run_script` hook and dnsmasq's `dhcp-script`
   do: one JSON object per offer, ack, nak, release, decline or DHCPv6 reply,
   optionally signed with an HMAC. Delivery runs on a worker behind a bounded
   queue, so an endpoint that stops answering slows down deliveries and not
-  DHCP
+  DHCP. A hook program is started with an environment built from an allow
+  list (PATH, HOME, TMPDIR, LANG, LC_\*) plus its own LEASEHOOK_\* variables,
+  so the secrets other plugins were handed as `env:NAME` never reach it, and
+  a webhook redirect is refused rather than followed
 * [leaseapi](plugins/leaseapi/) answers what the server is holding right now
   over a read-only HTTP API on a unix socket or on loopback, which is the
   most-asked-for thing in the upstream tracker (coredhcp/coredhcp#111) and what
@@ -338,6 +386,25 @@ the next client into the same conflict. That quarantine is bounded by
 `decline-max`, a tenth of the pool by default, because a DECLINE is as
 unauthenticated as a RELEASE: holding addresses back without a limit let two
 forged packets per address park an entire pool for the day.
+
+Both `range` and `range6` take `max-leases`, 65536 by default, which bounds
+how many leases one instance holds in memory and in its lease file. It
+matters most on DHCPv6, where a pool can be a /96 and a client can rotate its
+DUID for free: without a bound, every fresh DUID and IAID pair costs a map
+entry and a database row until it expires. A pool with room for more than the
+bound needs it raised, and `max-leases:0` turns it off.
+
+Both plugins write their lease file through a goroutine of their own, which
+applies changes in the order the packet path made them. The plugin lock is
+not held across the write, so a slow disk no longer queues every other
+client, the sweeper and the lease API behind one insert, but the reply still
+waits for its own row: a client is never told it holds an address before
+that address is on disk, because a crash in between would leave the next
+start handing it to somebody else. A write that fails or takes longer than
+two seconds costs that one client its lease for that exchange, and the
+address goes straight back to the pool. The hostname a client sends is
+filtered and cut to 255 bytes before it is stored, because option 12 can
+arrive as tens of kilobytes.
 
 The `file` plugin no longer stamps its static reservation onto a RELEASE or
 DECLINE, and `server_id` decides whether a DHCPv4 request is addressed to

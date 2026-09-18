@@ -51,9 +51,9 @@ func quitKey(ev *tcell.EventKey) bool {
 		return true
 	case tcell.KeyRune:
 		return ev.Rune() == 'q' || ev.Rune() == 'Q'
+	default:
+		return false
 	}
-
-	return false
 }
 
 // handleRune deals with the letter and digit keys.

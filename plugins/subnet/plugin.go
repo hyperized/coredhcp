@@ -134,6 +134,7 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv6"
 
 	"github.com/coredhcp/coredhcp/handler"
+	"github.com/coredhcp/coredhcp/leases"
 	"github.com/coredhcp/coredhcp/logger"
 	"github.com/coredhcp/coredhcp/plugins"
 	"github.com/coredhcp/coredhcp/plugins/prefix"
@@ -209,6 +210,11 @@ type subnet struct {
 	// that allocates nothing.
 	handler4 handler.Handler4
 	handler6 handler.Handler6
+
+	// delegate is the instance behind that handler, as the leases registry
+	// knows it. Nil for a subnet that allocates nothing, and for a delegate
+	// whose plugin offers no way to stop it.
+	delegate leases.Source
 }
 
 // selector holds one family's subnets in file order, which is the order they
@@ -272,20 +278,58 @@ func newSelector(v4 bool, args []string) (*selector, error) {
 		}
 	}
 	if len(s.subnets) == 0 {
-		return nil, fmt.Errorf("%s: no %s subnets configured", path, familyName(v4))
+		return nil, fmt.Errorf("%s lists no %s subnets; add a subnet with an %s cidr, or take the subnet plugin out of this server section",
+			path, familyName(v4), familyName(v4))
 	}
 	log.Printf("%s: serving %d subnets from %s", familyName(v4), len(s.subnets), path)
 	return s, nil
 }
 
+// Close shuts down the delegates this selector built and takes them out of
+// the leases registry.
+//
+// Nothing in the server calls it: plugins are set up once and live as long
+// as the process. It is here for an embedding program, and for tests, which
+// would otherwise leave a sweeper and a writer running over a lease file
+// they are about to delete.
+func (s *selector) Close() {
+	for _, sub := range s.subnets {
+		if sub.delegate == nil {
+			continue
+		}
+		leases.Unregister(sub.delegate)
+		if closer, ok := sub.delegate.(interface{ Close() }); ok {
+			closer.Close()
+		}
+		sub.delegate = nil
+	}
+}
+
+// registeredDelegate returns the instance a pool plugin registered under
+// name, or nil when it registered none.
+//
+// Newest first, because two subnets can share a lease file and it is this
+// subnet's delegate we are after.
+func registeredDelegate(name string) leases.Source {
+	sources := leases.Sources()
+	for _, source := range slices.Backward(sources) {
+		if source.Name() == name {
+			return source
+		}
+	}
+	return nil
+}
+
 // filePath picks the configuration file out of the plugin arguments.
 func filePath(args []string) (string, error) {
 	if len(args) != 1 {
-		return "", fmt.Errorf("want exactly one argument, %s<path>, got %d", fileArgPrefix, len(args))
+		return "", fmt.Errorf("got %d arguments, want exactly one; pass %s<path>, for example %s/etc/coredhcp/subnets.yml",
+			len(args), fileArgPrefix, fileArgPrefix)
 	}
 	path, ok := strings.CutPrefix(args[0], fileArgPrefix)
 	if !ok || path == "" {
-		return "", fmt.Errorf("expected %s<path>, got %q", fileArgPrefix, args[0])
+		return "", fmt.Errorf("argument %q names no file; write it as %s<path>, for example %s/etc/coredhcp/subnets.yml",
+			args[0], fileArgPrefix, fileArgPrefix)
 	}
 	return path, nil
 }
@@ -300,6 +344,7 @@ func buildDelegate(sc *scope) error {
 			return err
 		}
 		sc.sub.handler4 = h
+		sc.sub.delegate = registeredDelegate("range " + sc.leasedb)
 	case sc.prefixPool.IsValid():
 		h, err := prefix.Plugin.Setup6(sc.prefixPool.String(), strconv.Itoa(sc.prefixSize), sc.lease.String())
 		if err != nil {

@@ -59,7 +59,7 @@ func (c *Config) getListenAddress(addr string, ver protocolVersion) (*net.UDPAdd
 
 	ipStr, ifname, portStr, err := splitHostPort(addr)
 	if err != nil {
-		return nil, ErrorFromString("dhcpv%d: %v", ver, err)
+		return nil, ErrorFromString("dhcpv%d: listen address %q cannot be split into host and port (%v); write it as ip, ip:port, [ipv6]:port or %%interface", ver, addr, err)
 	}
 
 	ip := net.ParseIP(ipStr)
@@ -67,10 +67,10 @@ func (c *Config) getListenAddress(addr string, ver protocolVersion) (*net.UDPAdd
 		ip = defaultIP(ver)
 	}
 	if ip == nil {
-		return nil, ErrorFromString("dhcpv%d: invalid IP address in `listen` directive: %s", ver, ipStr)
+		return nil, ErrorFromString("dhcpv%d: invalid IP address in `listen` directive: %q is not an address literal; write an IPv%d literal, or leave the host empty to listen on every address", ver, ipStr, ver)
 	}
 	if ip4 := ip.To4(); (ver == protocolV6 && ip4 != nil) || (ver == protocolV4 && ip4 == nil) {
-		return nil, ErrorFromString("dhcpv%d: not a valid IPv%d address in `listen` directive: '%s'", ver, ver, ipStr)
+		return nil, ErrorFromString("dhcpv%d: not a valid IPv%d address in `listen` directive: %q; put IPv4 addresses under server4 and IPv6 addresses under server6", ver, ver, ipStr)
 	}
 
 	var port int
@@ -79,7 +79,7 @@ func (c *Config) getListenAddress(addr string, ver protocolVersion) (*net.UDPAdd
 	} else {
 		port, err = strconv.Atoi(portStr)
 		if err != nil {
-			return nil, ErrorFromString("dhcpv%d: invalid `listen` port '%s'", ver, portStr)
+			return nil, ErrorFromString("dhcpv%d: invalid `listen` port %q, it is not a number; use a port from 1 to 65535, or leave the port out for the default of %d", ver, portStr, defaultPort(ver))
 		}
 	}
 
@@ -102,7 +102,7 @@ func expandLLMulticast(addr *net.UDPAddr) ([]net.UDPAddr, error) {
 	if addr.Zone != "" {
 		return nil, errors.New("address is already zoned")
 	}
-	var needFlags = net.FlagMulticast
+	needFlags := net.FlagMulticast
 	if addr.IP.To4() != nil {
 		// We need to be able to send broadcast responses in ipv4
 		needFlags |= net.FlagBroadcast
@@ -111,7 +111,7 @@ func expandLLMulticast(addr *net.UDPAddr) ([]net.UDPAddr, error) {
 	ifs, err := netInterfaces()
 	ret := make([]net.UDPAddr, 0, len(ifs))
 	if err != nil {
-		return nil, fmt.Errorf("could not list network interfaces: %w", err)
+		return nil, fmt.Errorf("could not list network interfaces: %w; check the server's permissions, or name the interface in `listen` as %%<interface> so no listing is needed", err)
 	}
 	for _, iface := range ifs {
 		if (iface.Flags & needFlags) != needFlags {
@@ -122,7 +122,7 @@ func expandLLMulticast(addr *net.UDPAddr) ([]net.UDPAddr, error) {
 		ret = append(ret, caddr)
 	}
 	if len(ret) == 0 {
-		return nil, errors.New("no suitable interface found for multicast listener")
+		return nil, errors.New("no suitable interface found for multicast listener, none has the multicast flag set; bring one up, or set `listen` to a unicast address such as [::]")
 	}
 	return ret, nil
 }
@@ -157,8 +157,7 @@ func (c *Config) parseListen(ver protocolVersion) ([]net.UDPAddr, error) {
 
 	// Provide an emulation of the old keyword "interface" to avoid breaking config files
 	if iface := c.v.Get(fmt.Sprintf("server%d.interface", ver)); iface != nil && listen != nil {
-		return nil, ErrorFromString("interface is a deprecated alias for listen, " +
-			"both cannot be used at the same time. Choose one and remove the other.")
+		return nil, ErrorFromString("server%d sets both `interface` and `listen`, and interface is a deprecated alias for listen; remove `interface` and keep `listen`", ver)
 	} else if iface != nil {
 		listen = "%" + cast.ToString(iface)
 	}

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCopySlice(t *testing.T) {
@@ -26,7 +27,7 @@ func TestCopySlice(t *testing.T) {
 			// copySlice always allocates via make(), so a nil input yields
 			// an empty (non-nil) slice rather than nil; compare contents,
 			// not identity.
-			assert.Equal(t, len(tc.original), len(got))
+			assert.Len(t, got, len(tc.original))
 			assert.ElementsMatch(t, tc.original, got)
 
 			// The copy must be independent: mutating it must not affect the
@@ -41,12 +42,12 @@ func TestCopySlice(t *testing.T) {
 
 func TestSetup6EmptyArgs(t *testing.T) {
 	h, err := setup6()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.NotNil(t, h)
 }
 
 func TestSetup4EmptyArgs(t *testing.T) {
 	h, err := setup4()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.NotNil(t, h)
 }

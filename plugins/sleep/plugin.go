@@ -49,11 +49,11 @@ var Plugin = plugins.Plugin{
 
 func setup6(args ...string) (handler.Handler6, error) {
 	if len(args) != 1 {
-		return nil, fmt.Errorf("want exactly one argument, got %d", len(args))
+		return nil, fmt.Errorf("need exactly one delay argument, got %d; give a single duration such as 1s", len(args))
 	}
 	delay, err := time.ParseDuration(args[0])
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse duration: %w", err)
+		return nil, fmt.Errorf("delay %q is not a duration: %w; write it the Go way, such as 300ms or 1s", args[0], err)
 	}
 	log.Printf("loaded plugin for DHCPv6.")
 	return makeSleepHandler6(delay), nil
@@ -61,11 +61,11 @@ func setup6(args ...string) (handler.Handler6, error) {
 
 func setup4(args ...string) (handler.Handler4, error) {
 	if len(args) != 1 {
-		return nil, fmt.Errorf("want exactly one argument, got %d", len(args))
+		return nil, fmt.Errorf("need exactly one delay argument, got %d; give a single duration such as 300ms", len(args))
 	}
 	delay, err := time.ParseDuration(args[0])
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse duration: %w", err)
+		return nil, fmt.Errorf("delay %q is not a duration: %w; write it the Go way, such as 300ms or 1s", args[0], err)
 	}
 	log.Printf("loaded plugin for DHCPv4.")
 	return makeSleepHandler4(delay), nil

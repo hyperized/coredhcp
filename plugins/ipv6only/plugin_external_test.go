@@ -17,7 +17,7 @@ import (
 func TestSetup4InvalidDuration(t *testing.T) {
 	_, err := ipv6only.Plugin.Setup4("not-a-duration")
 	require.Error(t, err)
-	require.EqualError(t, err, "ipv6only failed to initialize")
+	require.ErrorContains(t, err, `"not-a-duration" is not a duration`)
 }
 
 func TestHandler4OptionRequested(t *testing.T) {

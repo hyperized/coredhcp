@@ -64,7 +64,7 @@ var ErrConflictingSetup = errors.New("plugin declares both a plain and a context
 // RegisterPlugin registers a plugin.
 func RegisterPlugin(plugin *Plugin) error {
 	if plugin == nil {
-		return errors.New("cannot register nil plugin")
+		return errors.New("cannot register nil plugin; remove the nil entry from the plugin list this binary was generated with")
 	}
 	if err := checkSetupFuncs(plugin); err != nil {
 		return err
@@ -84,10 +84,10 @@ func RegisterPlugin(plugin *Plugin) error {
 // same protocol family.
 func checkSetupFuncs(p *Plugin) error {
 	if p.Setup4 != nil && p.Setup4Ctx != nil {
-		return fmt.Errorf("plugin `%s`, DHCPv4: %w", p.Name, ErrConflictingSetup)
+		return fmt.Errorf("plugin `%s`, DHCPv4: %w; declare Setup4 or Setup4Ctx, not both", p.Name, ErrConflictingSetup)
 	}
 	if p.Setup6 != nil && p.Setup6Ctx != nil {
-		return fmt.Errorf("plugin `%s`, DHCPv6: %w", p.Name, ErrConflictingSetup)
+		return fmt.Errorf("plugin `%s`, DHCPv6: %w; declare Setup6 or Setup6Ctx, not both", p.Name, ErrConflictingSetup)
 	}
 	return nil
 }
@@ -164,12 +164,12 @@ func loadHandlers[H, L any](family string, list []config.PluginConfig,
 	for _, pluginConf := range list {
 		plugin, ok := RegisteredPlugins[pluginConf.Name]
 		if !ok {
-			return nil, config.ErrorFromString("%s: unknown plugin `%s`", family, pluginConf.Name)
+			return nil, config.ErrorFromString("%s: unknown plugin `%s`; check the spelling, and run coredhcp --plugins to list the plugins this binary was built with", family, pluginConf.Name)
 		}
 		log.Printf("%s: loading plugin `%s`", family, pluginConf.Name)
 		setupFn, wantsCtx := setup(plugin)
 		if setupFn == nil {
-			log.Warningf("%s: plugin `%s` has no setup function for %s", family, pluginConf.Name, family)
+			log.Warningf("%s: plugin `%s` has no setup function for %s and is skipped; remove it from this family's plugins list, or move it to the family it supports", family, pluginConf.Name, family)
 			continue
 		}
 		h, err := setupFn(pluginConf.Args...)
@@ -177,7 +177,7 @@ func loadHandlers[H, L any](family string, list []config.PluginConfig,
 			return nil, err
 		}
 		if isNil(h) {
-			return nil, config.ErrorFromString("no %s handler for plugin %s", family, pluginConf.Name)
+			return nil, config.ErrorFromString("no %s handler for plugin %s, its setup returned neither a handler nor an error; drop the plugin from the list, or report the defect to its author", family, pluginConf.Name)
 		}
 		links = append(links, link(pluginConf, h, wantsCtx))
 	}
@@ -246,7 +246,7 @@ func LoadChains(conf *config.Config) (*Chains, error) {
 	log.Print("Loading plugins...")
 
 	if conf.Server6 == nil && conf.Server4 == nil {
-		return nil, errors.New("no configuration found for either DHCPv6 or DHCPv4")
+		return nil, errors.New("no configuration found for either DHCPv6 or DHCPv4; add a server4 or server6 section with its own listen and plugins keys")
 	}
 
 	var chains Chains

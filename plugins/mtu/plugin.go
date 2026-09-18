@@ -7,7 +7,6 @@
 package mtu
 
 import (
-	"errors"
 	"fmt"
 	"strconv"
 
@@ -42,14 +41,14 @@ type pluginState struct {
 
 func setup4(args ...string) (handler.Handler4, error) {
 	if len(args) != 1 {
-		return nil, errors.New("need one mtu value")
+		return nil, fmt.Errorf("need exactly one mtu argument, got %d; give the MTU in bytes, for example 1500", len(args))
 	}
 	v, err := strconv.Atoi(args[0])
 	if err != nil {
-		return nil, fmt.Errorf("invalid mtu: %v", args[0])
+		return nil, fmt.Errorf("mtu %q is not a number; give the MTU in bytes as a decimal number, for example 1500", args[0])
 	}
 	if v < minMTU || v > maxMTU {
-		return nil, fmt.Errorf("mtu must be between %d and %d, got %d", minMTU, maxMTU, v)
+		return nil, fmt.Errorf("mtu %d is outside the range %d to %d; pick a value in that range, for example 1500", v, minMTU, maxMTU)
 	}
 	p := pluginState{mtu: uint16(v)}
 	log.Infof("loaded mtu %d.", p.mtu)

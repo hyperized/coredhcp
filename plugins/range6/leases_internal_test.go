@@ -65,7 +65,7 @@ func TestLeases(t *testing.T) {
 					DUID:     duidA,
 					IAID:     iaidX,
 					IP:       net.ParseIP("2001:db8:1::100"),
-					expires:  int(live.Unix()),
+					expires:  live.Unix(),
 					hostname: "laptop",
 				},
 				// Expired but not swept yet: reported all the same, with the
@@ -74,7 +74,7 @@ func TestLeases(t *testing.T) {
 					DUID:    duidB,
 					IAID:    iaidX,
 					IP:      net.ParseIP("2001:db8:1::101"),
-					expires: int(expired.Unix()),
+					expires: expired.Unix(),
 				},
 			},
 			want: []leases.Lease{
@@ -100,7 +100,7 @@ func TestLeases(t *testing.T) {
 		{
 			name: "a record whose address is not IPv6 is skipped",
 			recs: map[string]*Record{
-				"c": {DUID: duidA, IAID: iaidX, IP: net.IP{1, 2, 3}, expires: int(live.Unix())},
+				"c": {DUID: duidA, IAID: iaidX, IP: net.IP{1, 2, 3}, expires: live.Unix()},
 			},
 			want: []leases.Lease{},
 		},

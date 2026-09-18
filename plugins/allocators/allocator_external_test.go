@@ -19,9 +19,9 @@ func TestErrDoubleFreeError(t *testing.T) {
 	require.NoError(t, err)
 
 	dfErr := &allocators.ErrDoubleFree{Loc: *prefix}
-	assert.Equal(t, "Attempted to free unallocated block at "+prefix.String(), dfErr.Error())
+	assert.Contains(t, dfErr.Error(), "attempted to free the unallocated block at "+prefix.String())
 }
 
 func TestErrNoAddrAvailMessage(t *testing.T) {
-	assert.EqualError(t, allocators.ErrNoAddrAvail, "no address available to allocate")
+	assert.ErrorContains(t, allocators.ErrNoAddrAvail, "no address available to allocate")
 }

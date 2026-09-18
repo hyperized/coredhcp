@@ -9,6 +9,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/insomniacslk/dhcp/dhcpv6"
@@ -59,9 +60,13 @@ func TestSamePrefix(t *testing.T) {
 
 func TestRecordKey(t *testing.T) {
 	duid1 := &dhcpv6.DUIDLL{HWType: dhcpIana.HWTypeEthernet, LinkLayerAddr: net.HardwareAddr{0, 1, 2, 3, 4, 5}}
+	duid1Copy := &dhcpv6.DUIDLL{HWType: dhcpIana.HWTypeEthernet, LinkLayerAddr: net.HardwareAddr{0, 1, 2, 3, 4, 5}}
 	duid2 := &dhcpv6.DUIDLL{HWType: dhcpIana.HWTypeEthernet, LinkLayerAddr: net.HardwareAddr{0, 1, 2, 3, 4, 6}}
 
-	assert.Equal(t, recordKey(duid1), recordKey(duid1))
+	// recordKey is used as a map key across requests, so two distinct DUID
+	// objects with the same content must hash the same, not just the same
+	// pointer hashed against itself.
+	assert.Equal(t, recordKey(duid1), recordKey(duid1Copy))
 	assert.NotEqual(t, recordKey(duid1), recordKey(duid2))
 }
 
@@ -122,6 +127,13 @@ func newTestPlugin(t *testing.T, pool string) (*pluginState, *fakeClock) {
 	}, clock
 }
 
+func asMessage(t *testing.T, result dhcpv6.DHCPv6) *dhcpv6.Message {
+	t.Helper()
+	msg, ok := result.(*dhcpv6.Message)
+	require.True(t, ok, "expected *dhcpv6.Message, got %T", result)
+	return msg
+}
+
 // duidFor builds a distinct client identifier per n, so a test can bring as
 // many clients to the pool as it needs.
 func duidFor(n byte) dhcpv6.DUID {
@@ -145,7 +157,7 @@ func solicit(t *testing.T, h *pluginState, duid dhcpv6.DUID, hints ...*dhcpv6.Op
 	require.NotNil(t, result)
 	require.False(t, stop)
 
-	iapds := result.(*dhcpv6.Message).Options.IAPD()
+	iapds := asMessage(t, result).Options.IAPD()
 	require.Len(t, iapds, 1)
 	return iapds[0].Options.Prefixes()
 }
@@ -274,27 +286,30 @@ func TestSweepOnceWithNothingExpired(t *testing.T) {
 	assert.Len(t, h.Records, 1, "a live delegation survives a sweep")
 }
 
-// TestSweeperReclaimsInBackground drives the real ticker at a very short
-// interval: with nobody asking for a prefix, a lapsed delegation must go back
-// to the pool on its own, and the goroutine must stop when told to.
+// TestSweeperReclaimsInBackground runs in a synctest bubble: fake time is
+// advanced only once every goroutine in it is durably blocked, so the test
+// needs no real waiting.
 func TestSweeperReclaimsInBackground(t *testing.T) {
-	h, clock := newTestPlugin(t, "2001:db8::/64")
+	synctest.Test(t, func(t *testing.T) {
+		h, clock := newTestPlugin(t, "2001:db8::/64")
 
-	require.Len(t, solicit(t, h, duidFor(1)), 1)
-	clock.Advance(testLeaseDuration + time.Second)
+		require.Len(t, solicit(t, h, duidFor(1)), 1)
+		clock.Advance(testLeaseDuration + time.Second)
 
-	h.startSweeper(time.Millisecond)
-	t.Cleanup(h.stopSweeper)
+		h.startSweeper(time.Millisecond)
+		defer h.stopSweeper()
 
-	require.Eventually(t, func() bool {
+		time.Sleep(2 * time.Millisecond) // fake time inside the bubble, returns at once
+		synctest.Wait()                  // let the sweep finish before we look
+
 		h.Lock()
-		defer h.Unlock()
-		return len(h.Records) == 0
-	}, 5*time.Second, 2*time.Millisecond, "the background sweeper must reclaim the lapsed delegation")
+		assert.Empty(t, h.Records, "the background sweeper must reclaim the lapsed delegation")
+		h.Unlock()
 
-	// Dropping the record alone would not prove reclamation; the prefix has
-	// to be allocatable again.
-	assert.Len(t, solicit(t, h, duidFor(2)), 1)
+		// Dropping the record alone would not prove reclamation; the prefix has
+		// to be allocatable again.
+		assert.Len(t, solicit(t, h, duidFor(2)), 1)
+	})
 }
 
 // freeErrAllocator refuses to take a prefix back, standing in for an allocator
@@ -349,9 +364,9 @@ func TestParseLeaseDuration(t *testing.T) {
 		{name: "skipped, sweep argument follows", extra: []string{"sweep:45s"}, want: defaultLeaseDuration, wantRest: []string{"sweep:45s"}},
 		{name: "skipped, max-prefixes argument follows", extra: []string{"max-prefixes:4"}, want: defaultLeaseDuration, wantRest: []string{"max-prefixes:4"}},
 		{name: "followed by a sweep argument", extra: []string{"30m", "sweep:45s"}, want: 30 * time.Minute, wantRest: []string{"sweep:45s"}},
-		{name: "malformed", extra: []string{"forever"}, wantErrSub: "invalid lease duration"},
-		{name: "zero", extra: []string{"0s"}, wantErrSub: "has to be positive"},
-		{name: "negative", extra: []string{"-1h"}, wantErrSub: "has to be positive"},
+		{name: "malformed", extra: []string{"forever"}, wantErrSub: `lease duration "forever" is not a duration`},
+		{name: "zero", extra: []string{"0s"}, wantErrSub: `lease duration "0s" is not above zero`},
+		{name: "negative", extra: []string{"-1h"}, wantErrSub: `lease duration "-1h" is not above zero`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, rest, err := parseLeaseDuration(tc.extra)
@@ -405,52 +420,52 @@ func TestParseOptions(t *testing.T) {
 		{
 			name:       "unknown key",
 			extra:      []string{"reap:5m"},
-			wantErrSub: "unexpected argument",
+			wantErrSub: `argument "reap:5m" is not one this plugin takes`,
 		},
 		{
 			name:       "a key with no value",
 			extra:      []string{"sweep"},
-			wantErrSub: "unexpected argument",
+			wantErrSub: `argument "sweep" is not one this plugin takes`,
 		},
 		{
 			name:       "sweep given twice",
 			extra:      []string{"sweep:90s", "sweep:2m"},
-			wantErrSub: "argument sweep given more than once",
+			wantErrSub: "argument sweep is given more than once",
 		},
 		{
 			name:       "max-prefixes given twice",
 			extra:      []string{"max-prefixes:4", "max-prefixes:8"},
-			wantErrSub: "argument max-prefixes given more than once",
+			wantErrSub: "argument max-prefixes is given more than once",
 		},
 		{
 			name:       "malformed sweep interval",
 			extra:      []string{"sweep:soon"},
-			wantErrSub: "invalid sweep interval",
+			wantErrSub: "sweep:soon is not a duration",
 		},
 		{
 			name:       "zero sweep interval",
 			extra:      []string{"sweep:0s"},
-			wantErrSub: "has to be positive",
+			wantErrSub: "sweep:0s is not above zero",
 		},
 		{
 			name:       "negative sweep interval",
 			extra:      []string{"sweep:-1m"},
-			wantErrSub: "has to be positive",
+			wantErrSub: "sweep:-1m is not above zero",
 		},
 		{
 			name:       "non-numeric max-prefixes",
 			extra:      []string{"max-prefixes:abc"},
-			wantErrSub: "invalid prefix maximum",
+			wantErrSub: "max-prefixes:abc is not a number",
 		},
 		{
 			name:       "zero max-prefixes",
 			extra:      []string{"max-prefixes:0"},
-			wantErrSub: "prefix maximum has to be positive",
+			wantErrSub: "max-prefixes:0 is below one",
 		},
 		{
 			name:       "negative max-prefixes",
 			extra:      []string{"max-prefixes:-1"},
-			wantErrSub: "prefix maximum has to be positive",
+			wantErrSub: "max-prefixes:-1 is below one",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -536,5 +551,57 @@ func TestIapdsToAnswer(t *testing.T) {
 		for i, iapd := range got {
 			assert.Equal(t, [4]byte{0, 0, 0, byte(i + 1)}, iapd.IaId)
 		}
+	})
+}
+
+// buildHints returns n IAPrefix hints inside one IA_PD, each addressed with a
+// distinct low byte so a test can tell which ones a truncation kept.
+func buildHints(n int) *dhcpv6.OptIAPD {
+	iapd := &dhcpv6.OptIAPD{}
+	for i := range n {
+		ip := make(net.IP, net.IPv6len)
+		copy(ip, net.ParseIP("2001:db8::"))
+		ip[15] = byte(i)
+		iapd.Options.Add(&dhcpv6.OptIAPrefix{Prefix: &net.IPNet{IP: ip, Mask: net.CIDRMask(64, 128)}})
+	}
+	return iapd
+}
+
+func TestRequestedPrefixes(t *testing.T) {
+	t.Run("no hints at all synthesises one empty hint", func(t *testing.T) {
+		got := requestedPrefixes(&dhcpv6.OptIAPD{})
+		require.Len(t, got, 1)
+		assert.Equal(t, &net.IPNet{}, got[0].Prefix)
+	})
+
+	t.Run("fewer than the cap passes through unchanged", func(t *testing.T) {
+		iapd := buildHints(maxHintsPerIAPD - 1)
+		want := iapd.Options.Prefixes()
+
+		got := requestedPrefixes(iapd)
+		require.Len(t, got, maxHintsPerIAPD-1)
+		for i, hint := range got {
+			assert.True(t, want[i].Prefix.IP.Equal(hint.Prefix.IP))
+		}
+	})
+
+	t.Run("more than the cap is truncated to exactly the cap", func(t *testing.T) {
+		iapd := buildHints(maxHintsPerIAPD + 4)
+		want := iapd.Options.Prefixes()
+
+		got := requestedPrefixes(iapd)
+		require.Len(t, got, maxHintsPerIAPD)
+		for i, hint := range got {
+			assert.True(t, want[i].Prefix.IP.Equal(hint.Prefix.IP), "the kept hints must be the first ones, in order")
+		}
+	})
+
+	t.Run("a nil Prefix inside the kept portion is normalised", func(t *testing.T) {
+		iapd := buildHints(maxHintsPerIAPD)
+		iapd.Options.Prefixes()[0].Prefix = nil
+
+		got := requestedPrefixes(iapd)
+		require.Len(t, got, maxHintsPerIAPD)
+		assert.Equal(t, &net.IPNet{}, got[0].Prefix)
 	})
 }

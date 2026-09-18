@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -19,6 +21,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/coredhcp/coredhcp/leases"
 	"github.com/coredhcp/coredhcp/plugins/allocators/bitmap"
 )
 
@@ -28,7 +31,8 @@ type mockAllocator struct {
 }
 
 func (m *mockAllocator) Allocate(hint net.IPNet) (net.IPNet, error) {
-	return m.Called(hint).Get(0).(net.IPNet), nil
+	ipnet, _ := m.Called(hint).Get(0).(net.IPNet)
+	return ipnet, nil
 }
 
 func (m *mockAllocator) Free(ip net.IPNet) error {
@@ -42,12 +46,35 @@ type mockFailingAllocator struct {
 
 func (m *mockFailingAllocator) Allocate(hint net.IPNet) (net.IPNet, error) {
 	args := m.Called(hint)
-	return args.Get(0).(net.IPNet), args.Error(1)
+	ipnet, _ := args.Get(0).(net.IPNet)
+	return ipnet, args.Error(1)
 }
 
 func (m *mockFailingAllocator) Free(ip net.IPNet) error {
 	args := m.Called(ip)
 	return args.Error(0)
+}
+
+// closeRegistered shuts down the instance registered under name.
+//
+// Setup hands back only a handler, not the instance, so a test that wants
+// its lease file left alone has to find it in the registry; otherwise the
+// writer is still touching that file when the framework removes the temp
+// directory around it.
+func closeRegistered(t *testing.T, name string) {
+	t.Helper()
+	for _, s := range leases.Sources() {
+		p, ok := s.(*pluginState)
+		if !ok || p.Name() != name {
+			continue
+		}
+		t.Cleanup(func() {
+			leases.Unregister(s)
+			p.Close()
+		})
+		return
+	}
+	t.Fatalf("no source registered as %q", name)
 }
 
 // TestSetupRangeAllocatorCreationError substitutes the newIPv4Allocator seam
@@ -64,7 +91,7 @@ func TestSetupRangeAllocatorCreationError(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "leases.db")
 	_, err := setupRange(dbPath, "10.0.0.1", "10.0.0.5", "1h")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "could not create an allocator")
+	assert.Contains(t, err.Error(), "could not build the address allocator")
 }
 
 func TestHandler4Inform(t *testing.T) {
@@ -83,7 +110,7 @@ func TestHandler4Inform(t *testing.T) {
 }
 
 func TestHandler4NewAllocation(t *testing.T) {
-	db, err := loadDB(":memory:")
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 
 	mockAlloc := &mockAllocator{}
@@ -112,7 +139,7 @@ func TestHandler4NewAllocation(t *testing.T) {
 	require.True(t, ok, "the new lease must be tracked in memory")
 	assert.Equal(t, "client-a", rec.hostname)
 
-	persisted, err := loadRecords(pl.leasedb)
+	persisted, err := loadRecords(t.Context(), pl.leasedb)
 	require.NoError(t, err)
 	prec, ok := persisted[hwaddr.String()]
 	require.True(t, ok, "the new lease must be persisted")
@@ -122,7 +149,7 @@ func TestHandler4NewAllocation(t *testing.T) {
 }
 
 func TestHandler4NewAllocationAllocateError(t *testing.T) {
-	db, err := loadDB(":memory:")
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 
 	mockAlloc := &mockFailingAllocator{}
@@ -135,7 +162,7 @@ func TestHandler4NewAllocationAllocateError(t *testing.T) {
 
 	hwaddr, err := net.ParseMAC("02:00:00:00:00:11")
 	require.NoError(t, err)
-	mockAlloc.On("Allocate", net.IPNet{}).Return(net.IPNet{}, fmt.Errorf("no addresses left"))
+	mockAlloc.On("Allocate", net.IPNet{}).Return(net.IPNet{}, errors.New("no addresses left"))
 
 	req := &dhcpv4.DHCPv4{ClientHWAddr: hwaddr}
 	resp := &dhcpv4.DHCPv4{Options: make(dhcpv4.Options)}
@@ -152,7 +179,7 @@ func TestHandler4NewAllocationAllocateError(t *testing.T) {
 }
 
 func TestHandler4NewAllocationSaveError(t *testing.T) {
-	db, err := loadDB(":memory:")
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, db.Close()) // force saveIPAddress to fail
 
@@ -168,25 +195,47 @@ func TestHandler4NewAllocationSaveError(t *testing.T) {
 	require.NoError(t, err)
 	wantIP := net.IPv4(10, 0, 0, 12)
 	mockAlloc.On("Allocate", net.IPNet{}).Return(net.IPNet{IP: wantIP})
+	mockAlloc.On("Free", net.IPNet{IP: wantIP.To4()}).Return(nil)
 
 	req := &dhcpv4.DHCPv4{ClientHWAddr: hwaddr}
 	resp := &dhcpv4.DHCPv4{Options: make(dhcpv4.Options)}
 
-	// a storage failure while allocating is only logged; the client still
-	// gets its lease for this session.
+	// A lease that cannot be written is not handed out: after a restart the
+	// address would read as free while the client still held it, and the
+	// next client on the segment would get the same one.
 	result, stop := pl.Handler4(req, resp)
-	require.NotNil(t, result)
-	assert.False(t, stop)
-	assert.Equal(t, wantIP.To4(), result.YourIPAddr)
+	assert.Nil(t, result)
+	assert.True(t, stop)
 
-	_, ok := pl.Recordsv4[hwaddr.String()]
-	assert.True(t, ok, "the lease is still tracked in memory despite the storage failure")
+	assert.Empty(t, pl.Recordsv4, "an unrecorded lease must not be tracked in memory either")
 
 	mockAlloc.AssertExpectations(t)
 }
 
+func TestAllocateLeaseSaveErrorFreeAlsoFails(t *testing.T) {
+	db, err := loadDB(t.Context(), ":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	mockAlloc := &mockFailingAllocator{}
+	pl := pluginState{
+		leasedb:   db,
+		Recordsv4: make(map[string]*Record),
+		allocator: mockAlloc,
+		LeaseTime: time.Hour,
+	}
+
+	wantIP := net.IPv4(10, 0, 0, 20)
+	mockAlloc.On("Allocate", net.IPNet{}).Return(net.IPNet{IP: wantIP}, nil)
+	mockAlloc.On("Free", net.IPNet{IP: wantIP.To4()}).Return(errors.New("allocator refused the address"))
+
+	assert.Nil(t, pl.allocateLease("02:00:00:00:00:20", net.IPNet{}, "", time.Now()))
+	assert.Empty(t, pl.Recordsv4)
+	mockAlloc.AssertExpectations(t)
+}
+
 func TestHandler4RenewalExtendsLease(t *testing.T) {
-	db, err := loadDB(":memory:")
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 
 	hwaddr, err := net.ParseMAC("02:00:00:00:00:13")
@@ -197,7 +246,7 @@ func TestHandler4RenewalExtendsLease(t *testing.T) {
 	// TestHandler4ExpiredLeaseIsReallocated's job.
 	existing := &Record{
 		IP:       net.IPv4(10, 0, 0, 13),
-		expires:  int(time.Now().Add(time.Minute).Unix()),
+		expires:  time.Now().Add(time.Minute).Unix(),
 		hostname: "old-name",
 	}
 	expiresBefore := existing.expires
@@ -218,7 +267,7 @@ func TestHandler4RenewalExtendsLease(t *testing.T) {
 	assert.Equal(t, "new-name", pl.Recordsv4[hwaddr.String()].hostname)
 	assert.Greater(t, existing.expires, expiresBefore, "the lease expiry must have been pushed out")
 
-	persisted, err := loadRecords(pl.leasedb)
+	persisted, err := loadRecords(t.Context(), pl.leasedb)
 	require.NoError(t, err)
 	prec, ok := persisted[hwaddr.String()]
 	require.True(t, ok)
@@ -226,7 +275,7 @@ func TestHandler4RenewalExtendsLease(t *testing.T) {
 }
 
 func TestHandler4RenewalSaveError(t *testing.T) {
-	db, err := loadDB(":memory:")
+	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, db.Close()) // force saveIPAddress to fail
 
@@ -234,7 +283,7 @@ func TestHandler4RenewalSaveError(t *testing.T) {
 	require.NoError(t, err)
 	existing := &Record{
 		IP:       net.IPv4(10, 0, 0, 14),
-		expires:  int(time.Now().Add(time.Minute).Unix()), // valid, but due for renewal
+		expires:  time.Now().Add(time.Minute).Unix(), // valid, but due for renewal
 		hostname: "old-name",
 	}
 	expiresBefore := existing.expires
@@ -247,17 +296,18 @@ func TestHandler4RenewalSaveError(t *testing.T) {
 	req := &dhcpv4.DHCPv4{ClientHWAddr: hwaddr}
 	resp := &dhcpv4.DHCPv4{Options: make(dhcpv4.Options)}
 
-	// a storage failure while renewing is only logged; the in-memory lease
-	// is still extended and returned to the client.
+	// An extension that cannot be written is rolled back and the client is
+	// told nothing: the lease time in the reply would otherwise be one the
+	// lease file has never heard of.
 	result, stop := pl.Handler4(req, resp)
-	require.NotNil(t, result)
-	assert.False(t, stop)
-	assert.Equal(t, existing.IP, result.YourIPAddr)
-	assert.Greater(t, existing.expires, expiresBefore)
+	assert.Nil(t, result)
+	assert.True(t, stop)
+	assert.Equal(t, expiresBefore, existing.expires, "the extension must not survive the failed write")
+	assert.Equal(t, "old-name", existing.hostname)
 }
 
 func TestHandler4Release(t *testing.T) {
-	db, dbErr := testDBSetup()
+	db, dbErr := testDBSetup(t.Context())
 	if dbErr != nil {
 		t.Fatalf("Failed to set up test DB: %v", dbErr)
 	}
@@ -270,7 +320,7 @@ func TestHandler4Release(t *testing.T) {
 		allocator: mockAlloc,
 	}
 
-	loadedRecords, loadErr := loadRecords(db)
+	loadedRecords, loadErr := loadRecords(t.Context(), db)
 	if loadErr != nil {
 		t.Fatalf("Failed to load records: %v", loadErr)
 	}
@@ -303,7 +353,7 @@ func TestHandler4Release(t *testing.T) {
 	_, exists = pl.Recordsv4[hwaddr.String()]
 	assert.False(t, exists, "Record should be removed from memory after release")
 
-	parsedRecords, parseErr := loadRecords(pl.leasedb)
+	parsedRecords, parseErr := loadRecords(t.Context(), pl.leasedb)
 	if parseErr != nil {
 		t.Fatalf("Failed to load records after release: %v", parseErr)
 	}
@@ -315,7 +365,7 @@ func TestHandler4Release(t *testing.T) {
 }
 
 func TestHandler4ReleaseAllocatorError(t *testing.T) {
-	db, parseErr := testDBSetup()
+	db, parseErr := testDBSetup(t.Context())
 	if parseErr != nil {
 		t.Fatalf("Failed to set up test DB: %v", parseErr)
 	}
@@ -328,7 +378,7 @@ func TestHandler4ReleaseAllocatorError(t *testing.T) {
 		allocator: mockAlloc,
 	}
 
-	loadedRecords, err := loadRecords(db)
+	loadedRecords, err := loadRecords(t.Context(), db)
 	if err != nil {
 		t.Fatalf("Failed to load records: %v", err)
 	}
@@ -346,7 +396,7 @@ func TestHandler4ReleaseAllocatorError(t *testing.T) {
 
 	expectedIPNet := net.IPNet{IP: record.IP}
 
-	expectedError := fmt.Errorf("mock allocator free failure")
+	expectedError := errors.New("mock allocator free failure")
 	mockAlloc.On("Free", expectedIPNet).Return(expectedError)
 
 	// Call Handler4 - this should fail on allocator.Free()
@@ -358,7 +408,7 @@ func TestHandler4ReleaseAllocatorError(t *testing.T) {
 	_, exists := pl.Recordsv4[hwaddr.String()]
 	assert.False(t, exists, "Record should be removed from memory even on allocator failure")
 
-	parsedRecords, parseErr := loadRecords(pl.leasedb)
+	parsedRecords, parseErr := loadRecords(t.Context(), pl.leasedb)
 	if parseErr != nil {
 		t.Fatalf("Failed to load records after release: %v", parseErr)
 	}
@@ -370,7 +420,7 @@ func TestHandler4ReleaseAllocatorError(t *testing.T) {
 }
 
 func TestHandler4ReleaseStorageError(t *testing.T) {
-	db, parseErr := testDBSetup()
+	db, parseErr := testDBSetup(t.Context())
 	if parseErr != nil {
 		t.Fatalf("Failed to set up test DB: %v", parseErr)
 	}
@@ -383,7 +433,7 @@ func TestHandler4ReleaseStorageError(t *testing.T) {
 		allocator: mockAlloc,
 	}
 
-	loadedRecords, err := loadRecords(db)
+	loadedRecords, err := loadRecords(t.Context(), db)
 	if err != nil {
 		t.Fatalf("Failed to load records: %v", err)
 	}
@@ -453,7 +503,7 @@ const testLeaseTime = time.Hour
 func newTestPlugin(t *testing.T, start, end net.IP) (*pluginState, *fakeClock) {
 	t.Helper()
 
-	db, err := loadDB(filepath.Join(t.TempDir(), "leases.db"))
+	db, err := loadDB(t.Context(), filepath.Join(t.TempDir(), "leases.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -545,7 +595,7 @@ func TestRecordExpired(t *testing.T) {
 		{"an hour left", at.Add(time.Hour), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := &Record{expires: int(tc.expires.Unix())}
+			rec := &Record{expires: tc.expires.Unix()}
 			assert.Equal(t, tc.want, rec.expired(at))
 		})
 	}
@@ -607,7 +657,7 @@ func TestHandler4ExpiredLeaseReclamation(t *testing.T) {
 			require.Len(t, pl.Recordsv4, 1, "only the current holder may be tracked")
 			holder, ok := pl.Recordsv4[tc.second]
 			require.True(t, ok)
-			assert.Equal(t, int(clock.Now().Add(testLeaseTime).Unix()), holder.expires, "the reissued lease runs a full term from now")
+			assert.Equal(t, clock.Now().Add(testLeaseTime).Unix(), holder.expires, "the reissued lease runs a full term from now")
 
 			assert.Equal(t, 1, leaseRowCount(pl.leasedb, tc.second), "the new lease must be persisted")
 			assert.Equal(t, 0, leaseRowCount(pl.leasedb, tc.wantOther), "the reclaimed lease must be gone from storage")
@@ -663,20 +713,22 @@ func TestHandler4ExpiredLeaseStorageFailure(t *testing.T) {
 	mockAlloc := &mockAllocator{}
 
 	const mac = "02:00:00:00:0d:00"
-	leased := request(t, pl, mac)
-	require.NotNil(t, leased)
+	require.NotNil(t, request(t, pl, mac))
+	leasedUntil := pl.Recordsv4[mac].expires
 
 	clock.Advance(testLeaseTime + time.Second)
 	require.NoError(t, pl.leasedb.Close()) // every statement now fails
 	pl.allocator = mockAlloc
 
-	got := request(t, pl, mac)
-	require.NotNil(t, got, "the client keeps the address it already had")
-	assert.Equal(t, leased, got)
+	// Neither half of the exchange can be written: the lapsed lease cannot
+	// be cleared and the renewal that would stand in for it cannot be
+	// recorded either, so the client is answered with nothing rather than
+	// with a lease time no restart would honour.
+	assert.Nil(t, request(t, pl, mac))
 
 	rec, ok := pl.Recordsv4[mac]
 	require.True(t, ok, "a lease that could not be reclaimed stays tracked")
-	assert.Equal(t, int(clock.Now().Add(testLeaseTime).Unix()), rec.expires, "it is renewed in place instead")
+	assert.Equal(t, leasedUntil, rec.expires, "and keeps the expiry it already had")
 	mockAlloc.AssertNotCalled(t, "Free")
 	mockAlloc.AssertNotCalled(t, "Allocate")
 }
@@ -722,28 +774,33 @@ func TestSweepOnceWithNothingExpired(t *testing.T) {
 	assert.Equal(t, 1, leaseRowCount(pl.leasedb, mac))
 }
 
-// TestSweeperReclaimsInBackground drives the real ticker at a very short
-// interval: without any client asking for an address, an expired lease must
-// disappear from the map, the allocator and the database on its own.
+// The whole instance is built inside the bubble, ticker and stop channel
+// included, which is what lets the sweep happen on bubble time instead of
+// being waited out on the wall clock.
 func TestSweeperReclaimsInBackground(t *testing.T) {
-	pl, clock := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 1))
+	synctest.Test(t, func(t *testing.T) {
+		pl, clock := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 1))
 
-	const mac = "02:00:00:00:10:00"
-	require.NotNil(t, request(t, pl, mac))
-	clock.Advance(testLeaseTime + time.Second)
+		const mac = "02:00:00:00:10:00"
+		require.NotNil(t, request(t, pl, mac))
+		clock.Advance(testLeaseTime + time.Second)
 
-	pl.startSweeper(time.Millisecond)
-	t.Cleanup(pl.stopSweeper)
+		pl.startSweeper(time.Minute)
+		defer pl.stopSweeper()
 
-	require.Eventually(t, func() bool {
+		// One tick, then wait for the sweep it starts to finish.
+		time.Sleep(time.Minute + time.Second)
+		synctest.Wait()
+
 		pl.Lock()
-		defer pl.Unlock()
-		return len(pl.Recordsv4) == 0 && leaseRowCount(pl.leasedb, mac) == 0
-	}, 5*time.Second, 2*time.Millisecond, "the background sweeper must reclaim the expired lease")
+		assert.Empty(t, pl.Recordsv4, "the background sweeper must reclaim the expired lease")
+		assert.Equal(t, 0, leaseRowCount(pl.leasedb, mac), "and take the row with it")
+		pl.Unlock()
 
-	// Removal from the map alone would not prove reclamation; the address
-	// must be allocatable again.
-	assert.NotNil(t, request(t, pl, "02:00:00:00:10:01"))
+		// Removal from the map alone would not prove reclamation; the
+		// address must be allocatable again.
+		assert.NotNil(t, request(t, pl, "02:00:00:00:10:01"))
+	})
 }
 
 func TestDefaultSweepInterval(t *testing.T) {
@@ -776,33 +833,39 @@ func TestParseOptions(t *testing.T) {
 		wantSweep     time.Duration
 		wantProbation time.Duration
 		wantMax       int
+		wantMaxLeases int
 		wantErrSub    string
 	}{
-		{name: "all derived from defaults", wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation, wantMax: 10},
-		{name: "a pool too small for a tenth keeps one address back", poolSize: 4, wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation, wantMax: 1},
-		{name: "a pool big enough to hit the cap", poolSize: 1 << 32, wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation, wantMax: maxDeclineQuarantine},
-		{name: "sweep override", extra: []string{"sweep:90s"}, wantSweep: 90 * time.Second, wantProbation: defaultDeclineProbation, wantMax: 10},
-		{name: "probation override", extra: []string{"decline-probation:15m"}, wantSweep: 30 * time.Minute, wantProbation: 15 * time.Minute, wantMax: 10},
-		{name: "probation disabled", extra: []string{"decline-probation:0"}, wantSweep: 30 * time.Minute, wantMax: 10},
-		{name: "quarantine override", extra: []string{"decline-max:3"}, wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation, wantMax: 3},
-		{name: "quarantine disabled", extra: []string{"decline-max:0"}, wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation},
-		{name: "both, sweep first", extra: []string{"sweep:90s", "decline-probation:15m"}, wantSweep: 90 * time.Second, wantProbation: 15 * time.Minute, wantMax: 10},
-		{name: "both, probation first", extra: []string{"decline-probation:15m", "sweep:90s"}, wantSweep: 90 * time.Second, wantProbation: 15 * time.Minute, wantMax: 10},
-		{name: "all three, in reverse", extra: []string{"decline-max:2", "decline-probation:15m", "sweep:90s"}, wantSweep: 90 * time.Second, wantProbation: 15 * time.Minute, wantMax: 2},
-		{name: "bare duration left over from the positional args", extra: []string{"90s"}, wantErrSub: "unexpected argument"},
-		{name: "a key with no value", extra: []string{"sweep"}, wantErrSub: "unexpected argument"},
-		{name: "unknown key", extra: []string{"reap:90s"}, wantErrSub: "unexpected argument"},
-		{name: "sweep given twice", extra: []string{"sweep:90s", "sweep:2m"}, wantErrSub: "sweep given more than once"},
-		{name: "probation given twice", extra: []string{"decline-probation:1h", "decline-probation:2h"}, wantErrSub: "decline-probation given more than once"},
-		{name: "quarantine given twice", extra: []string{"decline-max:2", "decline-max:3"}, wantErrSub: "decline-max given more than once"},
-		{name: "malformed sweep duration", extra: []string{"sweep:soon"}, wantErrSub: "invalid sweep interval"},
-		{name: "zero sweep", extra: []string{"sweep:0s"}, wantErrSub: "has to be positive"},
-		{name: "negative sweep", extra: []string{"sweep:-1m"}, wantErrSub: "has to be positive"},
-		{name: "malformed probation duration", extra: []string{"decline-probation:never"}, wantErrSub: "invalid decline probation"},
-		{name: "negative probation", extra: []string{"decline-probation:-1h"}, wantErrSub: "cannot be negative"},
-		{name: "malformed quarantine size", extra: []string{"decline-max:lots"}, wantErrSub: "invalid decline maximum"},
-		{name: "fractional quarantine size", extra: []string{"decline-max:1.5"}, wantErrSub: "invalid decline maximum"},
-		{name: "negative quarantine size", extra: []string{"decline-max:-1"}, wantErrSub: "cannot be negative"},
+		{name: "all derived from defaults", wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation, wantMax: 10, wantMaxLeases: defaultMaxLeases},
+		{name: "a pool too small for a tenth keeps one address back", poolSize: 4, wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation, wantMax: 1, wantMaxLeases: defaultMaxLeases},
+		{name: "a pool big enough to hit the cap", poolSize: 1 << 32, wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation, wantMax: maxDeclineQuarantine, wantMaxLeases: defaultMaxLeases},
+		{name: "sweep override", extra: []string{"sweep:90s"}, wantSweep: 90 * time.Second, wantProbation: defaultDeclineProbation, wantMax: 10, wantMaxLeases: defaultMaxLeases},
+		{name: "probation override", extra: []string{"decline-probation:15m"}, wantSweep: 30 * time.Minute, wantProbation: 15 * time.Minute, wantMax: 10, wantMaxLeases: defaultMaxLeases},
+		{name: "probation disabled", extra: []string{"decline-probation:0"}, wantSweep: 30 * time.Minute, wantMax: 10, wantMaxLeases: defaultMaxLeases},
+		{name: "quarantine override", extra: []string{"decline-max:3"}, wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation, wantMax: 3, wantMaxLeases: defaultMaxLeases},
+		{name: "quarantine disabled", extra: []string{"decline-max:0"}, wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation, wantMaxLeases: defaultMaxLeases},
+		{name: "both, sweep first", extra: []string{"sweep:90s", "decline-probation:15m"}, wantSweep: 90 * time.Second, wantProbation: 15 * time.Minute, wantMax: 10, wantMaxLeases: defaultMaxLeases},
+		{name: "both, probation first", extra: []string{"decline-probation:15m", "sweep:90s"}, wantSweep: 90 * time.Second, wantProbation: 15 * time.Minute, wantMax: 10, wantMaxLeases: defaultMaxLeases},
+		{name: "all three, in reverse", extra: []string{"decline-max:2", "decline-probation:15m", "sweep:90s"}, wantSweep: 90 * time.Second, wantProbation: 15 * time.Minute, wantMax: 2, wantMaxLeases: defaultMaxLeases},
+		{name: "max-leases override", extra: []string{"max-leases:4096"}, wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation, wantMax: 10, wantMaxLeases: 4096},
+		{name: "max-leases disabled", extra: []string{"max-leases:0"}, wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation, wantMax: 10},
+		{name: "bare duration left over from the positional args", extra: []string{"90s"}, wantErrSub: `argument "90s" is not one this plugin takes`},
+		{name: "a key with no value", extra: []string{"sweep"}, wantErrSub: `argument "sweep" is not one this plugin takes`},
+		{name: "unknown key", extra: []string{"reap:90s"}, wantErrSub: `argument "reap:90s" is not one this plugin takes`},
+		{name: "sweep given twice", extra: []string{"sweep:90s", "sweep:2m"}, wantErrSub: "argument sweep is given more than once"},
+		{name: "probation given twice", extra: []string{"decline-probation:1h", "decline-probation:2h"}, wantErrSub: "argument decline-probation is given more than once"},
+		{name: "quarantine given twice", extra: []string{"decline-max:2", "decline-max:3"}, wantErrSub: "argument decline-max is given more than once"},
+		{name: "max-leases given twice", extra: []string{"max-leases:100", "max-leases:200"}, wantErrSub: "argument max-leases is given more than once"},
+		{name: "malformed sweep duration", extra: []string{"sweep:soon"}, wantErrSub: "sweep:soon is not a duration"},
+		{name: "zero sweep", extra: []string{"sweep:0s"}, wantErrSub: "sweep:0s is not above zero"},
+		{name: "negative sweep", extra: []string{"sweep:-1m"}, wantErrSub: "sweep:-1m is not above zero"},
+		{name: "malformed probation duration", extra: []string{"decline-probation:never"}, wantErrSub: "decline-probation:never is not a duration"},
+		{name: "negative probation", extra: []string{"decline-probation:-1h"}, wantErrSub: "decline-probation:-1h is negative"},
+		{name: "malformed quarantine size", extra: []string{"decline-max:lots"}, wantErrSub: "decline-max:lots is not a number"},
+		{name: "fractional quarantine size", extra: []string{"decline-max:1.5"}, wantErrSub: "decline-max:1.5 is not a number"},
+		{name: "negative quarantine size", extra: []string{"decline-max:-1"}, wantErrSub: "decline-max:-1 is negative"},
+		{name: "malformed lease maximum", extra: []string{"max-leases:many"}, wantErrSub: "max-leases:many is not a number"},
+		{name: "negative lease maximum", extra: []string{"max-leases:-1"}, wantErrSub: "max-leases:-1 is negative"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			size := tc.poolSize
@@ -819,6 +882,7 @@ func TestParseOptions(t *testing.T) {
 			assert.Equal(t, tc.wantSweep, got.sweepInterval)
 			assert.Equal(t, tc.wantProbation, got.declineProbation)
 			assert.Equal(t, tc.wantMax, got.declineMax)
+			assert.Equal(t, tc.wantMaxLeases, got.maxLeases)
 		})
 	}
 }
@@ -1195,4 +1259,119 @@ func TestEvictOldestDeclinedKeepsUnfreeableAddresses(t *testing.T) {
 	assert.False(t, pl.evictOldestDeclined())
 	assert.Len(t, pl.declined, 1, "the address stays parked for the next sweep")
 	mockAlloc.AssertExpectations(t)
+}
+
+func TestClientHostname(t *testing.T) {
+	hwaddr, err := net.ParseMAC("02:00:00:00:00:30")
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"a plain name passes through untouched", "host-01.example_lab", "host-01.example_lab"},
+		{"characters outside the allow list are dropped", "ho$st na@me!", "hostname"},
+		{"a name past the bound is truncated to it", strings.Repeat("a", 300), strings.Repeat("a", maxHostnameLen)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &dhcpv4.DHCPv4{ClientHWAddr: hwaddr}
+			req.UpdateOption(dhcpv4.OptHostName(tc.raw))
+			assert.Equal(t, tc.want, clientHostname(req))
+		})
+	}
+}
+
+func TestAllocateLeaseMaxLeases(t *testing.T) {
+	const existing = "02:00:00:00:00:31"
+	for _, tc := range []struct {
+		name      string
+		maxLeases int
+		wantNil   bool
+	}{
+		{"at the bound, the client is refused before the allocator is asked", 1, true},
+		{"zero disables the bound", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := loadDB(t.Context(), ":memory:")
+			require.NoError(t, err)
+
+			mockAlloc := &mockAllocator{}
+			pl := pluginState{
+				leasedb: db,
+				Recordsv4: map[string]*Record{
+					existing: {IP: net.IPv4(10, 0, 0, 31), expires: time.Now().Add(time.Hour).Unix()},
+				},
+				allocator: mockAlloc,
+				LeaseTime: time.Hour,
+				maxLeases: tc.maxLeases,
+			}
+
+			wantIP := net.IPv4(10, 0, 0, 32)
+			if !tc.wantNil {
+				mockAlloc.On("Allocate", net.IPNet{}).Return(net.IPNet{IP: wantIP})
+			}
+
+			rec := pl.allocateLease("02:00:00:00:00:32", net.IPNet{}, "", time.Now())
+			if tc.wantNil {
+				assert.Nil(t, rec)
+				assert.Len(t, pl.Recordsv4, 1, "the table must be unchanged")
+				mockAlloc.AssertNotCalled(t, "Allocate")
+			} else {
+				require.NotNil(t, rec)
+				assert.Len(t, pl.Recordsv4, 2)
+			}
+			mockAlloc.AssertExpectations(t)
+		})
+	}
+}
+
+func TestAtLeaseLimit(t *testing.T) {
+	t.Run("zero means the bound is off", func(t *testing.T) {
+		pl := &pluginState{
+			Recordsv4: map[string]*Record{"a": {}},
+			maxLeases: 0,
+		}
+		assert.False(t, pl.atLeaseLimit(time.Now()))
+	})
+
+	t.Run("at the bound, refusals are paced", func(t *testing.T) {
+		pl, clock := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2))
+		require.NotNil(t, request(t, pl, "02:00:00:00:1a:00"))
+		pl.maxLeases = 1
+		now := clock.Now()
+
+		assert.True(t, pl.atLeaseLimit(now), "the first call always logs")
+		assert.Zero(t, pl.leaseLimit.skipped)
+
+		assert.True(t, pl.atLeaseLimit(now), "still at the bound, but this line is suppressed")
+		assert.Equal(t, uint64(1), pl.leaseLimit.skipped)
+
+		later := now.Add(leaseLimitEvery + time.Second)
+		assert.True(t, pl.atLeaseLimit(later), "outside the window, the line passes again")
+		assert.Zero(t, pl.leaseLimit.skipped, "the suppressed count is reported and reset")
+	})
+
+	// A full table of leases nobody holds any more must not turn a client
+	// away: the background sweeper would return them, but only at the next
+	// tick, and the client is asking now.
+	t.Run("a lapsed lease is reclaimed rather than counted against the bound", func(t *testing.T) {
+		pl, clock := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2))
+		const mac = "02:00:00:00:1b:00"
+		require.NotNil(t, request(t, pl, mac))
+		pl.maxLeases = 1
+
+		clock.Advance(testLeaseTime + time.Second)
+		assert.False(t, pl.atLeaseLimit(clock.Now()))
+		assert.Empty(t, pl.Recordsv4, "the lapsed lease went back to the pool")
+		assert.Equal(t, 0, leaseRowCount(pl.leasedb, mac))
+	})
+}
+
+func TestSetupRangeOversizedPoolWarning(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "leases.db")
+	h4, err := setupRange(dbPath, "10.0.0.1", "10.0.255.254", "1h", "max-leases:16")
+	require.NoError(t, err)
+	assert.NotNil(t, h4)
+	closeRegistered(t, "range "+dbPath)
 }

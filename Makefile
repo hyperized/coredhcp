@@ -1,6 +1,6 @@
 # Versions used by the container-backed targets, override as needed.
-GO_IMAGE       ?= golang:1.26
-GOLANGCI_IMAGE ?= golangci/golangci-lint:v2.12.2
+GO_IMAGE       ?= golang:1.27
+GOLANGCI_IMAGE ?= golangci/golangci-lint:v2.13.2
 
 DOCKER_RUN = docker run --rm -v $(CURDIR):/src -w /src -e GOFLAGS=-buildvcs=false
 

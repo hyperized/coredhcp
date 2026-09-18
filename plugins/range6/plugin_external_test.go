@@ -10,6 +10,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/coredhcp/coredhcp/handler"
+	"github.com/coredhcp/coredhcp/leases"
 	"github.com/coredhcp/coredhcp/logger"
 
 	// The "sqlite" driver is registered by range6's own storage.go import,
@@ -47,10 +50,10 @@ func TestMain(m *testing.M) {
 // setupPlugin builds a plugin instance over a fresh database in the test's
 // temp dir.
 //
-// Every instance gets a sweep interval far longer than a test run. Setup6
-// starts the background sweeper and nothing in the public API can stop it, so
-// the black-box tests rely on it never ticking; the timing of reclamation
-// itself is tested against the clock seam in plugin_internal_test.go.
+// Every instance gets a sweep interval far longer than a test run, so the
+// black-box tests rely on the sweeper never ticking; the timing of
+// reclamation itself is tested against the clock seam in
+// plugin_internal_test.go.
 func setupPlugin(t *testing.T) handler.Handler6 {
 	t.Helper()
 	return setupPool(t, poolLast)
@@ -71,7 +74,30 @@ func setupPoolAt(t *testing.T, db, last string, opts ...string) handler.Handler6
 	h, err := range6.Plugin.Setup6(args...)
 	require.NoError(t, err)
 	require.NotNil(t, h)
+	closeAfter(t, "range6 "+db)
 	return h
+}
+
+// closeAfter reaches the instance through the leases registry, since Setup6
+// does not hand it back directly; skipping this leaves the writer still
+// touching the lease file when the temp dir is removed, failing the test.
+func closeAfter(t *testing.T, name string) {
+	t.Helper()
+	sources := leases.Sources()
+	// Newest first: two instances over one lease file report the same name.
+	for _, src := range slices.Backward(sources) {
+		if src.Name() != name {
+			continue
+		}
+		closer, ok := src.(interface{ Close() })
+		require.True(t, ok, "the registered source must be the plugin instance")
+		t.Cleanup(func() {
+			leases.Unregister(src)
+			closer.Close()
+		})
+		return
+	}
+	t.Fatalf("no source registered as %q", name)
 }
 
 // testDUID builds a link-layer DUID, distinct per id so one test can drive
@@ -226,28 +252,22 @@ func TestSetupAcceptsOptionsInAnyOrder(t *testing.T) {
 		{"sweep:90s", "decline-max:4", "decline-probation:1h"},
 	}
 	for _, extra := range cases {
-		t.Run(strings(extra), func(t *testing.T) {
-			args := append([]string{filepath.Join(t.TempDir(), "leases6.sqlite3"), poolFirst, poolLast, leaseTime}, extra...)
+		t.Run(optionNames(extra), func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "leases6.sqlite3")
+			args := append([]string{dbPath, poolFirst, poolLast, leaseTime}, extra...)
 			h, err := range6.Plugin.Setup6(args...)
 			require.NoError(t, err)
 			assert.NotNil(t, h)
+			closeAfter(t, "range6 "+dbPath)
 		})
 	}
 }
 
-// strings names a subtest after the arguments it passes.
-func strings(args []string) string {
+func optionNames(args []string) string {
 	if len(args) == 0 {
 		return "no options"
 	}
-	name := ""
-	for i, a := range args {
-		if i > 0 {
-			name += " "
-		}
-		name += a
-	}
-	return name
+	return strings.Join(args, " ")
 }
 
 func TestSolicitAllocatesAnAddress(t *testing.T) {
@@ -366,13 +386,13 @@ func TestConfirm(t *testing.T) {
 		addresses  []net.IP
 		wantStatus *dhcpIana.StatusCode
 	}{
-		{"address from the pool", []net.IP{net.ParseIP("2001:db8:1::150")}, status(dhcpIana.StatusSuccess)},
-		{"first address of the pool", []net.IP{net.ParseIP(poolFirst)}, status(dhcpIana.StatusSuccess)},
-		{"last address of the pool", []net.IP{net.ParseIP(poolLast)}, status(dhcpIana.StatusSuccess)},
-		{"address below the pool", []net.IP{net.ParseIP("2001:db8:1::ff")}, status(dhcpIana.StatusNotOnLink)},
-		{"address above the pool", []net.IP{net.ParseIP("2001:db8:1::200")}, status(dhcpIana.StatusNotOnLink)},
-		{"address from another link", []net.IP{net.ParseIP("2001:db8:2::150")}, status(dhcpIana.StatusNotOnLink)},
-		{"one of two is off link", []net.IP{net.ParseIP("2001:db8:1::150"), net.ParseIP("2001:db8:2::1")}, status(dhcpIana.StatusNotOnLink)},
+		{"address from the pool", []net.IP{net.ParseIP("2001:db8:1::150")}, new(dhcpIana.StatusSuccess)},
+		{"first address of the pool", []net.IP{net.ParseIP(poolFirst)}, new(dhcpIana.StatusSuccess)},
+		{"last address of the pool", []net.IP{net.ParseIP(poolLast)}, new(dhcpIana.StatusSuccess)},
+		{"address below the pool", []net.IP{net.ParseIP("2001:db8:1::ff")}, new(dhcpIana.StatusNotOnLink)},
+		{"address above the pool", []net.IP{net.ParseIP("2001:db8:1::200")}, new(dhcpIana.StatusNotOnLink)},
+		{"address from another link", []net.IP{net.ParseIP("2001:db8:2::150")}, new(dhcpIana.StatusNotOnLink)},
+		{"one of two is off link", []net.IP{net.ParseIP("2001:db8:1::150"), net.ParseIP("2001:db8:2::1")}, new(dhcpIana.StatusNotOnLink)},
 		{"no address at all", nil, nil},
 	}
 	for _, tc := range cases {
@@ -393,8 +413,6 @@ func TestConfirm(t *testing.T) {
 		})
 	}
 }
-
-func status(c dhcpIana.StatusCode) *dhcpIana.StatusCode { return &c }
 
 // TestConfirmChangesNoBinding pins that a CONFIRM neither allocates nor frees:
 // the client keeps whatever it had, and the pool is untouched.
@@ -526,7 +544,7 @@ func TestQuarantineIsBounded(t *testing.T) {
 	h := setupPool(t, "2001:db8:1::103", "decline-max:1")
 	duid := testDUID(1)
 
-	var declined []string
+	declined := make([]string, 0, 4)
 	for i := range 4 {
 		held := solicit(t, h, duid, [4]byte{0, 0, 0, byte(i)})
 		declined = append(declined, held.String())
@@ -586,7 +604,7 @@ func TestTwoIANAsGetTwoAddresses(t *testing.T) {
 func TestIANAsPerMessageAreCapped(t *testing.T) {
 	h := setupPlugin(t)
 
-	var ianas []*dhcpv6.OptIANA
+	ianas := make([]*dhcpv6.OptIANA, 0, 9)
 	for i := range 9 {
 		ianas = append(ianas, newIANA([4]byte{0, 0, 0, byte(i)}))
 	}
@@ -653,6 +671,9 @@ func TestBindingsSurviveARestart(t *testing.T) {
 	duid := testDUID(1)
 
 	first := setupPoolAt(t, dbPath, "2001:db8:1::101")
+	// No waiting for the writer here: the answer the client got is only
+	// given once its row is on disk, which is the whole point of the wait
+	// in the handler.
 	held := solicit(t, first, duid, iaid1)
 
 	second := setupPoolAt(t, dbPath, "2001:db8:1::101")
@@ -734,4 +755,28 @@ func TestSetupRestoresAStoredBinding(t *testing.T) {
 
 	h := setupPoolAt(t, dbPath, poolLast)
 	assert.Equal(t, "2001:db8:1::110", solicit(t, h, duid, iaid1).String())
+}
+
+func TestSetupWarnsWhenPoolExceedsMaxLeases(t *testing.T) {
+	h := setupPool(t, poolLast, "max-leases:4")
+	assert.NotNil(t, h)
+}
+
+// TestMaxLeasesBoundsNewClientsButKeepsRenewing is the regression test for
+// the audit finding that max-leases did nothing.
+func TestMaxLeasesBoundsNewClientsButKeepsRenewing(t *testing.T) {
+	h := setupPool(t, poolLast, "max-leases:2")
+
+	first := solicit(t, h, testDUID(1), iaid1)
+	second := solicit(t, h, testDUID(2), iaid1)
+	assert.NotEqual(t, first.String(), second.String())
+
+	resp, _ := exchange(t, h, newRequest(t, dhcpv6.MessageTypeSolicit, testDUID(3), newIANA(iaid1)))
+	require.NotNil(t, resp)
+	assertStatus(t, resp, iaid1, dhcpIana.StatusNoAddrsAvail)
+
+	renewed, _ := exchange(t, h, newRequest(t, dhcpv6.MessageTypeRenew, testDUID(1), newIANA(iaid1, first)))
+	require.NotNil(t, renewed)
+	assert.Equal(t, first.String(), leasedAddress(t, renewed, iaid1).String(),
+		"a binding that already exists must keep renewing once the table is full")
 }

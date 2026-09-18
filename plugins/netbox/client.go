@@ -64,6 +64,22 @@ const (
 	maxBodyBytes = 1 << 20
 )
 
+// The errors a NetBox response turns into, wrapped with %w so a caller can
+// tell them apart with errors.Is instead of matching on text.
+var (
+	// ErrUnauthorized is returned on HTTP 401 or 403.
+	ErrUnauthorized = errors.New("not authorized")
+	// ErrNotFound is returned on HTTP 404.
+	ErrNotFound = errors.New("not found")
+	// ErrUnavailable is returned on HTTP 5xx.
+	ErrUnavailable = errors.New("netbox unavailable")
+	// ErrUnexpectedStatus is returned on any other non-2xx status.
+	ErrUnexpectedStatus = errors.New("unexpected status")
+	// ErrNoInterface is returned when NetBox has no interface carrying the
+	// looked-up MAC address.
+	ErrNoInterface = errors.New("no interface carries this MAC address")
+)
+
 // client talks to one NetBox instance.
 //
 // It is safe for concurrent use: every field is set at construction and read
@@ -80,7 +96,9 @@ func newClient(baseURL, token string, timeout time.Duration) *client {
 	return &client{
 		base: baseURL,
 		auth: authHeader(token),
-		hc:   &http.Client{Timeout: timeout},
+		// A backstop only: the caller puts the same duration on the request
+		// context, which is what bounds a lookup in normal operation.
+		hc: &http.Client{Timeout: timeout},
 	}
 }
 
@@ -90,16 +108,16 @@ func newClient(baseURL, token string, timeout time.Duration) *client {
 func parseBaseURL(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("invalid NetBox URL %q: %w", raw, err)
+		return "", fmt.Errorf("the NetBox URL %q does not parse: %w; use the root of the installation, such as https://netbox.example.com", raw, err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", fmt.Errorf("invalid NetBox URL %q: scheme must be http or https", raw)
+		return "", fmt.Errorf("the NetBox URL %q has no http or https scheme; write it as https://netbox.example.com, the root of the installation", raw)
 	}
 	if u.Host == "" {
-		return "", fmt.Errorf("invalid NetBox URL %q: missing host", raw)
+		return "", fmt.Errorf("the NetBox URL %q has no host; write it as https://netbox.example.com, with the host straight after the scheme", raw)
 	}
 	if u.RawQuery != "" || u.Fragment != "" {
-		return "", fmt.Errorf("invalid NetBox URL %q: must not carry a query or fragment", raw)
+		return "", fmt.Errorf("the NetBox URL %q carries a query or fragment; give the root URL only, the plugin appends the /api/ paths itself", raw)
 	}
 	return strings.TrimSuffix(u.String(), "/"), nil
 }
@@ -116,7 +134,7 @@ func parseBaseURL(raw string) (string, error) {
 // setup rather than silently allowed.
 func resolveToken(arg string) (string, error) {
 	if arg == "" {
-		return "", errors.New("API token cannot be empty")
+		return "", errors.New("the API token argument is empty; use token:env:NETBOX_TOKEN and export that variable before starting coredhcp")
 	}
 	if rest, ok := strings.CutPrefix(arg, tokenPrefix); ok {
 		return resolveTaggedToken(arg, rest)
@@ -136,7 +154,8 @@ func resolveTaggedToken(arg, rest string) (string, error) {
 		return resolveEnvToken(arg, name)
 	}
 	if rest == "" {
-		return "", fmt.Errorf("token argument %q needs a token or %sNAME after %q", arg, tokenEnvPrefix, tokenPrefix)
+		return "", fmt.Errorf("token argument %q has nothing after %q; use %s%sNETBOX_TOKEN, or %s<token> to give the value itself",
+			arg, tokenPrefix, tokenPrefix, tokenEnvPrefix, tokenPrefix)
 	}
 	return rest, nil
 }
@@ -146,11 +165,12 @@ func resolveTaggedToken(arg, rest string) (string, error) {
 // original argument, kept for error messages.
 func resolveEnvToken(arg, name string) (string, error) {
 	if name == "" {
-		return "", fmt.Errorf("token argument %q needs an environment variable name after %q", arg, tokenEnvPrefix)
+		return "", fmt.Errorf("token argument %q needs an environment variable name after %q; use %s%sNETBOX_TOKEN and export that variable",
+			arg, tokenEnvPrefix, tokenPrefix, tokenEnvPrefix)
 	}
 	token := os.Getenv(name)
 	if token == "" {
-		return "", fmt.Errorf("environment variable %s is unset or empty", name)
+		return "", fmt.Errorf("environment variable %s is unset or empty; export it with the NetBox API token before starting coredhcp", name)
 	}
 	return token, nil
 }
@@ -247,16 +267,13 @@ type ipAddress struct {
 }
 
 // lookup resolves mac to the addresses documented on the interface carrying
-// it. mac must already be canonical lowercase. A MAC that NetBox does not know,
-// or that is not assigned to an interface, is not an error: the result comes
-// back with found false.
+// it. mac must already be canonical lowercase. ErrNoInterface travels
+// straight up: whether that counts as an answer or a failure is a decision
+// for whoever caches the result.
 func (c *client) lookup(ctx context.Context, mac string) (lookupResult, error) {
 	ref, err := c.findInterface(ctx, mac)
 	if err != nil {
 		return lookupResult{}, err
-	}
-	if ref == nil {
-		return lookupResult{}, nil
 	}
 	return c.addressesFor(ctx, ref)
 }
@@ -279,7 +296,7 @@ func (c *client) findInterface(ctx context.Context, mac string) (*interfaceRef, 
 		}
 		log.Debugf("MAC address %s: skipping an entry assigned to %q", mac, page.Results[i].AssignedObjectType)
 	}
-	return nil, nil
+	return nil, fmt.Errorf("MAC address %s: %w", mac, ErrNoInterface)
 }
 
 // addressesFor collects the first active IPv4 and IPv6 address on ref. One
@@ -299,7 +316,8 @@ func (c *client) addressesFor(ctx context.Context, ref *interfaceRef) (lookupRes
 	for _, addr := range page.Results {
 		prefix, err := netip.ParsePrefix(addr.Address)
 		if err != nil {
-			log.Warningf("ignoring unparseable address %q on interface %s: %v", addr.Address, ref, err)
+			log.Warningf("ignoring the address %q on interface %s: %v; fix it in NetBox, an address there is written as CIDR such as 10.0.0.5/24",
+				addr.Address, ref, err)
 			continue
 		}
 		result.record(prefix)
@@ -311,14 +329,14 @@ func (c *client) addressesFor(ctx context.Context, ref *interfaceRef) (lookupRes
 func (c *client) get(ctx context.Context, path string, q url.Values, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path+"?"+q.Encode(), nil)
 	if err != nil {
-		return fmt.Errorf("building request for %s: %w", path, err)
+		return fmt.Errorf("building the request for %s failed: %w; check the NetBox URL on the netbox line", path, err)
 	}
 	req.Header.Set("Authorization", c.auth)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return fmt.Errorf("requesting %s: %w", path, err)
+		return fmt.Errorf("requesting %s failed: %w; check that NetBox is reachable from this server at the configured URL", path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -330,23 +348,34 @@ func (c *client) get(ctx context.Context, path string, q url.Values, out any) er
 	// while a longer one is recognisable as truncated.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
 	if err != nil {
-		return fmt.Errorf("reading response from %s: %w", path, err)
+		return fmt.Errorf("reading the response from %s failed: %w; check the network path to NetBox and any proxy in front of it", path, err)
 	}
 	if len(body) > maxBodyBytes {
-		return fmt.Errorf("response from %s is larger than %d bytes", path, maxBodyBytes)
+		return fmt.Errorf("the response from %s is larger than %d bytes; check the configured URL points at NetBox and not at something else", path, maxBodyBytes)
 	}
 	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("decoding response from %s: %w", path, err)
+		return fmt.Errorf("decoding the response from %s failed: %w; check the configured URL points at NetBox and not at a proxy or login page", path, err)
 	}
 	return nil
 }
 
-// statusError describes a non-2xx response. Authentication failures name the
-// token, since that is the one thing an operator can act on and the status
-// alone reads like a routing mistake.
+// statusError names the token on an authentication failure, since that is the
+// one thing an operator can act on and the status alone reads like a routing
+// mistake. Both paths are list endpoints and answer 200 with an empty page for
+// a filter matching nothing, so a 404 means the endpoint is not there at all:
+// either the configured URL points elsewhere, or this is a NetBox older than
+// 4.2, where MAC addresses were not yet a model of their own.
 func statusError(path string, code int) error {
-	if code == http.StatusUnauthorized || code == http.StatusForbidden {
-		return fmt.Errorf("%s returned HTTP %d, check the API token and its permissions", path, code)
+	switch {
+	case code == http.StatusUnauthorized || code == http.StatusForbidden:
+		return fmt.Errorf("%s returned HTTP %d: %w; check the API token and that it may read dcim.macaddress and ipam.ipaddress", path, code, ErrUnauthorized)
+	case code == http.StatusNotFound:
+		return fmt.Errorf("%s returned HTTP %d: %w; check the configured NetBox URL, and that NetBox is 4.2 or newer where MAC addresses are a model",
+			path, code, ErrNotFound)
+	case code >= http.StatusInternalServerError:
+		return fmt.Errorf("%s returned HTTP %d: %w; check the NetBox server and its own logs, the lookup is retried on the next request", path, code, ErrUnavailable)
+	default:
+		return fmt.Errorf("%s returned HTTP %d: %w; check what is answering at the configured URL, a proxy in front of NetBox is the usual cause",
+			path, code, ErrUnexpectedStatus)
 	}
-	return fmt.Errorf("%s returned HTTP %d", path, code)
 }

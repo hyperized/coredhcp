@@ -7,6 +7,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"net"
 
 	"github.com/insomniacslk/dhcp/dhcpv6"
@@ -49,7 +50,7 @@ func run(macString, ifname string) error {
 
 	mac, err := net.ParseMAC(macString)
 	if err != nil {
-		return err
+		return fmt.Errorf("%q is not a MAC address: %w; pass one as the first argument, such as 00:11:22:33:44:55", macString, err)
 	}
 	duid := dhcpv6.DUIDLLT{
 		HWType:        iana.HWTypeEthernet,

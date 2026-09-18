@@ -5,7 +5,9 @@
 package relayinfo_test
 
 import (
+	"context"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +26,16 @@ import (
 
 const clientMAC = "00:11:22:33:44:55"
 
+const (
+	v4Peer = "10.0.1.1:67"
+	v6Peer = "[::1]:547"
+)
+
+func ctxFromPeer(t *testing.T, peer string) context.Context {
+	t.Helper()
+	return handler.WithRequestInfo(t.Context(), handler.RequestInfo{Peer: netip.MustParseAddrPort(peer)})
+}
+
 // writeMappings writes a mapping file and returns the file: argument for it.
 func writeMappings(t *testing.T, contents string) string {
 	t.Helper()
@@ -32,16 +44,18 @@ func writeMappings(t *testing.T, contents string) string {
 	return "file:" + path
 }
 
-func handler4(t *testing.T, key, contents string) handler.Handler4 {
+func handler4(t *testing.T, key, contents string) handler.Handler4Ctx {
 	t.Helper()
-	h, err := relayinfo.Plugin.Setup4(writeMappings(t, contents), "key:"+key)
+	h, err := relayinfo.Plugin.Setup4Ctx(writeMappings(t, contents), "key:"+key, "allow", "10.0.1.1")
 	require.NoError(t, err)
 	return h
 }
 
-func handler6(t *testing.T, key, contents string) handler.Handler6 {
+// handler6 allows v6Peer, which is the net.IPv6loopback encapsulate6 builds
+// every fixture's relay from.
+func handler6(t *testing.T, key, contents string) handler.Handler6Ctx {
 	t.Helper()
-	h, err := relayinfo.Plugin.Setup6(writeMappings(t, contents), "key:"+key)
+	h, err := relayinfo.Plugin.Setup6Ctx(writeMappings(t, contents), "key:"+key, "allow", "::1")
 	require.NoError(t, err)
 	return h
 }
@@ -125,7 +139,7 @@ func TestHandler4Keys(t *testing.T) {
 			t.Run("matched", func(t *testing.T) {
 				req, resp := message4(t, dhcpv4.MessageTypeDiscover,
 					dhcpv4.OptGeneric(tc.code, []byte("rack4-sw1:eth3")))
-				result, stop := h(req, resp)
+				result, stop := h(ctxFromPeer(t, v4Peer), req, resp)
 				require.NotNil(t, result)
 				assert.True(t, stop, "a matched key ends the DHCPv4 chain")
 				assert.Equal(t, "192.0.2.31", result.YourIPAddr.String())
@@ -139,7 +153,7 @@ func TestHandler4Keys(t *testing.T) {
 				}
 				req, resp := message4(t, dhcpv4.MessageTypeDiscover,
 					dhcpv4.OptGeneric(other, []byte("rack4-sw1:eth3")))
-				result, stop := h(req, resp)
+				result, stop := h(ctxFromPeer(t, v4Peer), req, resp)
 				assert.False(t, stop)
 				assert.True(t, result.YourIPAddr.IsUnspecified())
 			})
@@ -178,15 +192,17 @@ func TestHandler4(t *testing.T) {
 			wantLease: time.Hour,
 		},
 		{name: "no relay agent information at all"},
-		{name: "relay agent information without a circuit-id",
-			subs: []dhcpv4.Option{dhcpv4.OptGeneric(dhcpv4.AgentRemoteIDSubOption, []byte("rack4-sw1:eth3"))}},
+		{
+			name: "relay agent information without a circuit-id",
+			subs: []dhcpv4.Option{dhcpv4.OptGeneric(dhcpv4.AgentRemoteIDSubOption, []byte("rack4-sw1:eth3"))},
+		},
 		{name: "circuit-id that is not mapped", subs: []dhcpv4.Option{circuit([]byte("rack9-sw1:eth1"))}},
 		{name: "empty circuit-id", subs: []dhcpv4.Option{circuit(nil)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := handler4(t, "circuit-id", mappings)
 			req, resp := message4(t, dhcpv4.MessageTypeDiscover, tc.subs...)
-			result, stop := h(req, resp)
+			result, stop := h(ctxFromPeer(t, v4Peer), req, resp)
 			require.NotNil(t, result)
 
 			if tc.wantAddr == "" {
@@ -216,18 +232,122 @@ func TestHandler4PassesThroughMessageTypes(t *testing.T) {
 	} {
 		t.Run(mt.String(), func(t *testing.T) {
 			req, resp := message4(t, mt, dhcpv4.OptGeneric(dhcpv4.AgentCircuitIDSubOption, []byte("rack4-sw1:eth3")))
-			result, stop := h(req, resp)
+			result, stop := h(ctxFromPeer(t, v4Peer), req, resp)
 			assert.False(t, stop)
 			require.NotNil(t, result)
 			assert.True(t, result.YourIPAddr.IsUnspecified())
 			assert.Zero(t, result.IPAddressLeaseTime(0))
 
 			req, _ = message4(t, mt, dhcpv4.OptGeneric(dhcpv4.AgentCircuitIDSubOption, []byte("rack4-sw1:eth3")))
-			result, stop = h(req, nil)
+			result, stop = h(ctxFromPeer(t, v4Peer), req, nil)
 			assert.False(t, stop)
 			assert.Nil(t, result)
 		})
 	}
+}
+
+// TestHandler4DropsUnallowedSource pins that the source check runs ahead of
+// passthrough4, so even a message type that would pass through is dropped.
+func TestHandler4DropsUnallowedSource(t *testing.T) {
+	h := handler4(t, "circuit-id", "rack4-sw1:eth3 192.0.2.31\n")
+
+	for _, mt := range []dhcpv4.MessageType{
+		dhcpv4.MessageTypeDiscover,
+		dhcpv4.MessageTypeInform,
+		dhcpv4.MessageTypeRelease,
+	} {
+		t.Run(mt.String(), func(t *testing.T) {
+			req, resp := message4(t, mt, dhcpv4.OptGeneric(dhcpv4.AgentCircuitIDSubOption, []byte("rack4-sw1:eth3")))
+			result, stop := h(ctxFromPeer(t, "10.0.9.9:67"), req, resp)
+			assert.Nil(t, result)
+			assert.True(t, stop, "a request from outside the allow list ends the chain")
+		})
+	}
+}
+
+func TestHandler4DropsWithNoRequestInfo(t *testing.T) {
+	h := handler4(t, "circuit-id", "rack4-sw1:eth3 192.0.2.31\n")
+	req, resp := message4(t, dhcpv4.MessageTypeDiscover, dhcpv4.OptGeneric(dhcpv4.AgentCircuitIDSubOption, []byte("rack4-sw1:eth3")))
+
+	result, stop := h(t.Context(), req, resp)
+	assert.Nil(t, result)
+	assert.True(t, stop)
+}
+
+func TestHandler4AllowsCIDRMember(t *testing.T) {
+	h, err := relayinfo.Plugin.Setup4Ctx(writeMappings(t, "rack4-sw1:eth3 192.0.2.31\n"), "key:circuit-id", "allow", "10.0.2.0/24")
+	require.NoError(t, err)
+
+	req, resp := message4(t, dhcpv4.MessageTypeDiscover, dhcpv4.OptGeneric(dhcpv4.AgentCircuitIDSubOption, []byte("rack4-sw1:eth3")))
+	result, stop := h(ctxFromPeer(t, "10.0.2.77:67"), req, resp)
+	require.NotNil(t, result)
+	assert.True(t, stop)
+	assert.Equal(t, "192.0.2.31", result.YourIPAddr.String())
+}
+
+// TestHandler4PassesRequestsWithoutRelayInformation pins where the allow list
+// stops applying: gating a client that presents no relay information would
+// stop a shared section from answering on-link clients at all.
+func TestHandler4PassesRequestsWithoutRelayInformation(t *testing.T) {
+	const onLink = "10.0.9.9:68"
+
+	for _, tc := range []struct {
+		name string
+		peer string
+	}{
+		{name: "a client with an address of its own", peer: onLink},
+		{name: "a client that has no address yet", peer: "0.0.0.0:68"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := handler4(t, "circuit-id", "rack4-sw1:eth3 192.0.2.31\n")
+			req, resp := message4(t, dhcpv4.MessageTypeDiscover)
+
+			result, stop := h(ctxFromPeer(t, tc.peer), req, resp)
+			require.NotNil(t, result, "an on-link request must not be dropped")
+			assert.False(t, stop, "the chain has to reach the plugin that serves this client")
+			assert.True(t, result.YourIPAddr.IsUnspecified(), "there is nothing here to map")
+		})
+	}
+
+	t.Run("the same source is dropped once it presents an option 82", func(t *testing.T) {
+		h := handler4(t, "circuit-id", "rack4-sw1:eth3 192.0.2.31\n")
+		req, resp := message4(t, dhcpv4.MessageTypeDiscover,
+			dhcpv4.OptGeneric(dhcpv4.AgentCircuitIDSubOption, []byte("rack4-sw1:eth3")))
+
+		result, stop := h(ctxFromPeer(t, onLink), req, resp)
+		assert.Nil(t, result, "a forged option 82 from off the allow list must be dropped")
+		assert.True(t, stop)
+	})
+}
+
+// TestHandler4GatesOnGiaddr pins that giaddr alone marks a request relayed:
+// a relay that sets it but stamps no option 82 still has to be in the list.
+func TestHandler4GatesOnGiaddr(t *testing.T) {
+	viaRelay := func(t *testing.T) (*dhcpv4.DHCPv4, *dhcpv4.DHCPv4) {
+		t.Helper()
+		req, resp := message4(t, dhcpv4.MessageTypeDiscover)
+		req.GatewayIPAddr = net.ParseIP("10.0.1.1")
+		return req, resp
+	}
+
+	t.Run("from outside the allow list it is dropped", func(t *testing.T) {
+		h := handler4(t, "circuit-id", "rack4-sw1:eth3 192.0.2.31\n")
+		req, resp := viaRelay(t)
+
+		result, stop := h(ctxFromPeer(t, "10.0.9.9:67"), req, resp)
+		assert.Nil(t, result)
+		assert.True(t, stop)
+	})
+
+	t.Run("from an allowed relay it passes on with no key to match", func(t *testing.T) {
+		h := handler4(t, "circuit-id", "rack4-sw1:eth3 192.0.2.31\n")
+		req, resp := viaRelay(t)
+
+		result, stop := h(ctxFromPeer(t, v4Peer), req, resp)
+		require.NotNil(t, result)
+		assert.False(t, stop)
+		assert.True(t, result.YourIPAddr.IsUnspecified())
+	})
 }
 
 func TestHandler6InterfaceID(t *testing.T) {
@@ -252,20 +372,24 @@ func TestHandler6InterfaceID(t *testing.T) {
 			wantLease: time.Hour,
 		},
 		{name: "no interface-id"},
-		{name: "interface-id that is not mapped",
-			opts: []dhcpv6.Option{dhcpv6.OptInterfaceID([]byte("rack9-sw1:eth1"))}},
+		{
+			name: "interface-id that is not mapped",
+			opts: []dhcpv6.Option{dhcpv6.OptInterfaceID([]byte("rack9-sw1:eth1"))},
+		},
 		{
 			// A relay is free to send an interface-id this long. It cannot be
 			// written in a mapping file, so it is passed on without a lookup.
 			name: "interface-id over the 255 byte limit",
 			opts: []dhcpv6.Option{dhcpv6.OptInterfaceID([]byte(strings.Repeat("a", 256)))},
 		},
-		{name: "a remote-id is not an interface-id",
-			opts: []dhcpv6.Option{&dhcpv6.OptRemoteID{EnterpriseNumber: 9, RemoteID: []byte("rack4-sw1:eth3")}}},
+		{
+			name: "a remote-id is not an interface-id",
+			opts: []dhcpv6.Option{&dhcpv6.OptRemoteID{EnterpriseNumber: 9, RemoteID: []byte("rack4-sw1:eth3")}},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req, resp := relayed6(t, tc.opts...)
-			result, stop := h(req, resp)
+			result, stop := h(ctxFromPeer(t, v6Peer), req, resp)
 			require.NotNil(t, result)
 			assert.False(t, stop, "the DHCPv6 chain always continues")
 
@@ -308,12 +432,14 @@ func TestHandler6RemoteID(t *testing.T) {
 			wantAddr: "2001:db8::41",
 		},
 		{name: "no remote-id", opts: []dhcpv6.Option{dhcpv6.OptInterfaceID([]byte("eth3"))}},
-		{name: "remote-id that is not mapped",
-			opts: []dhcpv6.Option{&dhcpv6.OptRemoteID{EnterpriseNumber: 4491, RemoteID: []byte{0x00}}}},
+		{
+			name: "remote-id that is not mapped",
+			opts: []dhcpv6.Option{&dhcpv6.OptRemoteID{EnterpriseNumber: 4491, RemoteID: []byte{0x00}}},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req, resp := relayed6(t, tc.opts...)
-			result, stop := h(req, resp)
+			result, stop := h(ctxFromPeer(t, v6Peer), req, resp)
 			require.NotNil(t, result)
 			assert.False(t, stop)
 
@@ -339,7 +465,7 @@ func TestHandler6NestedRelays(t *testing.T) {
 	access := encapsulate6(t, inner, dhcpv6.OptInterfaceID([]byte("access-sw:eth3")))
 	aggregation := encapsulate6(t, access, dhcpv6.OptInterfaceID([]byte("aggregation:xe-0/0/1")))
 
-	result, stop := h(aggregation, resp)
+	result, stop := h(ctxFromPeer(t, v6Peer), aggregation, resp)
 	require.NotNil(t, result)
 	assert.False(t, stop)
 	assert.Equal(t, "2001:db8::52", requireIAAddr(t, result).IPv6Addr.String())
@@ -358,7 +484,7 @@ func TestHandler6PassesThrough(t *testing.T) {
 				require.NoError(t, err)
 				resp.MessageType = dhcpv6.MessageTypeReply
 
-				result, stop := h(encapsulate6(t, inner, iid), resp)
+				result, stop := h(ctxFromPeer(t, v6Peer), encapsulate6(t, inner, iid), resp)
 				require.NotNil(t, result)
 				assert.False(t, stop)
 				assert.Nil(t, result.GetOneOption(dhcpv6.OptionIANA))
@@ -373,7 +499,7 @@ func TestHandler6PassesThrough(t *testing.T) {
 		require.NoError(t, err)
 		resp.MessageType = dhcpv6.MessageTypeAdvertise
 
-		result, stop := h(encapsulate6(t, inner, iid), resp)
+		result, stop := h(ctxFromPeer(t, v6Peer), encapsulate6(t, inner, iid), resp)
 		require.NotNil(t, result)
 		assert.False(t, stop)
 		assert.Nil(t, result.GetOneOption(dhcpv6.OptionIANA))
@@ -384,20 +510,67 @@ func TestHandler6PassesThrough(t *testing.T) {
 		resp, err := dhcpv6.NewAdvertiseFromSolicit(inner)
 		require.NoError(t, err)
 
-		result, stop := h(inner, resp)
+		result, stop := h(ctxFromPeer(t, v6Peer), inner, resp)
 		require.NotNil(t, result)
+		assert.False(t, stop)
+		assert.Nil(t, result.GetOneOption(dhcpv6.OptionIANA))
+	})
+
+	t.Run("a non-relayed request from outside the allow list still passes", func(t *testing.T) {
+		inner := solicit6(t)
+		resp, err := dhcpv6.NewAdvertiseFromSolicit(inner)
+		require.NoError(t, err)
+
+		result, stop := h(ctxFromPeer(t, "[2001:db8:bad::1]:547"), inner, resp)
+		require.NotNil(t, result, "an on-link DHCPv6 client must not be dropped")
 		assert.False(t, stop)
 		assert.Nil(t, result.GetOneOption(dhcpv6.OptionIANA))
 	})
 
 	t.Run("malformed relay message", func(t *testing.T) {
 		// A RelayMessage with no embedded OptionRelayMsg makes
-		// GetInnerMessage fail, which drops the request.
+		// GetInnerMessage fail, which drops the request. The peer still has
+		// to be allowed, or the source check would drop it first for an
+		// unrelated reason and the decapsulation path would never run.
 		req := &dhcpv6.RelayMessage{MessageType: dhcpv6.MessageTypeRelayForward}
-		result, stop := h(req, nil)
+		result, stop := h(ctxFromPeer(t, v6Peer), req, nil)
 		assert.Nil(t, result)
 		assert.True(t, stop)
 	})
+}
+
+// TestHandler6DropsUnallowedSource pins that the source check runs ahead of
+// both the release/decline passthrough and the ordinary match path.
+func TestHandler6DropsUnallowedSource(t *testing.T) {
+	h := handler6(t, "interface-id", "rack4-sw1:eth3 2001:db8::31\n")
+	iid := dhcpv6.OptInterfaceID([]byte("rack4-sw1:eth3"))
+
+	t.Run("solicit", func(t *testing.T) {
+		req, resp := relayed6(t, iid)
+		result, stop := h(ctxFromPeer(t, "[2001:db8::99]:547"), req, resp)
+		assert.Nil(t, result)
+		assert.True(t, stop, "a request from outside the allow list ends the chain")
+	})
+
+	t.Run("release", func(t *testing.T) {
+		inner := solicit6(t)
+		inner.MessageType = dhcpv6.MessageTypeRelease
+		resp, err := dhcpv6.NewMessage()
+		require.NoError(t, err)
+
+		result, stop := h(ctxFromPeer(t, "[2001:db8::99]:547"), encapsulate6(t, inner, iid), resp)
+		assert.Nil(t, result)
+		assert.True(t, stop)
+	})
+}
+
+func TestHandler6DropsWithNoRequestInfo(t *testing.T) {
+	h := handler6(t, "interface-id", "rack4-sw1:eth3 2001:db8::31\n")
+	req, resp := relayed6(t, dhcpv6.OptInterfaceID([]byte("rack4-sw1:eth3")))
+
+	result, stop := h(t.Context(), req, resp)
+	assert.Nil(t, result)
+	assert.True(t, stop)
 }
 
 func TestSetupErrors(t *testing.T) {
@@ -408,19 +581,44 @@ func TestSetupErrors(t *testing.T) {
 		args    []string
 		errText string
 	}{
-		{name: "no arguments", errText: "need a mapping file"},
-		{name: "no key", args: []string{"file:ports.txt"}, errText: "need a key to match on"},
-		{name: "unknown argument", args: []string{"file:ports.txt", "key:circuit-id", "reload"},
-			errText: "unexpected argument `reload`"},
-		{name: "a DHCPv6 key in a server4 section", args: []string{"file:ports.txt", "key:interface-id"},
-			errText: "unknown DHCPv4 key `interface-id`"},
-		{name: "misspelled key", args: []string{"file:ports.txt", "key:circuitid"},
-			errText: "unknown DHCPv4 key `circuitid`"},
-		{name: "missing file", args: []string{"file:/nonexistent/ports.txt", "key:circuit-id"},
-			errText: "no such file or directory"},
+		{name: "no arguments", errText: "no mapping file given"},
+		{name: "no key", args: []string{"file:ports.txt"}, errText: "no key given"},
+		{
+			name: "unknown argument", args: []string{"file:ports.txt", "key:circuit-id", "reload"},
+			errText: `argument "reload" is not recognised`,
+		},
+		{
+			name: "no allow list", args: []string{"file:ports.txt", "key:circuit-id"},
+			errText: "no relay allow list given",
+		},
+		{
+			name:    "allow list has no entry of this family",
+			args:    []string{"file:ports.txt", "key:circuit-id", "allow", "::1"},
+			errText: "the allow list has no entry for DHCPv4",
+		},
+		{
+			name:    "malformed address after allow",
+			args:    []string{"file:ports.txt", "key:circuit-id", "allow", "not-an-address"},
+			errText: `allow list entry "not-an-address" does not parse`,
+		},
+		{
+			name:    "a DHCPv6 key in a server4 section",
+			args:    []string{"file:ports.txt", "key:interface-id", "allow", "10.0.1.1"},
+			errText: `DHCPv4 key "interface-id" is not recognised`,
+		},
+		{
+			name:    "misspelled key",
+			args:    []string{"file:ports.txt", "key:circuitid", "allow", "10.0.1.1"},
+			errText: `DHCPv4 key "circuitid" is not recognised`,
+		},
+		{
+			name:    "missing file",
+			args:    []string{"file:/nonexistent/ports.txt", "key:circuit-id", "allow", "10.0.1.1"},
+			errText: "no such file or directory",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h, err := relayinfo.Plugin.Setup4(tc.args...)
+			h, err := relayinfo.Plugin.Setup4Ctx(tc.args...)
 			require.Error(t, err)
 			assert.Nil(t, h)
 			assert.Contains(t, err.Error(), tc.errText)
@@ -428,26 +626,26 @@ func TestSetupErrors(t *testing.T) {
 	}
 
 	t.Run("a DHCPv4 key in a server6 section", func(t *testing.T) {
-		h, err := relayinfo.Plugin.Setup6(writeMappings(t, valid), "key:subscriber-id")
+		h, err := relayinfo.Plugin.Setup6Ctx(writeMappings(t, valid), "key:subscriber-id", "allow", "::1")
 		require.Error(t, err)
 		assert.Nil(t, h)
-		assert.Contains(t, err.Error(), "unknown DHCPv6 key `subscriber-id`")
+		assert.Contains(t, err.Error(), `DHCPv6 key "subscriber-id" is not recognised`)
 	})
 
 	t.Run("the parse error names the file and the line", func(t *testing.T) {
 		fileArg := writeMappings(t, "rack4-sw1:eth3 192.0.2.31\nrack4-sw1:eth4 not-an-address\n")
-		h, err := relayinfo.Plugin.Setup4(fileArg, "key:circuit-id")
+		h, err := relayinfo.Plugin.Setup4Ctx(fileArg, "key:circuit-id", "allow", "10.0.1.1")
 		require.Error(t, err)
 		assert.Nil(t, h)
 		assert.Contains(t, err.Error(), strings.TrimPrefix(fileArg, "file:"))
-		assert.Contains(t, err.Error(), "line 2: expected an IPv4 address")
+		assert.Contains(t, err.Error(), `line 2: "not-an-address" is not an IP address`)
 	})
 
 	t.Run("a mapping file for the other family", func(t *testing.T) {
-		h, err := relayinfo.Plugin.Setup6(writeMappings(t, valid), "key:interface-id")
+		h, err := relayinfo.Plugin.Setup6Ctx(writeMappings(t, valid), "key:interface-id", "allow", "::1")
 		require.Error(t, err)
 		assert.Nil(t, h)
-		assert.Contains(t, err.Error(), "expected an IPv6 address")
+		assert.Contains(t, err.Error(), "192.0.2.31 is not an IPv6 address")
 	})
 }
 
@@ -466,14 +664,14 @@ func TestAutorefresh(t *testing.T) {
 	require.NoError(t, logger.WithFile(logPath))
 	t.Cleanup(func() { _ = logger.WithFile(os.DevNull) })
 
-	h, err := relayinfo.Plugin.Setup4("file:"+path, "key:circuit-id", "autorefresh")
+	h, err := relayinfo.Plugin.Setup4Ctx("file:"+path, "key:circuit-id", "allow", "10.0.1.1", "autorefresh")
 	require.NoError(t, err)
 
 	resolves := func(key string) func() bool {
 		return func() bool {
 			req, resp := message4(t, dhcpv4.MessageTypeDiscover,
 				dhcpv4.OptGeneric(dhcpv4.AgentCircuitIDSubOption, []byte(key)))
-			result, _ := h(req, resp)
+			result, _ := h(ctxFromPeer(t, v4Peer), req, resp)
 			return !result.YourIPAddr.IsUnspecified()
 		}
 	}
@@ -493,7 +691,7 @@ func TestAutorefresh(t *testing.T) {
 	overwrite(t, path, "port-1 this-is-not-an-address\n")
 	require.Eventually(t, func() bool {
 		data, err := os.ReadFile(logPath)
-		return err == nil && strings.Contains(string(data), "failed to refresh from")
+		return err == nil && strings.Contains(string(data), "the mappings already loaded stay in force")
 	}, 5*time.Second, 20*time.Millisecond, "expected a refresh-failure warning to be logged")
 	assert.True(t, resolves("port-1")(), "a mapping must keep resolving after a bad reload")
 	assert.True(t, resolves("port-2")(), "a mapping must keep resolving after a bad reload")
@@ -503,6 +701,35 @@ func TestAutorefresh(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("port-1 192.0.2.31\nport-3 192.0.2.33\n"), 0o600))
 	require.Eventually(t, resolves("port-3"), 5*time.Second, 20*time.Millisecond,
 		"autorefresh did not recover after a bad reload")
+}
+
+// TestAutorefreshSurvivesRename pins the directory watch: replacing the file
+// by renaming a new one over it leaves a watch on the file itself following
+// the old inode into nowhere.
+func TestAutorefreshSurvivesRename(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ports.txt")
+	require.NoError(t, os.WriteFile(path, []byte("port-1 192.0.2.31\n"), 0o600))
+
+	h, err := relayinfo.Plugin.Setup4Ctx("file:"+path, "key:circuit-id", "allow", "10.0.1.1", "autorefresh")
+	require.NoError(t, err)
+
+	resolves := func(key string) func() bool {
+		return func() bool {
+			req, resp := message4(t, dhcpv4.MessageTypeDiscover,
+				dhcpv4.OptGeneric(dhcpv4.AgentCircuitIDSubOption, []byte(key)))
+			result, _ := h(ctxFromPeer(t, v4Peer), req, resp)
+			return !result.YourIPAddr.IsUnspecified()
+		}
+	}
+	require.True(t, resolves("port-1")(), "the initial mapping must resolve right after setup")
+
+	replacement := filepath.Join(dir, "ports.txt.new")
+	require.NoError(t, os.WriteFile(replacement, []byte("port-1 192.0.2.31\nport-2 192.0.2.32\n"), 0o600))
+	require.NoError(t, os.Rename(replacement, path))
+
+	require.Eventually(t, resolves("port-2"), 5*time.Second, 20*time.Millisecond,
+		"autorefresh did not pick up the mapping after the file was renamed over")
 }
 
 // overwrite replaces the start of path with data without truncating it, so a

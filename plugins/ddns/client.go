@@ -5,6 +5,7 @@
 package ddns
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -31,6 +32,11 @@ var (
 
 	// ErrRCode is an answer the server refused, carrying its reason.
 	ErrRCode = errors.New("ddns: server refused the update")
+
+	// ErrPrereq is a refusal that says a prerequisite did not hold. The
+	// claim path asks for it on purpose: it is how the server answers
+	// "someone else already has this name".
+	ErrPrereq = fmt.Errorf("%w: a prerequisite did not hold", ErrRCode)
 )
 
 const (
@@ -48,40 +54,48 @@ const (
 
 // exchange sends one signed message to the configured server and returns the
 // answer.
-func (p *pluginState) exchange(msg []byte) ([]byte, error) {
-	//nolint:gosec // G704: the address is operator configuration, not user
-	// input. applyServer has already held it to a literal IP address and a
-	// port in range, and nothing out of a DHCP packet reaches it.
-	conn, err := net.DialTimeout("udp", p.server, p.timeout)
+//
+// ctx is the instance's lifetime, not one update's, so a worker being shut
+// down gives up rather than sitting out a connect or a retry.
+func (p *pluginState) exchange(ctx context.Context, msg []byte) ([]byte, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+	// The address is operator configuration, not user input: applyServer has
+	// already held it to a literal IP address and a port in range.
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(dialCtx, "udp", p.server)
 	if err != nil {
-		return nil, fmt.Errorf("dialling %s: %w", p.server, err)
+		return nil, fmt.Errorf("dialling %s: %w; check the server: address and that nothing blocks UDP to it", p.server, err)
 	}
 	defer func() { _ = conn.Close() }()
-	return p.roundTrip(conn, msg)
+	return p.roundTrip(ctx, conn, msg)
 }
 
 // roundTrip writes msg and reads one answer, retrying once when the read
 // times out. A read that fails for any other reason is not retried: a refused
 // port or a closed socket will not answer the second datagram either.
-func (p *pluginState) roundTrip(conn net.Conn, msg []byte) ([]byte, error) {
+func (p *pluginState) roundTrip(ctx context.Context, conn net.Conn, msg []byte) ([]byte, error) {
 	buf := make([]byte, maxResponse)
 	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("giving up on %s: %w", p.server, err)
+		}
 		if err := conn.SetDeadline(time.Now().Add(p.timeout)); err != nil {
 			return nil, fmt.Errorf("setting the deadline: %w", err)
 		}
 		if _, err := conn.Write(msg); err != nil {
-			return nil, fmt.Errorf("sending to %s: %w", p.server, err)
+			return nil, fmt.Errorf("sending to %s: %w; check the route to the name server", p.server, err)
 		}
 		n, err := conn.Read(buf)
 		if err == nil {
 			return buf[:n], nil
 		}
 		if !errors.Is(err, os.ErrDeadlineExceeded) {
-			return nil, fmt.Errorf("reading from %s: %w", p.server, err)
+			return nil, fmt.Errorf("reading from %s: %w; check the name server is listening on that address and port", p.server, err)
 		}
 		log.Debugf("%s did not answer within %s, attempt %d of %d", p.server, p.timeout, attempt, attempts)
 	}
-	return nil, fmt.Errorf("%w %s after %d attempts", ErrNoAnswer, p.server, attempts)
+	return nil, fmt.Errorf("%w %s after %d attempts; check the name server is running and reachable, or raise timeout:<duration>", ErrNoAnswer, p.server, attempts)
 }
 
 // checkResponse decides whether an answer says what it appears to say.
@@ -99,7 +113,8 @@ func (p *pluginState) checkResponse(resp, requestMAC []byte, requestID uint16) e
 		return fmt.Errorf("parsing the response: %w", err)
 	}
 	if hdr.ID != requestID {
-		return fmt.Errorf("%w: asked with id %d, answered with %d", ErrResponseID, requestID, hdr.ID)
+		return fmt.Errorf("%w: asked with id %d, answered with %d; the update was dropped, check what else is answering on the path to the server",
+			ErrResponseID, requestID, hdr.ID)
 	}
 	if hdr.Truncated {
 		return ErrTruncated
@@ -118,9 +133,31 @@ func (p *pluginState) checkResponse(resp, requestMAC []byte, requestID uint16) e
 		return err
 	}
 	if hdr.RCode != dnsmessage.RCodeSuccess {
-		return fmt.Errorf("%w: %s", ErrRCode, rcodeName(hdr.RCode))
+		return refusal(hdr.RCode)
 	}
 	return nil
+}
+
+// The two codes an UPDATE comes back with when a prerequisite did not hold
+// (RFC 2136 section 3.2): YXRRSET for an RRset the message required to be
+// absent and is not, NXRRSET for one it required to be present and is not.
+const (
+	rcodeYXRRSET = dnsmessage.RCode(7)
+	rcodeNXRRSET = dnsmessage.RCode(8)
+)
+
+func refusal(code dnsmessage.RCode) error {
+	if code == rcodeYXRRSET || code == rcodeNXRRSET {
+		return fmt.Errorf("%w: %s", ErrPrereq, rcodeName(code))
+	}
+	return fmt.Errorf("%w: %s", ErrRCode, rcodeName(code))
+}
+
+// prereqFailed reports whether err is the server saying a prerequisite did
+// not hold. Every other failure, no answer at all included, reads as "we do
+// not know what is at that name" and leaves it alone.
+func prereqFailed(err error) bool {
+	return errors.Is(err, ErrPrereq)
 }
 
 // rcodes names the response codes an UPDATE can come back with. dnsmessage

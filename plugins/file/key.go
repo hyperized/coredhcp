@@ -67,7 +67,7 @@ func parseKeyMode(raw string) (keyMode, error) {
 			return k.mode, nil
 		}
 	}
-	return keyMAC, fmt.Errorf("unknown key %q, want one of mac, duid, client-id", raw)
+	return keyMAC, fmt.Errorf("key %q is not recognised; use key:mac, key:duid or key:client-id, or leave it out for the default of key:mac", raw)
 }
 
 // labelArgs names each identifier for the log lines the handlers write. The
@@ -90,9 +90,9 @@ func (m keyMode) label() any {
 func (m keyMode) checkFamily(v6 bool) error {
 	switch {
 	case m == keyDUID && !v6:
-		return errors.New("key:duid works under server6 only, a DHCPv4 client has no DUID")
+		return errors.New("key:duid works under server6 only, a DHCPv4 client has no DUID; use key:client-id here, or leave it out for the default of key:mac")
 	case m == keyClientID && v6:
-		return errors.New("key:client-id works under server4 only, DHCPv6 has no option 61")
+		return errors.New("key:client-id works under server4 only, DHCPv6 has no option 61; use key:duid here, or leave it out for the default of key:mac")
 	default:
 		return nil
 	}
@@ -116,7 +116,7 @@ func (m keyMode) parseKeyField(field string) (string, error) {
 func parseMACField(field string) (string, error) {
 	hwaddr, err := net.ParseMAC(field)
 	if err != nil {
-		return "", fmt.Errorf("malformed hardware address: %s", field)
+		return "", fmt.Errorf("%q is not a MAC address; write the line as <mac> <ip>, for example 00:11:22:33:44:55 10.0.0.5", field)
 	}
 	// net.HardwareAddr.String() writes lowercase hexadecimal, so the key
 	// needs no further folding.
@@ -127,10 +127,10 @@ func parseMACField(field string) (string, error) {
 func parseDUIDField(field string) (string, error) {
 	raw, err := parseHexBytes(field)
 	if err != nil {
-		return "", fmt.Errorf("malformed DUID: %s", field)
+		return "", fmt.Errorf("%q is not a DUID; write it as hex with the two-octet type code first, for example 0x00030001aabbccddeeff", field)
 	}
 	if len(raw) > maxDUIDLen {
-		return "", fmt.Errorf("DUID is %d octets, at most %d are allowed: %s", len(raw), maxDUIDLen, field)
+		return "", fmt.Errorf("DUID %q is %d octets, over the %d octet maximum; check the value, RFC 8415 caps a DUID at 128 octets plus its type code", field, len(raw), maxDUIDLen)
 	}
 	return hex.EncodeToString(raw), nil
 }
@@ -143,13 +143,13 @@ func parseDUIDField(field string) (string, error) {
 func parseClientIDField(field string) (string, error) {
 	if text, ok := strings.CutPrefix(field, textPrefix); ok {
 		if text == "" {
-			return "", fmt.Errorf("empty %s client identifier: %s", textPrefix, field)
+			return "", fmt.Errorf("%q has nothing after %s; write the identifier after it, for example text:printer-2nd-floor", field, textPrefix)
 		}
 		return hex.EncodeToString([]byte(text)), nil
 	}
 	raw, err := parseHexBytes(field)
 	if err != nil {
-		return "", fmt.Errorf("malformed client identifier: %s", field)
+		return "", fmt.Errorf("%q is not a client identifier; write it as hex, for example 0x01aabbccddeeff, or as text with the text: prefix", field)
 	}
 	return hex.EncodeToString(raw), nil
 }

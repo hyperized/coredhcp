@@ -10,6 +10,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/coredhcp/coredhcp/config"
 	"github.com/coredhcp/coredhcp/events"
 )
 
@@ -26,14 +27,21 @@ const maxArgsW = 40
 // tend to be credentials taken out. The events package warns that arguments
 // may hold secrets, and this pane is the one place they would otherwise end up
 // on a shared screen.
+//
+// config.RedactArgs runs first for parity with the startup log, then the local
+// pass catches what it leaves alone, such as a hex key too short to be a
+// NetBox token. Redacting twice is harmless, and the pane cannot tell whether
+// the server already did it.
 func redactArgs(args []string) string {
 	if len(args) == 0 {
 		return ""
 	}
 
-	out := make([]string, 0, len(args))
-	for _, a := range args {
-		out = append(out, redactArg(a))
+	// RedactArgs returns a slice of its own, so the second pass may write over
+	// it without touching the caller's.
+	out := config.RedactArgs(args)
+	for i, a := range out {
+		out[i] = redactArg(a)
 	}
 
 	return strings.Join(out, " ")
@@ -64,22 +72,23 @@ func redactUserinfo(a string) string {
 
 	rest := a[scheme+3:]
 
-	at := strings.IndexByte(rest, '@')
-	if at < 0 {
+	userinfo, host, ok := strings.Cut(rest, "@")
+	if !ok {
 		return a
 	}
 
-	userinfo := rest[:at]
+	// An @ after the authority belongs to the path or the query, not to a
+	// userinfo that was never there.
 	if strings.ContainsAny(userinfo, "/?#") {
 		return a
 	}
 
-	colon := strings.IndexByte(userinfo, ':')
-	if colon < 0 {
+	user, _, ok := strings.Cut(userinfo, ":")
+	if !ok {
 		return a
 	}
 
-	return a[:scheme+3] + userinfo[:colon] + ":***@" + rest[at+1:]
+	return a[:scheme+3] + user + ":***@" + host
 }
 
 // tagged is one coloured piece of a right hand column, kept as data so the

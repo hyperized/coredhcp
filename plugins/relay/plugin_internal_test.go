@@ -150,22 +150,22 @@ func TestSetupState(t *testing.T) {
 		{
 			name:        "invalid release-check value",
 			args:        []string{"allow", "10.0.1.1", "release-check:maybe"},
-			wantErrText: `invalid release-check value "maybe"`,
+			wantErrText: `release-check value "maybe" is neither`,
 		},
 		{
 			name:        "invalid address",
 			args:        []string{"allow", "not-an-address"},
-			wantErrText: `invalid address "not-an-address"`,
+			wantErrText: `allow list entry "not-an-address" does not parse`,
 		},
 		{
 			name:        "invalid prefix",
 			args:        []string{"allow", "10.0.0.0/99"},
-			wantErrText: `invalid prefix "10.0.0.0/99"`,
+			wantErrText: `allow list prefix "10.0.0.0/99" does not parse`,
 		},
 		{
 			name:        "zoned prefix",
 			args:        []string{"allow", "fe80::1%eth0/64"},
-			wantErrText: `invalid prefix "fe80::1%eth0/64"`,
+			wantErrText: `allow list prefix "fe80::1%eth0/64" does not parse`,
 		},
 		{
 			name:        "IPv4-mapped address",
@@ -194,7 +194,7 @@ func TestSetupState(t *testing.T) {
 				require.Error(t, err)
 				assert.Nil(t, p)
 				if tc.wantErr != nil {
-					assert.ErrorIs(t, err, tc.wantErr)
+					require.ErrorIs(t, err, tc.wantErr)
 				}
 				if tc.wantErrText != "" {
 					assert.Contains(t, err.Error(), tc.wantErrText)
@@ -370,13 +370,11 @@ func TestLogDropIsConcurrencySafe(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 16 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 64 {
 				p.logDrop(reasonPeerNotAllowed, "source %s", "fe80::1")
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

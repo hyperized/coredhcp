@@ -17,13 +17,13 @@ import (
 func TestSetup4InvalidValue(t *testing.T) {
 	_, err := autoconfigure.Plugin.Setup4("bogus")
 	require.Error(t, err)
-	require.EqualError(t, err, "unexpected value 'bogus' for autoconfigure argument")
+	require.ErrorContains(t, err, `"bogus" is not an autoconfigure value`)
 }
 
 func TestSetup4TooManyArguments(t *testing.T) {
 	_, err := autoconfigure.Plugin.Setup4("1", "extra")
 	require.Error(t, err)
-	require.EqualError(t, err, "too many arguments")
+	require.ErrorContains(t, err, "autoconfigure takes at most one")
 }
 
 func newOfferStub(t *testing.T, req *dhcpv4.DHCPv4) *dhcpv4.DHCPv4 {

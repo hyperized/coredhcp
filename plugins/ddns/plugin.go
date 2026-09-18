@@ -14,10 +14,10 @@
 //
 //	server4:
 //	  plugins:
-//	    - ddns: server:10.0.0.53 zone:home.lan key:ddns-key:env:TSIG_KEY algo:hmac-sha256 ttl:300 reverse:10.0.0.0/24 timeout:2s queue:1000
+//	    - ddns: server:10.0.0.53 zone:home.lan key:ddns-key:env:TSIG_KEY algo:hmac-sha256 ttl:300 reverse:10.0.0.0/24 protect:gateway,ns timeout:2s queue:1000
 //
 // Arguments are key:value pairs in any order. Each may be given once, except
-// reverse:, which may be repeated to cover several networks.
+// reverse: and protect:, which may be repeated.
 //
 // Three are required:
 //
@@ -51,16 +51,21 @@
 //   - queue:<n> is how many updates may be waiting at once, 1000 by default.
 //   - remove-on-release:on|off decides whether a DHCPRELEASE withdraws the
 //     records again. It defaults to on.
+//   - protect:<name>[,<name>...] names hosts this plugin will never write,
+//     in either direction. A bare label is taken as a name under the zone; a
+//     fully qualified one has to sit under it. Use it for names that have to
+//     keep meaning what they mean, such as gateway, vpn or ns.
 //
 // # Behaviour
 //
 // A DHCPv4 ACK with an address and a usable host name, or a DHCPv6 Reply with
-// addresses and an FQDN option, becomes two changes in one message: delete
-// every A (or AAAA) record at the name, then add the lease. Both travel in
-// the same update section, which RFC 2136 applies as one transaction, so a
-// client that moves to a new address never has two records at once. When the
-// address falls inside a reverse: network, a second message replaces the PTR
-// in that zone. A DHCPRELEASE removes the records again.
+// addresses and an FQDN option, becomes one message: delete every A (or AAAA)
+// record at the name, add the lease, and add the DHCID that says whose name
+// it now is. They travel in a single update section, which RFC 2136 applies
+// as one transaction, so a client that moves to a new address never has two
+// records at once. When the address falls inside a reverse: network, a
+// second message replaces the PTR in that zone. A DHCPRELEASE takes the
+// records away again.
 //
 // The name a client asks for is the FQDN option -- 81 for DHCPv4, 39 for
 // DHCPv6 -- and falls back to option 12 for DHCPv4. Both FQDN options have a
@@ -71,6 +76,41 @@
 // configured zone. Every packet field here is written by whoever is on the
 // segment, so a name that does not pass is dropped with a line in the debug
 // log rather than being cleaned up and written anyway.
+//
+// # Who holds a name
+//
+// Every name this plugin writes carries a DHCID record (RFC 4701) that
+// identifies the client it was written for, and every update is sent under
+// the prerequisites of RFC 4703 section 5.3, so a laptop calling itself vpn
+// is refused by the name server instead of taking vpn.<zone> from whatever
+// was there.
+//
+// A name that carries no DHCID is held by nobody, and the first client to
+// ask for it gets it. That covers records an operator wrote by hand and
+// records this plugin itself wrote before it started sending DHCIDs, which
+// is worth knowing when upgrading. protect: is how a name is kept out of
+// reach of that.
+//
+// A DHCID is not a secret either: it is a digest of a hardware address or a
+// DUID, both of which travel in the clear, so anyone watching the segment
+// can put another client's identity in a packet. What this rules out is a
+// client taking a name under its own identity; a forged one is a link-layer
+// problem, for port security or DHCP snooping.
+//
+// # Releases
+//
+// A DHCPRELEASE is not authenticated and is never answered. This instance
+// keeps a register in memory of the names it wrote, for which client and at
+// which addresses, and a release that does not match it is dropped on the
+// packet path with nothing sent. What gets past that is sent as a delete
+// under the prerequisite that the DHCID at the name is still the releasing
+// client's.
+//
+// The register does not survive a restart, and it is bounded, so it forgets
+// the oldest names once it is full. A release naming a name it has forgotten
+// is ignored until the client renews, which leaves a record standing for at
+// most one lease time. That is the deliberate direction to fail in: a record
+// that lingers costs less than a name anyone can delete by asking.
 //
 // # Placement
 //
@@ -117,6 +157,7 @@
 package ddns
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -156,6 +197,7 @@ const (
 	timeoutArg = "timeout:"
 	queueArg   = "queue:"
 	removeArg  = "remove-on-release:"
+	protectArg = "protect:"
 
 	// envPrefix marks a secret that names an environment variable instead of
 	// carrying the key material in the configuration file.
@@ -206,12 +248,16 @@ type settings struct {
 	timeout         time.Duration
 	queueLen        int
 	removeOnRelease bool
+	protect         map[string]bool
 
 	// The key is built from three arguments that may arrive in any order, so
-	// its parts are held here until every argument has been read.
-	keyName   string
-	keySecret []byte
-	algo      string
+	// its parts are held here until every argument has been read. The same
+	// goes for protect:, whose names are only resolvable once the zone is
+	// known.
+	keyName    string
+	keySecret  []byte
+	algo       string
+	protectRaw []string
 }
 
 // pluginState is one configured instance of the plugin.
@@ -227,6 +273,18 @@ type pluginState struct {
 	stop     chan struct{}
 	done     chan struct{}
 	stopOnce sync.Once
+
+	// ctx is this instance's lifetime rather than one update's, because the
+	// plugin API hands a handler no context of the instance's lifetime, only
+	// one per request. Cancelling it lets a dial or a retry in flight give up
+	// instead of running its own timeout out first.
+	//nolint:containedctx // scoped to the instance, not to a request
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// owners is the register of names this instance wrote, which is what a
+	// DHCPRELEASE is weighed against before anything is sent.
+	owners *owners
 
 	stats counters
 	drops dropLog
@@ -280,11 +338,15 @@ func newPluginState(args ...string) (*pluginState, error) {
 	if err != nil {
 		return nil, err
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &pluginState{
 		settings: *s,
 		queue:    make(chan job, s.queueLen),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
+		ctx:      ctx,
+		cancel:   cancel,
+		owners:   newOwners(maxOwners),
 	}, nil
 }
 
@@ -304,6 +366,7 @@ var optionParsers = []struct {
 	{timeoutArg, applyTimeout, false},
 	{queueArg, applyQueue, false},
 	{removeArg, applyRemove, false},
+	{protectArg, applyProtect, true},
 }
 
 // parseArgs turns the configuration line into settings, applying the defaults
@@ -337,12 +400,12 @@ func applyOption(s *settings, arg string, seen map[string]bool) error {
 			continue
 		}
 		if seen[o.prefix] && !o.repeat {
-			return fmt.Errorf("%s given more than once", strings.TrimSuffix(o.prefix, ":"))
+			return fmt.Errorf("%s is given more than once; keep one and remove the rest", strings.TrimSuffix(o.prefix, ":"))
 		}
 		seen[o.prefix] = true
 		return o.apply(s, raw)
 	}
-	return fmt.Errorf("unknown argument %q, want one of %s", arg, knownArgs())
+	return fmt.Errorf("argument %q is not one this plugin takes; use one of %s", arg, knownArgs())
 }
 
 // knownArgs lists the argument prefixes for an error message.
@@ -359,18 +422,37 @@ func knownArgs() string {
 func (s *settings) finish() error {
 	switch {
 	case s.server == "":
-		return fmt.Errorf("%s<ip> is required", serverArg)
+		return fmt.Errorf("%s<ip> is missing; add the name server to send updates to, for example %s10.0.0.53", serverArg, serverArg)
 	case s.zone == "":
-		return fmt.Errorf("%s<name> is required", zoneArg)
+		return fmt.Errorf("%s<name> is missing; add the forward zone to write into, for example %shome.lan", zoneArg, zoneArg)
 	case s.keyName == "":
-		return fmt.Errorf("%s<name>:<secret> is required", keyArg)
+		return fmt.Errorf("%s<name>:<secret> is missing; add the TSIG key the name server knows, for example %sddns-key:%sTSIG_KEY",
+			keyArg, keyArg, envPrefix)
 	}
 	key, err := newTSIGKey(s.keyName, s.algo, s.keySecret)
 	if err != nil {
 		return err
 	}
 	s.key = key
-	return nil
+	s.protect, err = protectedNames(s.protectRaw, s.zone)
+	return err
+}
+
+// protectedNames resolves the protect: arguments against the zone, which is
+// only known once every argument has been read.
+func protectedNames(raw []string, zone string) (map[string]bool, error) {
+	if len(raw) == 0 {
+		return nil, nil //nolint:nilnil // a nil map is the empty set of protected names
+	}
+	out := make(map[string]bool, len(raw))
+	for _, entry := range raw {
+		name, err := hostFQDN(entry, zone)
+		if err != nil {
+			return nil, fmt.Errorf("%s%s is not a name this plugin can protect: %w; use a bare label or a name under the zone", protectArg, entry, err)
+		}
+		out[name] = true
+	}
+	return out, nil
 }
 
 // applyServer parses the name server address.
@@ -381,11 +463,11 @@ func applyServer(s *settings, raw string) error {
 	}
 	addr, err := netip.ParseAddr(host)
 	if err != nil {
-		return fmt.Errorf("%s%s has to be an IP address, optionally followed by a port", serverArg, raw)
+		return fmt.Errorf("%s%s is not an IP address; write a literal address with an optional port, such as %s10.0.0.53:5353", serverArg, raw, serverArg)
 	}
 	n, err := strconv.ParseUint(port, 10, 16)
 	if err != nil || n == 0 {
-		return fmt.Errorf("invalid port %q in %s%s", port, serverArg, raw)
+		return fmt.Errorf("port %q in %s%s is not a port number; use 1 to 65535, or leave the port off for the default of %s", port, serverArg, raw, defaultPort)
 	}
 	s.server = netip.AddrPortFrom(addr.Unmap(), uint16(n)).String()
 	return nil
@@ -411,7 +493,8 @@ func applyZone(s *settings, raw string) error {
 func applyKey(s *settings, raw string) error {
 	name, secret, ok := strings.Cut(raw, ":")
 	if !ok || name == "" {
-		return fmt.Errorf("%s needs <name>:<secret>, where the secret is base64 or %s<VARIABLE>", keyArg, envPrefix)
+		return fmt.Errorf("%s needs <name>:<secret>; give the secret as base64 or as %s<VARIABLE>, for example %sddns-key:%sTSIG_KEY",
+			keyArg, envPrefix, keyArg, envPrefix)
 	}
 	value, err := secretValue(secret)
 	if err != nil {
@@ -419,7 +502,7 @@ func applyKey(s *settings, raw string) error {
 	}
 	decoded, err := base64.StdEncoding.DecodeString(value)
 	if err != nil || len(decoded) == 0 {
-		return fmt.Errorf("the secret of key %s is not usable base64", name)
+		return fmt.Errorf("the secret of key %s is not usable base64; copy the secret as the name server's key configuration spells it", name)
 	}
 	s.keyName, s.keySecret = name, decoded
 	return nil
@@ -433,11 +516,11 @@ func secretValue(raw string) (string, error) {
 		return raw, nil
 	}
 	if name == "" {
-		return "", fmt.Errorf("%s%s needs the name of an environment variable", keyArg, envPrefix)
+		return "", fmt.Errorf("%s%s names no environment variable; write it as %s<VARIABLE>, for example %sTSIG_KEY", keyArg, envPrefix, envPrefix, envPrefix)
 	}
 	value := os.Getenv(name)
 	if value == "" {
-		return "", fmt.Errorf("environment variable %s is unset or empty", name)
+		return "", fmt.Errorf("environment variable %s is unset or empty; set it to the key's base64 secret in the server's environment", name)
 	}
 	return value, nil
 }
@@ -445,7 +528,7 @@ func secretValue(raw string) (string, error) {
 // applyAlgo picks the TSIG algorithm.
 func applyAlgo(s *settings, raw string) error {
 	if _, ok := algorithms[raw]; !ok {
-		return fmt.Errorf("%w %q, want one of %v", ErrUnknownAlgorithm, raw, algorithmNames())
+		return fmt.Errorf("%w %q; use one of %v, whichever the name server has for this key", ErrUnknownAlgorithm, raw, algorithmNames())
 	}
 	s.algo = raw
 	return nil
@@ -455,7 +538,7 @@ func applyAlgo(s *settings, raw string) error {
 func applyTTL(s *settings, raw string) error {
 	n, err := strconv.ParseUint(raw, 10, 32)
 	if err != nil || n > maxTTL {
-		return fmt.Errorf("invalid %s%s, want a number of seconds up to %d", ttlArg, raw, maxTTL)
+		return fmt.Errorf("%s%s is not a TTL; use a number of seconds up to %d, or leave it out for the default of %d", ttlArg, raw, maxTTL, defaultTTL)
 	}
 	s.ttl = uint32(n)
 	return nil
@@ -465,7 +548,7 @@ func applyTTL(s *settings, raw string) error {
 func applyReverse(s *settings, raw string) error {
 	pfx, err := netip.ParsePrefix(raw)
 	if err != nil {
-		return fmt.Errorf("invalid %s%s: it has to be a CIDR", reverseArg, raw)
+		return fmt.Errorf("%s%s is not a CIDR; write it as <prefix>/<length>, such as %s10.0.0.0/24", reverseArg, raw, reverseArg)
 	}
 	pfx = pfx.Masked()
 	zone, err := reverseZone(pfx)
@@ -480,7 +563,7 @@ func applyReverse(s *settings, raw string) error {
 func applyTimeout(s *settings, raw string) error {
 	d, err := time.ParseDuration(raw)
 	if err != nil || d <= 0 {
-		return fmt.Errorf("invalid %s%s, want a positive duration such as 2s", timeoutArg, raw)
+		return fmt.Errorf("%s%s is not a positive duration; use a Go duration such as 2s, or leave it out for the default of %s", timeoutArg, raw, defaultTimeout)
 	}
 	s.timeout = d
 	return nil
@@ -490,9 +573,23 @@ func applyTimeout(s *settings, raw string) error {
 func applyQueue(s *settings, raw string) error {
 	n, err := strconv.Atoi(raw)
 	if err != nil || n < 1 || n > maxQueueLen {
-		return fmt.Errorf("invalid %s%s, want a number between 1 and %d", queueArg, raw, maxQueueLen)
+		return fmt.Errorf("%s%s is not a queue length; use a number between 1 and %d, or leave it out for the default of %d", queueArg, raw, maxQueueLen, defaultQueueLen)
 	}
 	s.queueLen = n
+	return nil
+}
+
+// applyProtect adds names this plugin will never write. They are checked
+// against the zone in finish, once it is known; here a stray comma is a typo
+// worth refusing rather than a name worth guessing at.
+func applyProtect(s *settings, raw string) error {
+	for name := range strings.SplitSeq(raw, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return fmt.Errorf("%s%s holds an empty name; write one name or several separated by commas, such as %sgateway,ns", protectArg, raw, protectArg)
+		}
+		s.protectRaw = append(s.protectRaw, name)
+	}
 	return nil
 }
 
@@ -504,7 +601,7 @@ func applyRemove(s *settings, raw string) error {
 	case "off":
 		s.removeOnRelease = false
 	default:
-		return fmt.Errorf("invalid %s%s, want on or off", removeArg, raw)
+		return fmt.Errorf("%s%s is neither on nor off; use %son or %soff, or leave it out for the default of on", removeArg, raw, removeArg, removeArg)
 	}
 	return nil
 }
@@ -536,7 +633,7 @@ func (p *pluginState) lease4(req, resp *dhcpv4.DHCPv4) {
 	if !ok {
 		return
 	}
-	p.enqueue(job{name: name, addrs: []netip.Addr{addr}})
+	p.claim(name, []netip.Addr{addr}, identity4(req))
 }
 
 // release4 withdraws the records of a lease a client is giving up. RFC 2131
@@ -554,7 +651,36 @@ func (p *pluginState) release4(req *dhcpv4.DHCPv4) {
 	if !ok {
 		return
 	}
-	p.enqueue(job{name: name, addrs: []netip.Addr{addr}, remove: true})
+	p.withdraw(name, []netip.Addr{addr}, identity4(req))
+}
+
+// claim queues the records for a lease, under the DHCID that says whose
+// name it is.
+func (p *pluginState) claim(name string, addrs []netip.Addr, id identity) {
+	dhcid, err := id.record(name)
+	if err != nil {
+		log.Debugf("not updating DNS for %s: %v", name, err)
+		return
+	}
+	p.enqueue(job{name: name, addrs: addrs, dhcid: dhcid})
+}
+
+// withdraw queues the removal of a lease's records, and only for the client
+// this instance wrote them for.
+//
+// Nothing in a DHCPRELEASE is authenticated, so the register decides and not
+// the packet. See the owners type for what a restart does to that.
+func (p *pluginState) withdraw(name string, addrs []netip.Addr, id identity) {
+	dhcid, err := id.record(name)
+	if err != nil {
+		log.Debugf("not withdrawing DNS for %s: %v", name, err)
+		return
+	}
+	if !p.owners.holds(name, dhcid, addrs) {
+		log.Debugf("ignoring a release of %s at %v: this server did not write it for that client", name, addrs)
+		return
+	}
+	p.enqueue(job{name: name, addrs: addrs, dhcid: dhcid, remove: true})
 }
 
 // nameFor4 returns the name to write for a DHCPv4 client.
@@ -569,10 +695,17 @@ func (p *pluginState) nameFor4(req *dhcpv4.DHCPv4) (string, bool) {
 
 // hostFor turns a name a client sent into the name to write, or says in the
 // debug log why nothing will be written.
+//
+// protect: is enforced here because both families and both directions funnel
+// through it.
 func (p *pluginState) hostFor(raw string) (string, bool) {
 	name, err := hostFQDN(raw, p.zone)
 	if err != nil {
 		log.Debugf("not updating DNS for %q: %v", raw, err)
+		return "", false
+	}
+	if p.protect[name] {
+		log.Debugf("not updating DNS for %q: %s is protected", raw, name)
 		return "", false
 	}
 	return name, true
@@ -653,7 +786,7 @@ func (p *pluginState) lease6(req *dhcpv6.Message, resp dhcpv6.DHCPv6) {
 	if !ok {
 		return
 	}
-	p.enqueue(job{name: name, addrs: addrs})
+	p.claim(name, addrs, identity6(req))
 }
 
 // release6 withdraws the records for the addresses a client is giving up. A
@@ -671,7 +804,7 @@ func (p *pluginState) release6(req *dhcpv6.Message) {
 	if !ok {
 		return
 	}
-	p.enqueue(job{name: name, addrs: addrs, remove: true})
+	p.withdraw(name, addrs, identity6(req))
 }
 
 // nameFor6 returns the name to write for a DHCPv6 client.
