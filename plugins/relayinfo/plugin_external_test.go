@@ -296,6 +296,76 @@ func TestHandler4AllowsCIDRMember(t *testing.T) {
 	assert.Equal(t, "192.0.2.31", result.YourIPAddr.String())
 }
 
+// TestHandler4PassesRequestsWithoutRelayInformation pins where the allow
+// list stops applying. A client on the server's own link presents no relay
+// information and sends from its own address, or from 0.0.0.0 before it has
+// one, so gating it would stop a section serving on-link and relayed clients
+// together from answering the on-link half at all. The same client inventing
+// an option 82 is still refused, on the source address it could not fake.
+func TestHandler4PassesRequestsWithoutRelayInformation(t *testing.T) {
+	const onLink = "10.0.9.9:68"
+
+	for _, tc := range []struct {
+		name string
+		peer string
+	}{
+		{name: "a client with an address of its own", peer: onLink},
+		{name: "a client that has no address yet", peer: "0.0.0.0:68"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := handler4(t, "circuit-id", "rack4-sw1:eth3 192.0.2.31\n")
+			req, resp := message4(t, dhcpv4.MessageTypeDiscover)
+
+			result, stop := h(ctxFromPeer(t, tc.peer), req, resp)
+			require.NotNil(t, result, "an on-link request must not be dropped")
+			assert.False(t, stop, "the chain has to reach the plugin that serves this client")
+			assert.True(t, result.YourIPAddr.IsUnspecified(), "there is nothing here to map")
+		})
+	}
+
+	t.Run("the same source is dropped once it presents an option 82", func(t *testing.T) {
+		h := handler4(t, "circuit-id", "rack4-sw1:eth3 192.0.2.31\n")
+		req, resp := message4(t, dhcpv4.MessageTypeDiscover,
+			dhcpv4.OptGeneric(dhcpv4.AgentCircuitIDSubOption, []byte("rack4-sw1:eth3")))
+
+		result, stop := h(ctxFromPeer(t, onLink), req, resp)
+		assert.Nil(t, result, "a forged option 82 from off the allow list must be dropped")
+		assert.True(t, stop)
+	})
+}
+
+// TestHandler4GatesOnGiaddr pins that giaddr alone marks a request relayed.
+// A relay that sets giaddr but stamps no option 82 still has to be in the
+// allow list, and once it is the request carries no key to look up and goes
+// on to the next plugin.
+func TestHandler4GatesOnGiaddr(t *testing.T) {
+	viaRelay := func(t *testing.T) (*dhcpv4.DHCPv4, *dhcpv4.DHCPv4) {
+		t.Helper()
+		req, resp := message4(t, dhcpv4.MessageTypeDiscover)
+		req.GatewayIPAddr = net.ParseIP("10.0.1.1")
+		return req, resp
+	}
+
+	t.Run("from outside the allow list it is dropped", func(t *testing.T) {
+		h := handler4(t, "circuit-id", "rack4-sw1:eth3 192.0.2.31\n")
+		req, resp := viaRelay(t)
+
+		result, stop := h(ctxFromPeer(t, "10.0.9.9:67"), req, resp)
+		assert.Nil(t, result)
+		assert.True(t, stop)
+	})
+
+	t.Run("from an allowed relay it passes on with no key to match", func(t *testing.T) {
+		h := handler4(t, "circuit-id", "rack4-sw1:eth3 192.0.2.31\n")
+		req, resp := viaRelay(t)
+
+		result, stop := h(ctxFromPeer(t, v4Peer), req, resp)
+		require.NotNil(t, result)
+		assert.False(t, stop)
+		assert.True(t, result.YourIPAddr.IsUnspecified())
+	})
+}
+
 func TestHandler6InterfaceID(t *testing.T) {
 	h := handler6(t, "interface-id", "rack4-sw1:eth3 2001:db8::31 12h\n0x0004010203 2001:db8::32\n")
 
@@ -456,6 +526,21 @@ func TestHandler6PassesThrough(t *testing.T) {
 		assert.Nil(t, result.GetOneOption(dhcpv6.OptionIANA))
 	})
 
+	// A message that reached the server without a relay carries no relay
+	// option to match on, so it is passed along rather than measured against
+	// the allow list. Gating it would stop a section serving on-link clients
+	// alongside relayed ones from answering the on-link ones.
+	t.Run("a non-relayed request from outside the allow list still passes", func(t *testing.T) {
+		inner := solicit6(t)
+		resp, err := dhcpv6.NewAdvertiseFromSolicit(inner)
+		require.NoError(t, err)
+
+		result, stop := h(ctxFromPeer(t, "[2001:db8:bad::1]:547"), inner, resp)
+		require.NotNil(t, result, "an on-link DHCPv6 client must not be dropped")
+		assert.False(t, stop)
+		assert.Nil(t, result.GetOneOption(dhcpv6.OptionIANA))
+	})
+
 	t.Run("malformed relay message", func(t *testing.T) {
 		// A RelayMessage with no embedded OptionRelayMsg makes
 		// GetInnerMessage fail, which drops the request. The peer still has
@@ -468,9 +553,9 @@ func TestHandler6PassesThrough(t *testing.T) {
 	})
 }
 
-// TestHandler6DropsUnallowedSource pins that the source check runs first for
-// DHCPv6 too, ahead of the release/decline passthrough and the ordinary
-// match path alike.
+// TestHandler6DropsUnallowedSource pins that once a message did come through
+// a relay, the source check runs ahead of everything else: the
+// release/decline passthrough and the ordinary match path alike.
 func TestHandler6DropsUnallowedSource(t *testing.T) {
 	h := handler6(t, "interface-id", "rack4-sw1:eth3 2001:db8::31\n")
 	iid := dhcpv6.OptInterfaceID([]byte("rack4-sw1:eth3"))
