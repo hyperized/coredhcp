@@ -4,9 +4,10 @@
 
 // Redaction of plugin arguments for the startup log and for observers. A
 // plugin takes its configuration as bare strings, and some of those strings
-// are secrets: written inline as `password:hunter2`, buried in the userinfo
-// of a connection URL, or, in the netbox plugin's original argument order, a
-// bare positional API token with nothing around it to say what it is.
+// are secrets: written inline as `password:hunter2`, named alongside a
+// non-secret key as in ddns's `key:<name>:<base64 secret>`, buried in the
+// userinfo of a connection URL, or, in the netbox plugin's original argument
+// order, a bare positional API token with nothing around it to say what it is.
 //
 // What this file does is recognise the known shapes. It is a heuristic and
 // cannot be anything else, so a secret in a shape nobody anticipated still
@@ -21,9 +22,15 @@ import (
 )
 
 // secretPrefixes are argument prefixes whose value is a secret to redact,
-// matched case-insensitively. "key:" is deliberately absent: it names a
-// non-secret key rather than carrying one.
+// matched case-insensitively. "key:" is handled separately by redactKey,
+// because for that one prefix only part of the value is the secret.
 var secretPrefixes = []string{"password:", "token:", "secret:"}
+
+// keyPrefix marks the ddns plugin's TSIG argument, key:<name>:<secret>. See
+// applyKey in plugins/ddns/plugin.go: it reads the name up to the first colon
+// and treats everything after that as the secret, so "key:something" with no
+// second colon is just a key name and not a secret at all.
+const keyPrefix = "key:"
 
 // redacted is what replaces a secret. Short enough not to disturb a log line,
 // and obviously not a value anyone configured.
@@ -55,10 +62,14 @@ func RedactArgs(args []string) []string {
 }
 
 // redactArg applies the prefix rule first because it matches on the
-// argument's own syntax, then the NetBox token shapes, and only then tries
-// reading the argument as a URL with a password in its userinfo.
+// argument's own syntax, then the "key:" rule, then the NetBox token shapes,
+// and only then tries reading the argument as a URL with a password in its
+// userinfo.
 func redactArg(arg string) string {
 	if r, ok := redactPrefixed(arg); ok {
+		return r
+	}
+	if r, ok := redactKey(arg); ok {
 		return r
 	}
 	if looksLikeNetboxToken(arg) {
@@ -100,6 +111,26 @@ func redactPrefixed(arg string) (string, bool) {
 		return arg[:len(prefix)] + redacted, true
 	}
 	return "", false
+}
+
+// redactKey handles the "key:" prefix used by the ddns plugin's TSIG
+// argument, key:<name>:<secret>. Only the part after the key name is a
+// secret, so unlike redactPrefixed this has to find the second colon rather
+// than blanking everything after the prefix. A name with no secret after it
+// ("key:something", or "key:" on its own) is left alone, and so is
+// "key:<name>:env:SOME_VAR": that names an environment variable rather than
+// carrying the secret, matched case-sensitively because applyKey parses it
+// the same way.
+func redactKey(arg string) (string, bool) {
+	lower := strings.ToLower(arg)
+	if !strings.HasPrefix(lower, keyPrefix) {
+		return "", false
+	}
+	name, secret, ok := strings.Cut(arg[len(keyPrefix):], ":")
+	if !ok || strings.HasPrefix(secret, "env:") {
+		return arg, true
+	}
+	return arg[:len(keyPrefix)] + name + ":" + redacted, true
 }
 
 // redactURL rewrites the password in a URL's userinfo, if it has one. An

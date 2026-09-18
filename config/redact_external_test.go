@@ -32,6 +32,24 @@ func TestRedactArgs(t *testing.T) {
 		{"password env marker in the wrong case is a literal", []string{"password:ENV:FOO"}, []string{"password:***"}},
 		{"password with empty value redacted to the marker", []string{"password:"}, []string{"password:***"}},
 		{"key prefix is not a secret", []string{"key:something"}, []string{"key:something"}},
+		{"key prefix with nothing after it is not a secret", []string{"key:"}, []string{"key:"}},
+		{
+			"ddns TSIG key redacted after the key name",
+			[]string{"key:ddns-key:Y29yZWRoY3AtZGRucy1nb2xkZW4tdGVzdC1rZXkhISE="},
+			[]string{"key:ddns-key:***"},
+		},
+		{"key env marker left alone", []string{"key:ddns-key:env:TSIG_KEY"}, []string{"key:ddns-key:env:TSIG_KEY"}},
+		// Same case-sensitivity rule as password:ENV:FOO: applyKey in the
+		// ddns plugin cuts "env:" case-sensitively, so "ENV:FOO" here is a
+		// literal secret rather than an environment variable reference.
+		{"key env marker in the wrong case is a literal", []string{"key:ddns-key:ENV:FOO"}, []string{"key:ddns-key:***"}},
+		{"key with empty secret redacted to the marker", []string{"key:ddns-key:"}, []string{"key:ddns-key:***"}},
+		{"mixed case key prefix redacted, name and casing kept", []string{"Key:ddns-key:secretvalue"}, []string{"Key:ddns-key:***"}},
+		{
+			"key name containing further colons only redacts after the second",
+			[]string{"key:a:b:c"},
+			[]string{"key:a:***"},
+		},
 		{
 			"url with userinfo password redacted",
 			[]string{"redis://user:hunter2@localhost:6379/0"},
@@ -85,8 +103,8 @@ func TestRedactArgs(t *testing.T) {
 		{"nbt without the underscore is not a token", []string{"nbtree"}, []string{"nbtree"}},
 		{
 			"multiple args each handled independently",
-			[]string{"password:hunter2", "key:something", "redis://user:hunter2@localhost:6379/0"},
-			[]string{"password:***", "key:something", "redis://user:***@localhost:6379/0"},
+			[]string{"password:hunter2", "key:something", "key:ddns-key:hunter2", "redis://user:hunter2@localhost:6379/0"},
+			[]string{"password:***", "key:something", "key:ddns-key:***", "redis://user:***@localhost:6379/0"},
 		},
 	}
 

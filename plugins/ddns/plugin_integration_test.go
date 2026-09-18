@@ -21,6 +21,7 @@
 package ddns
 
 import (
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/netip"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
+	"github.com/insomniacslk/dhcp/iana"
 	"github.com/insomniacslk/dhcp/rfc1035label"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -167,28 +169,38 @@ func targets(answers []dnsmessage.Resource) []string {
 	return out
 }
 
-// eventually waits for the server to agree with want.
-func eventually(t *testing.T, server, name string, qtype dnsmessage.Type, extract func([]dnsmessage.Resource) []string, want []string) {
-	t.Helper()
-	var got []string
-	require.Eventually(t, func() bool {
-		got = extract(ask(t, server, name, qtype))
-		return assert.ObjectsAreEqual(want, got)
-	}, settle, 200*time.Millisecond, "%s %s: wanted %v, last saw %v", name, qtype, want, got)
+// dhcids returns the DHCID records of an answer section, as hex. dnsmessage
+// has no body type for type 49, so Knot's answer comes back as opaque RDATA,
+// which is also how this plugin writes it.
+func dhcids(answers []dnsmessage.Resource) []string {
+	var out []string
+	for _, r := range answers {
+		body, ok := r.Body.(*dnsmessage.UnknownResource)
+		if !ok || body.Type != typeDHCID {
+			continue
+		}
+		out = append(out, hex.EncodeToString(body.Data))
+	}
+	return out
 }
 
-// TestIntegrationLease4 walks a DHCPv4 client through a lease and a release,
-// checking with the server after each that the forward and reverse records
-// are what they should be.
-func TestIntegrationLease4(t *testing.T) {
-	p := integrationPlugin(t)
-	server := p.server
-	host := testHost(t)
-	addr := testAddr4(t)
-	fqdn := host + "." + p.zone
+// dhcidOf is the DHCID a DHCPv4 client with this hardware address gets for
+// this name.
+func dhcidOf(t *testing.T, mac net.HardwareAddr, fqdn string) string {
+	t.Helper()
+	req, err := dhcpv4.New(dhcpv4.WithHwAddr(mac), dhcpv4.WithMessageType(dhcpv4.MessageTypeRequest))
+	require.NoError(t, err)
+	rdata, err := identity4(req).record(fqdn)
+	require.NoError(t, err)
+	return hex.EncodeToString(rdata)
+}
 
+// ack4 runs one DHCPv4 client through a lease. What the worker then does
+// with it is read back out of Knot, which is what eventually is for.
+func ack4(t *testing.T, p *pluginState, mac net.HardwareAddr, host string, addr netip.Addr) {
+	t.Helper()
 	req, err := dhcpv4.New(
-		dhcpv4.WithHwAddr(net.HardwareAddr{0x02, 0, 0, 0, 0, 1}),
+		dhcpv4.WithHwAddr(mac),
 		dhcpv4.WithMessageType(dhcpv4.MessageTypeRequest),
 		dhcpv4.WithOption(dhcpv4.OptHostName(host)),
 	)
@@ -201,24 +213,124 @@ func TestIntegrationLease4(t *testing.T) {
 	got, stop := p.Handler4(req, resp)
 	require.Same(t, resp, got)
 	require.False(t, stop)
+}
 
-	eventually(t, server, fqdn, dnsmessage.TypeA, addresses, []string{addr.String()})
-	eventually(t, server, ptrName(addr), dnsmessage.TypePTR, targets, []string{fqdn})
-
-	// The same client giving the lease back takes both records with it.
+// release4 hands Knot a DHCPRELEASE from mac.
+func release4(t *testing.T, p *pluginState, mac net.HardwareAddr, host string, addr netip.Addr) {
+	t.Helper()
 	rel, err := dhcpv4.New(
-		dhcpv4.WithHwAddr(net.HardwareAddr{0x02, 0, 0, 0, 0, 1}),
+		dhcpv4.WithHwAddr(mac),
 		dhcpv4.WithMessageType(dhcpv4.MessageTypeRelease),
 		dhcpv4.WithOption(dhcpv4.OptHostName(host)),
 	)
 	require.NoError(t, err)
 	rel.ClientIPAddr = net.IP(addr.AsSlice())
-
-	_, stop = p.Handler4(rel, resp)
+	_, stop := p.Handler4(rel, nil)
 	require.False(t, stop)
+}
+
+// eventually waits for the server to agree with want.
+func eventually(t *testing.T, server, name string, qtype dnsmessage.Type, extract func([]dnsmessage.Resource) []string, want []string) {
+	t.Helper()
+	var got []string
+	require.Eventually(t, func() bool {
+		got = extract(ask(t, server, name, qtype))
+		return assert.ObjectsAreEqual(want, got)
+	}, settle, 200*time.Millisecond, "%s %s: wanted %v, last saw %v", name, qtype, want, got)
+}
+
+// TestIntegrationLease4 walks a DHCPv4 client through a lease and a release,
+// checking with the server after each that the forward and reverse records
+// are what they should be, and that the name is held by a DHCID in between.
+func TestIntegrationLease4(t *testing.T) {
+	p := integrationPlugin(t)
+	server := p.server
+	host := testHost(t)
+	addr := testAddr4(t)
+	fqdn := host + "." + p.zone
+	mac := net.HardwareAddr{0x02, 0, 0, 0, 0, 1}
+
+	ack4(t, p, mac, host, addr)
+
+	eventually(t, server, fqdn, dnsmessage.TypeA, addresses, []string{addr.String()})
+	eventually(t, server, ptrName(addr), dnsmessage.TypePTR, targets, []string{fqdn})
+	// Knot serves type 49 like any other, so this is the record the next
+	// client's prerequisite will be weighed against.
+	eventually(t, server, fqdn, typeDHCID, dhcids, []string{dhcidOf(t, mac, fqdn)})
+
+	// The same client asking again is refused on the first prerequisite and
+	// taken on the second, which is the whole of RFC 4703 section 5.3.
+	next := netip.AddrFrom4([4]byte{addr.As4()[0], addr.As4()[1], addr.As4()[2], addr.As4()[3] + 1})
+	ack4(t, p, mac, host, next)
+	eventually(t, server, fqdn, dnsmessage.TypeA, addresses, []string{next.String()})
+	eventually(t, server, fqdn, typeDHCID, dhcids, []string{dhcidOf(t, mac, fqdn)})
+
+	// The same client giving the lease back takes every record with it.
+	release4(t, p, mac, host, next)
 
 	eventually(t, server, fqdn, dnsmessage.TypeA, addresses, nil)
-	eventually(t, server, ptrName(addr), dnsmessage.TypePTR, targets, nil)
+	eventually(t, server, fqdn, typeDHCID, dhcids, nil)
+	eventually(t, server, ptrName(next), dnsmessage.TypePTR, targets, nil)
+}
+
+// TestIntegrationNameHeldByAnotherClient is the finding this plugin was
+// audited for, run against a real name server: a second client asking for a
+// name the first one holds must not get it, and must not be able to delete
+// it either.
+func TestIntegrationNameHeldByAnotherClient(t *testing.T) {
+	p := integrationPlugin(t)
+	server := p.server
+	host := testHost(t)
+	addr := testAddr4(t)
+	fqdn := host + "." + p.zone
+	holder := net.HardwareAddr{0x02, 0, 0, 0, 0, 1}
+	intruder := net.HardwareAddr{0x02, 0, 0, 0, 0, 2}
+
+	ack4(t, p, holder, host, addr)
+	eventually(t, server, fqdn, dnsmessage.TypeA, addresses, []string{addr.String()})
+
+	// Another client on the segment claims the same name. Knot refuses both
+	// of the messages that follow, on the prerequisites.
+	other := netip.AddrFrom4([4]byte{addr.As4()[0], addr.As4()[1], addr.As4()[2], addr.As4()[3] + 2})
+	ack4(t, p, intruder, host, other)
+	require.Eventually(t, func() bool { return p.stats.conflicts.Load() == 1 }, settle, 100*time.Millisecond)
+
+	assert.Equal(t, []string{addr.String()}, addresses(ask(t, server, fqdn, dnsmessage.TypeA)),
+		"the name still points at the client that holds it")
+	assert.Equal(t, []string{dhcidOf(t, holder, fqdn)}, dhcids(ask(t, server, fqdn, typeDHCID)))
+	assert.Empty(t, targets(ask(t, server, ptrName(other), dnsmessage.TypePTR)),
+		"a refused forward update writes no PTR either")
+
+	// The same client tries to delete the name instead. The register drops
+	// that on the packet path, so nothing even reaches Knot.
+	before := p.stats.sent.Load()
+	release4(t, p, intruder, host, addr)
+	assert.Equal(t, []string{addr.String()}, addresses(ask(t, server, fqdn, dnsmessage.TypeA)))
+	assert.Equal(t, before, p.stats.sent.Load(), "a release from a stranger sends nothing at all")
+
+	release4(t, p, holder, host, addr)
+	eventually(t, server, fqdn, dnsmessage.TypeA, addresses, nil)
+}
+
+// TestIntegrationProtectedName checks that a name on the protect: list is
+// left alone even when a client asks for it by that exact name.
+func TestIntegrationProtectedName(t *testing.T) {
+	host := testHost(t)
+	p, err := setupState(
+		"server:"+serverAddr(t),
+		"zone:"+os.Getenv("DDNS_ZONE"),
+		"key:"+os.Getenv("DDNS_KEY")+":"+os.Getenv("DDNS_TSIG_SECRET"),
+		"protect:"+host,
+		"ttl:60",
+		"timeout:5s",
+	)
+	require.NoError(t, err)
+	t.Cleanup(p.stopWorker)
+
+	ack4(t, p, net.HardwareAddr{0x02, 0, 0, 0, 0, 3}, host, testAddr4(t))
+
+	assert.Empty(t, addresses(ask(t, p.server, host+"."+p.zone, dnsmessage.TypeA)))
+	assert.Zero(t, p.stats.sent.Load(), "a protected name never reaches the name server")
 }
 
 // TestIntegrationLease6 is TestIntegrationLease4 for DHCPv6, where the
@@ -230,7 +342,11 @@ func TestIntegrationLease6(t *testing.T) {
 	addr := testAddr6(t)
 	fqdn := host + "." + p.zone
 
-	req, err := dhcpv6.NewMessage()
+	// A client identifier is not optional here: it is the identifier the
+	// DHCID is built from, and RFC 8415 section 16 has a client send one in
+	// every message anyway.
+	duid := &dhcpv6.DUIDLL{HWType: iana.HWTypeEthernet, LinkLayerAddr: net.HardwareAddr{0x02, 0, 0, 0, 0, 4}}
+	req, err := dhcpv6.NewMessage(dhcpv6.WithClientID(duid))
 	require.NoError(t, err)
 	req.AddOption(&dhcpv6.OptFQDN{DomainName: labels(host)})
 
@@ -252,7 +368,12 @@ func TestIntegrationLease6(t *testing.T) {
 	eventually(t, server, fqdn, dnsmessage.TypeAAAA, addresses, []string{addr.String()})
 	eventually(t, server, ptrName(addr), dnsmessage.TypePTR, targets, []string{fqdn})
 
-	rel, err := dhcpv6.NewMessage()
+	// Over DHCPv6 the identifier of RFC 4701 is the DUID, under type code 2.
+	wantDHCID, err := identity6(req).record(fqdn)
+	require.NoError(t, err)
+	eventually(t, server, fqdn, typeDHCID, dhcids, []string{hex.EncodeToString(wantDHCID)})
+
+	rel, err := dhcpv6.NewMessage(dhcpv6.WithClientID(duid))
 	require.NoError(t, err)
 	rel.MessageType = dhcpv6.MessageTypeRelease
 	rel.AddOption(&dhcpv6.OptFQDN{DomainName: labels(host)})
@@ -262,6 +383,7 @@ func TestIntegrationLease6(t *testing.T) {
 	require.False(t, stop)
 
 	eventually(t, server, fqdn, dnsmessage.TypeAAAA, addresses, nil)
+	eventually(t, server, fqdn, typeDHCID, dhcids, nil)
 	eventually(t, server, ptrName(addr), dnsmessage.TypePTR, targets, nil)
 }
 
@@ -272,7 +394,7 @@ func TestIntegrationLease6(t *testing.T) {
 // and never as a verified NOTAUTH.
 func TestIntegrationRefusedZone(t *testing.T) {
 	p := integrationPlugin(t)
-	err := p.update("not-a-zone-we-hold.example.",
+	err := p.update(t.Context(), "not-a-zone-we-hold.example.", nil,
 		[]change{deleteRRset("host.not-a-zone-we-hold.example.", dnsmessage.TypeA)})
 	require.ErrorIs(t, err, ErrNoTSIG)
 	assert.Contains(t, err.Error(), "NOTAUTH")
@@ -292,7 +414,7 @@ func TestIntegrationWrongKey(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	err = bad.update(good.zone, []change{deleteRRset("nobody."+good.zone, dnsmessage.TypeA)})
+	err = bad.update(t.Context(), good.zone, nil, []change{deleteRRset("nobody."+good.zone, dnsmessage.TypeA)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrTSIGError)
 }

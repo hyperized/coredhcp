@@ -13,16 +13,28 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-// opCodeUpdate is the UPDATE opcode of RFC 2136. It reuses the header of a
-// query with different meanings for the four section counts: zone,
-// prerequisite, update and additional.
-const opCodeUpdate = dnsmessage.OpCode(5)
+const (
+	// opCodeUpdate is the UPDATE opcode of RFC 2136. It reuses the header of
+	// a query with different meanings for the four section counts: zone,
+	// prerequisite, update and additional.
+	opCodeUpdate = dnsmessage.OpCode(5)
 
-// change is one record in the update section.
+	// classNone is the NONE class RFC 2136 uses for two things: in the
+	// prerequisite section it says an RRset must not exist, and in the
+	// update section it deletes one named record out of an RRset.
+	// dnsmessage has no constant for it.
+	classNone = dnsmessage.Class(254)
+)
+
+// change is one record of a prerequisite or an update section. Both are
+// written the same way, and the class is what says which meaning applies.
 //
-// Class says what to do with it. IN adds the record. ANY with no RDATA and a
-// TTL of zero deletes every record of that type at that name, which is the
-// "Delete an RRset" form of RFC 2136 section 2.5.2.
+// In the update section, IN adds the record; ANY with no RDATA and a TTL of
+// zero deletes every record of that type at that name, the "Delete an RRset"
+// form of RFC 2136 section 2.5.2; NONE with RDATA deletes that one record,
+// section 2.5.4. In the prerequisite section, NONE with no RDATA requires
+// that the RRset is absent, section 2.4.3, and IN with RDATA requires that
+// it is exactly what is given, section 2.4.2.
 type change struct {
 	name  string
 	rtype dnsmessage.Type
@@ -36,9 +48,48 @@ func deleteRRset(name string, rtype dnsmessage.Type) change {
 	return change{name: name, rtype: rtype, class: dnsmessage.ClassANY}
 }
 
+// deleteRecord returns the change that removes one record from an RRset,
+// leaving anything else of that type at the name standing.
+func deleteRecord(name string, rtype dnsmessage.Type, data []byte) change {
+	return change{name: name, rtype: rtype, class: classNone, data: data}
+}
+
 // addRecord returns the change that adds one record at name.
 func addRecord(name string, rtype dnsmessage.Type, ttl uint32, data []byte) change {
 	return change{name: name, rtype: rtype, class: dnsmessage.ClassINET, ttl: ttl, data: data}
+}
+
+// noRRset returns the prerequisite that no record of rtype exists at name.
+func noRRset(name string, rtype dnsmessage.Type) change {
+	return change{name: name, rtype: rtype, class: classNone}
+}
+
+// rrsetEquals returns the prerequisite that the RRset of rtype at name is
+// exactly the one record data holds. The name server does the comparing, so
+// a name held by another client fails here, at the server, rather than being
+// read and then overwritten in a second message that races the first.
+func rrsetEquals(name string, rtype dnsmessage.Type, data []byte) change {
+	return change{name: name, rtype: rtype, class: dnsmessage.ClassINET, data: data}
+}
+
+// freshPrereqs is what a first claim on a name asks for: that no DHCID is
+// there yet.
+//
+// A name with no DHCID is either one nobody has claimed or one an operator
+// wrote by hand, and RFC 4703 section 5.3.1 has the server take it. That is
+// worth knowing about when upgrading: records this plugin wrote before it
+// started sending DHCIDs are unclaimed, and the first client to ask for one
+// of those names gets it. The protect: argument is how a name is kept out of
+// reach of that.
+func freshPrereqs(j job) []change {
+	return []change{noRRset(j.name, typeDHCID)}
+}
+
+// ownedPrereqs is what the second attempt asks for, and what every
+// withdrawal asks for: that the DHCID at the name is the one this client's
+// identity produces (RFC 4703 sections 5.3.2 and 5.5).
+func ownedPrereqs(j job) []change {
+	return []change{rrsetEquals(j.name, typeDHCID, j.dhcid)}
 }
 
 // addressType is the record type that holds addr.
@@ -49,25 +100,37 @@ func addressType(addr netip.Addr) dnsmessage.Type {
 	return dnsmessage.TypeAAAA
 }
 
-// forwardChanges returns the update section for the forward zone: drop
-// whatever is at the name today, then put the lease there.
+// forwardChanges returns the update section that claims a name: drop
+// whatever addresses are there today, put the lease there, and write the
+// DHCID that says whose name it now is.
 //
 // The delete comes first and covers the whole RRset rather than one record,
 // because a client that moved to a new address would otherwise end up with
 // both, and a resolver would hand out the stale one half the time. RFC 2136
-// applies the update section in order and as one transaction, so the two
-// travel in a single message.
+// applies the update section in order and as one transaction, so all of it
+// travels in a single message and no resolver ever sees the name without an
+// address.
 func forwardChanges(j job, ttl uint32) []change {
 	rtype := addressType(j.addrs[0])
-	changes := make([]change, 0, len(j.addrs)+1)
+	changes := make([]change, 0, len(j.addrs)+2)
 	changes = append(changes, deleteRRset(j.name, rtype))
-	if j.remove {
-		return changes
-	}
 	for _, addr := range j.addrs {
 		changes = append(changes, addRecord(j.name, rtype, ttl, addr.AsSlice()))
 	}
-	return changes
+	return append(changes, addRecord(j.name, typeDHCID, ttl, j.dhcid))
+}
+
+// withdrawChanges returns the update section that takes a name back out of
+// the zone: the addresses, and the DHCID that held it.
+//
+// The DHCID goes as a single-record delete rather than an RRset delete. The
+// prerequisite has already held the server to our own record, and deleting
+// exactly that one leaves anything else at the name alone.
+func withdrawChanges(j job) []change {
+	return []change{
+		deleteRRset(j.name, addressType(j.addrs[0])),
+		deleteRecord(j.name, typeDHCID, j.dhcid),
+	}
 }
 
 // reverseChanges returns the update section for one address's reverse zone.
@@ -89,21 +152,24 @@ func reverseChanges(j job, addr netip.Addr, ttl uint32) ([]change, error) {
 // The four sections carry different things from a query: the single question
 // is the zone being updated, asked as an SOA so a server that does not
 // implement UPDATE has something sensible to refuse; the answer section holds
-// prerequisites, of which this plugin uses none; and the authority section
-// holds the changes.
+// the prerequisites the server has to find true before it applies anything;
+// and the authority section holds the changes.
 //
 // Names are written out in full. Compression would save a few octets, and
 // nsupdate does use it, but the TSIG record's owner name may not be
 // compressed and a message whose names are all uncompressed is one where the
 // bytes that were signed can be recovered from the bytes that arrived.
-func buildUpdate(id uint16, zone string, changes []change) ([]byte, error) {
+func buildUpdate(id uint16, zone string, prereqs, changes []change) ([]byte, error) {
 	u := updateBuilder{b: dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: id, OpCode: opCodeUpdate})}
 	u.do(u.b.StartQuestions)
 	u.do(func() error { return u.zone(zone) })
 	u.do(u.b.StartAnswers)
+	for _, c := range prereqs {
+		u.do(func() error { return u.record(c) })
+	}
 	u.do(u.b.StartAuthorities)
 	for _, c := range changes {
-		u.do(func() error { return u.change(c) })
+		u.do(func() error { return u.record(c) })
 	}
 	u.do(u.b.StartAdditionals)
 	if u.err != nil {
@@ -141,13 +207,15 @@ func (u *updateBuilder) zone(zone string) error {
 	})
 }
 
-// change writes one record of the update section.
+// record writes one record into whichever section is open, which is how the
+// same shape serves a prerequisite and a change.
 //
 // Every record goes on the wire as an opaque resource. dnsmessage has typed
 // bodies for A, AAAA and PTR, but none of them can hold the empty RDATA an
-// RRset delete needs, and building the two forms the same way keeps one path
-// through the encoder instead of two that have to agree.
-func (u *updateBuilder) change(c change) error {
+// RRset delete needs, it has no body for DHCID at all, and building every
+// form the same way keeps one path through the encoder instead of several
+// that have to agree.
+func (u *updateBuilder) record(c change) error {
 	name, err := dnsmessage.NewName(c.name)
 	if err != nil {
 		return fmt.Errorf("record name %q: %w", c.name, err)

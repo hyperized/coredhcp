@@ -4,6 +4,11 @@
 # here; the tests drive the plugin's update logic directly and only the DNS
 # server is real.
 #
+# Knot is what makes these tests worth running: it weighs the DHCID
+# prerequisites the plugin sends, so the test where one client asks for
+# another's name is refused by a real name server rather than by a stub
+# written to agree with the code under test.
+#
 # Drive it with `make test-ddns` from the repo root, which tears the stack down
 # afterwards. Knobs, all with defaults: COMPOSE_PROJECT_NAME, KNOT_TAG,
 # GO_TAG, DDNS_TSIG_SECRET.
