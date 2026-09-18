@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       matrix:
-        go: ['1.26', '1.27']
+        go: ['1.27']
     env:
       # Whether an upload is possible, never the token itself. A step's `if`
       # can read neither the secrets context nor that step's own env, so the
@@ -66,7 +66,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       matrix:
-        go: ['1.26', '1.27']
+        go: ['1.27']
     env:
       # Whether an upload is possible, never the token itself. A step's `if`
       # can read neither the secrets context nor that step's own env, so the

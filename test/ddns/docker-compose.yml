@@ -34,7 +34,7 @@ services:
   # Exits with the test result: `up --exit-code-from tester` returns this
   # container's exit code.
   tester:
-    image: golang:${GO_TAG:-1.26}
+    image: golang:${GO_TAG:-1.27}
     depends_on:
       knot:
         condition: service_healthy
