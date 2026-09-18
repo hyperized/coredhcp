@@ -1,6 +1,6 @@
 # The build stage runs on the build host's architecture and cross-compiles,
 # so multi-arch image builds don't emulate the Go compiler.
-FROM --platform=$BUILDPLATFORM golang:1.26@sha256:9d2f36f06329b2a141b9db99ffa32765cf695ee57b813ca29e245e8670bcbfff AS build
+FROM --platform=$BUILDPLATFORM golang:1.27@sha256:f44f6e88636cfb311f9ebace870ded69d943f227bb3cb27d32ffd84ea18c43ea AS build
 ARG TARGETOS TARGETARCH
 
 # setcap, from libcap2-bin, only writes an extended attribute on the file, so
@@ -29,7 +29,7 @@ RUN mkdir -p /leasedb
 # Distroless static: certificates, timezone data and a passwd file, which is
 # all a static Go binary still wants from a base image. No shell to exec into
 # and no package manager, and the default user is 65532 rather than root.
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:1c2c046bc09ed40fad370b599a0b1ae7987f55b01e247cf27a7c27cd97e5bbc7
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
 COPY --from=build /coredhcp /usr/local/bin/coredhcp
 COPY --from=build --chown=65532:65532 /leasedb /var/lib/coredhcp
 USER 65532:65532
