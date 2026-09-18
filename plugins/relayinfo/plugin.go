@@ -101,14 +101,23 @@
 // making, and a server that believes it hands that client whichever address
 // it asked for.
 //
-// The allow list is what closes that. Before anything in the packet is read,
-// the source address of the datagram is matched against the configured
-// prefixes, and a request from anywhere else is dropped. The check is on the
-// UDP source the server saw rather than on anything the packet claims about
-// itself, and it applies to every message type: a check on where a packet
-// came from is worth little if it makes exceptions. A request the server
-// could not attribute at all is dropped too, since the source address is the
-// only thing the check has to go on.
+// The allow list is what closes that. A request presenting relay information
+// has the source address of its datagram matched against the configured
+// prefixes before the mapping is read, and is dropped when it came from
+// anywhere else. On DHCPv4 that means a request carrying option 82 or a
+// giaddr, on DHCPv6 a Relay-forward. The check is on the UDP source the
+// server saw rather than on anything the packet claims about itself, so the
+// forgery this is here to stop, an on-link client inventing an option 82 of
+// its own, is refused on the one thing it could not fake. A relayed request
+// the server could not attribute at all is dropped too, since the source
+// address is all the check has to go on.
+//
+// A request presenting no relay information is passed to the next plugin
+// untouched, the way it was before the list existed. There is nothing in it
+// for this plugin to map and nothing in it to forge, and dropping it would
+// stop a section serving on-link clients alongside relayed ones from
+// answering the on-link ones at all: their source is the client itself, or
+// 0.0.0.0 for a DHCPv4 client that has no address yet.
 //
 // That is a filter and not authentication, and it is worth being plain about
 // what it does not buy. A host sharing a segment with a trusted relay can
@@ -121,11 +130,12 @@
 //
 // # Placement
 //
-// A dropped request ends the chain, so no later plugin answers it either. A
-// server that also serves clients on its own link wants those clients covered
-// by the allow list, or relayinfo in a section of its own. Drops are logged
-// at Info with the source address, at most one line per second per reason, so
-// a flood of rejected packets does not become a flood of log lines.
+// A dropped request ends the chain, so no later plugin answers it either.
+// Only a request carrying relay information is ever dropped, so a section
+// serving on-link clients alongside relayed ones keeps working with just the
+// relays in the list. Drops are logged at Info with the source address, at
+// most one line per second per reason, so a flood of rejected packets does
+// not become a flood of log lines.
 package relayinfo
 
 import (
@@ -133,6 +143,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/netip"
 	"path/filepath"
 	"slices"
@@ -376,8 +387,28 @@ func passthrough4(mt dhcpv4.MessageType) bool {
 		mt == dhcpv4.MessageTypeDecline
 }
 
+// relayed4 reports whether a DHCPv4 request presents relay information, by
+// carrying an option 82 or by naming a relay in giaddr. Only those are
+// matched against the allow list; a request with neither has nothing this
+// plugin could map and nothing a client could have forged into it.
+func relayed4(req *dhcpv4.DHCPv4) bool {
+	return req.RelayAgentInfo() != nil || giaddrSet(req.GatewayIPAddr)
+}
+
+// giaddrSet reports whether giaddr names a relay. An unset field reaches us
+// as nil, as four zero bytes, or as 0.0.0.0 in 16-byte form, and all three
+// mean the same thing.
+func giaddrSet(ip net.IP) bool {
+	addr, ok := netip.AddrFromSlice(ip)
+	return ok && !addr.Unmap().IsUnspecified()
+}
+
 // Handler4 handles DHCPv4 packets for the relayinfo plugin.
 func (s *pluginState) Handler4(ctx context.Context, req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+	if !relayed4(req) {
+		log.Debug("request carries no relay information, passing")
+		return resp, false
+	}
 	if !s.fromAllowedRelay(ctx) {
 		return nil, true
 	}
@@ -398,6 +429,17 @@ func (s *pluginState) Handler4(ctx context.Context, req, resp *dhcpv4.DHCPv4) (*
 
 // Handler6 handles DHCPv6 packets for the relayinfo plugin.
 func (s *pluginState) Handler6(ctx context.Context, req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
+	// The plugin reads its key out of the outermost relay, the one closest
+	// to the server. With relays chained, that is the aggregation device
+	// rather than the access switch the client is plugged into, and its
+	// options are the ones the operator provisions against. A message that
+	// came straight from a client carries no relay option at all, so there
+	// is nothing here to match against the allow list and nothing to map.
+	relay, isRelay := req.(*dhcpv6.RelayMessage)
+	if !isRelay {
+		log.Debug("request did not come through a relay, passing")
+		return resp, false
+	}
 	if !s.fromAllowedRelay(ctx) {
 		return nil, true
 	}
@@ -418,15 +460,6 @@ func (s *pluginState) Handler6(ctx context.Context, req, resp dhcpv6.DHCPv6) (dh
 		return resp, false
 	}
 
-	// The request as handed to the plugin is the outermost relay, the one
-	// closest to the server. With relays chained, that is the aggregation
-	// device rather than the access switch the client is plugged into, and
-	// its options are the ones the operator provisions against.
-	relay, ok := req.(*dhcpv6.RelayMessage)
-	if !ok {
-		log.Debug("request did not come through a relay, passing")
-		return resp, false
-	}
 	key := s.extract6(relay)
 	rec, ok := s.match(key)
 	if !ok {

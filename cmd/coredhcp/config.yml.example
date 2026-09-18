@@ -122,7 +122,8 @@ server6:
         # client, from a file of "<key value> <IPv6> [lease]" lines. The key
         # is the interface-id (option 18) or the remote-id (option 37) the
         # relay stamped on the request. allow names the relays whose stamps
-        # are believed, and a request from any other source is dropped.
+        # are believed: a relayed request from any other source is dropped,
+        # while one that came straight from a client passes on untouched.
         # - relayinfo: file:<path> key:<interface-id | remote-id> allow <addr|cidr>... [autorefresh]
         # - relayinfo: file:/etc/coredhcp/ports-v6.txt key:interface-id allow fe80::/10 autorefresh
 
@@ -347,7 +348,9 @@ server4:
         # is one of the option 82 sub-options the relay stamped on the
         # request. It ends the chain on a match, like file, so list it after
         # the option plugins. allow names the relays whose stamps are
-        # believed, and a request from any other source is dropped.
+        # believed: a request carrying an option 82 or a giaddr from any
+        # other source is dropped, while an on-link client that carries
+        # neither passes on untouched.
         # - relayinfo: file:<path> key:<circuit-id | remote-id | subscriber-id> allow <addr|cidr>... [autorefresh]
         # - relayinfo: file:/etc/coredhcp/ports.txt key:circuit-id allow 10.0.1.1 10.0.2.0/24 autorefresh
 

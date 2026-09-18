@@ -7,6 +7,7 @@ package relayinfo
 import (
 	"context"
 	"errors"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -642,4 +644,66 @@ func TestWatchLoop(t *testing.T) {
 			t.Fatal("watchLoop did not return after Errors was closed")
 		}
 	})
+}
+
+// TestGiaddrSet pins the three spellings an unset giaddr arrives in. The
+// field reaches a handler as nil, as four zero bytes, or as 0.0.0.0 in
+// 16-byte form, and net.IP.IsUnspecified answers false for the nil case, so
+// reading the field directly would have marked an on-link request relayed.
+func TestGiaddrSet(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ip   net.IP
+		want bool
+	}{
+		{name: "nil", ip: nil},
+		{name: "four zero bytes", ip: net.IPv4zero.To4()},
+		{name: "sixteen zero bytes", ip: net.IPv6unspecified},
+		{name: "a wrong-length slice", ip: net.IP{1, 2, 3}},
+		{name: "an IPv4 relay", ip: net.ParseIP("10.0.1.1"), want: true},
+		{name: "an IPv4 relay in four-byte form", ip: net.ParseIP("10.0.1.1").To4(), want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, giaddrSet(tc.ip))
+		})
+	}
+}
+
+// TestRelayed4 pins which DHCPv4 requests are measured against the allow
+// list: the ones presenting relay information, by either of the two marks a
+// relay leaves on a request.
+func TestRelayed4(t *testing.T) {
+	newReq := func(t *testing.T) *dhcpv4.DHCPv4 {
+		t.Helper()
+		req, err := dhcpv4.New()
+		require.NoError(t, err)
+		return req
+	}
+
+	for _, tc := range []struct {
+		name string
+		mark func(*dhcpv4.DHCPv4)
+		want bool
+	}{
+		{name: "neither option 82 nor giaddr", mark: func(*dhcpv4.DHCPv4) {}},
+		{
+			name: "option 82 alone",
+			mark: func(req *dhcpv4.DHCPv4) {
+				req.UpdateOption(dhcpv4.OptRelayAgentInfo(
+					dhcpv4.OptGeneric(dhcpv4.AgentCircuitIDSubOption, []byte("rack4-sw1:eth3"))))
+			},
+			want: true,
+		},
+		{
+			name: "giaddr alone",
+			mark: func(req *dhcpv4.DHCPv4) { req.GatewayIPAddr = net.ParseIP("10.0.1.1") },
+			want: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := newReq(t)
+			tc.mark(req)
+			assert.Equal(t, tc.want, relayed4(req))
+		})
+	}
 }
