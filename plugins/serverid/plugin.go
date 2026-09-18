@@ -11,6 +11,7 @@ package serverid
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 
@@ -49,7 +50,7 @@ func (p *pluginState6) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	msg, err := req.GetInnerMessage()
 	if err != nil {
 		// BUG: this should already have failed in the main handler. Abort
-		log.Error(err)
+		log.Errorf("BUG: cannot read the client message inside the relayed request, dropping it: %v; the client will retry, report this with the server log", err)
 		return nil, true
 	}
 
@@ -93,7 +94,7 @@ func (p *pluginState6) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 // at it.
 func (p *pluginState4) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	if req.OpCode != dhcpv4.OpcodeBootRequest {
-		log.Warningf("not a BootRequest, ignoring")
+		log.Warningf("request opcode is %s, not BootRequest, passing it on unchanged; check whether a relay or another DHCP server is looping replies back here", req.OpCode)
 		return resp, false
 	}
 	sid := req.ServerIdentifier()
@@ -127,14 +128,14 @@ func requiresServerID(t dhcpv4.MessageType) bool {
 func setup4(args ...string) (handler.Handler4, error) {
 	log.Printf("loading `server_id` plugin for DHCPv4 with args: %v", args)
 	if len(args) < 1 {
-		return nil, errors.New("need an argument")
+		return nil, errors.New("no server identifier given; pass this server's IPv4 address, for example 10.0.0.1")
 	}
 	serverID := net.ParseIP(args[0])
 	if serverID == nil {
-		return nil, errors.New("invalid or empty IP address")
+		return nil, fmt.Errorf("argument %q is not an IP address; pass this server's IPv4 address, for example 10.0.0.1", args[0])
 	}
 	if serverID.To4() == nil {
-		return nil, errors.New("not a valid IPv4 address")
+		return nil, fmt.Errorf("argument %q is not an IPv4 address; under server4 the server identifier is a dotted address such as 10.0.0.1", args[0])
 	}
 	p := pluginState4{serverID: serverID.To4()}
 	return p.Handler4, nil
@@ -143,20 +144,20 @@ func setup4(args ...string) (handler.Handler4, error) {
 func setup6(args ...string) (handler.Handler6, error) {
 	log.Printf("loading `server_id` plugin for DHCPv6 with args: %v", args)
 	if len(args) < 2 {
-		return nil, errors.New("need a DUID type and value")
+		return nil, fmt.Errorf("need a DUID type and a link-layer address, got %d argument(s); write them as two arguments, for example LL aa:bb:cc:dd:ee:ff", len(args))
 	}
 	duidType := args[0]
 	if duidType == "" {
-		return nil, errors.New("got empty DUID type")
+		return nil, errors.New("the DUID type argument is empty; use LL or LLT, for example LL aa:bb:cc:dd:ee:ff")
 	}
 	duidValue := args[1]
 	if duidValue == "" {
-		return nil, errors.New("got empty DUID value")
+		return nil, errors.New("the DUID value argument is empty; give a link-layer address, for example LL aa:bb:cc:dd:ee:ff")
 	}
 	duidType = strings.ToLower(duidType)
 	hwaddr, err := net.ParseMAC(duidValue)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("DUID value %q is not a MAC address: %w; write it as six octets, for example aa:bb:cc:dd:ee:ff", duidValue, err)
 	}
 	p := pluginState6{}
 	switch duidType {
@@ -175,9 +176,9 @@ func setup6(args ...string) (handler.Handler6, error) {
 			LinkLayerAddr: hwaddr,
 		}
 	case "en", "uuid":
-		return nil, errors.New("EN/UUID DUID type not supported yet")
+		return nil, fmt.Errorf("DUID type %q is not supported yet; use LL or LLT, for example LL aa:bb:cc:dd:ee:ff", args[0])
 	default:
-		return nil, errors.New("opaque DUID type not supported yet")
+		return nil, fmt.Errorf("DUID type %q is not recognised; use LL or LLT (also spelled duid-ll and duid-llt), for example LL aa:bb:cc:dd:ee:ff", args[0])
 	}
 	log.Printf("using %s %s", duidType, duidValue)
 

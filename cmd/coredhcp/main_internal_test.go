@@ -70,7 +70,8 @@ func TestRunBadLogFile(t *testing.T) {
 	withFlags(t, "/nonexistent-dir-coredhcp-test-xyz/foo.log", "info", "", false, false)
 	err := run(io.Discard)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to open log file")
+	assert.Contains(t, err.Error(), "cannot open log file")
+	assert.Contains(t, err.Error(), "point --logfile")
 }
 
 func TestRunConfigLoadFailure(t *testing.T) {
@@ -81,7 +82,8 @@ func TestRunConfigLoadFailure(t *testing.T) {
 	withFlags(t, "", "info", badConf, false, false)
 	err := run(io.Discard)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to load configuration")
+	assert.Contains(t, err.Error(), "cannot load the configuration")
+	assert.Contains(t, err.Error(), "pass --conf")
 }
 
 // unregisterPlugins hands the package-global plugin registry back the way it

@@ -13,7 +13,6 @@
 package bitmap
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -41,7 +40,7 @@ type Allocator struct {
 func (a *Allocator) toIndex(base net.IP) (uint, error) {
 	value, err := allocators.Offset(base, a.containing.IP, a.page)
 	if err != nil {
-		return 0, fmt.Errorf("cannot compute prefix index: %w", err)
+		return 0, fmt.Errorf("cannot compute prefix index for %s in pool %s: %w; check the pool subnet in the plugin's arguments", base, a.containing.String(), err)
 	}
 
 	return uint(value), nil
@@ -84,7 +83,7 @@ func (a *Allocator) Allocate(hint net.IPNet) (ret net.IPNet, err error) {
 	ret.IP, err = a.toPrefix(next)
 	if err != nil {
 		// This violates the assumption that every index in the bitmap maps back to a valid prefix
-		err = fmt.Errorf("BUG: could not get prefix from allocation: %w", err)
+		err = fmt.Errorf("BUG: could not get prefix from allocation: %w; report this with the pool subnet and prefix length the plugin was given", err)
 		a.bitmap.Clear(next)
 	}
 	return ret, err
@@ -115,11 +114,11 @@ func NewBitmapAllocator(pool net.IPNet, size int) (*Allocator, error) {
 
 	switch {
 	case allocOrder < 0:
-		return nil, errors.New("the size of allocated prefixes cannot be larger than the pool they're allocated from")
+		return nil, fmt.Errorf("the size of allocated prefixes cannot be larger than the pool they're allocated from: /%d is wider than /%d; set the prefix length argument to %d or more", size, poolSize, poolSize)
 	case allocOrder >= strconv.IntSize:
-		return nil, fmt.Errorf("a pool with more than 2^%d items is not representable", size-poolSize)
+		return nil, fmt.Errorf("a pool with more than 2^%d items is not representable on this platform; use a prefix length below /%d", allocOrder, poolSize+strconv.IntSize)
 	case allocOrder >= 32:
-		log.Warningln("Using a pool of more than 2^32 elements may result in large memory consumption")
+		log.Warningf("the pool holds 2^%d prefixes, one bitmap bit each; lower the prefix length argument to carve fewer, wider prefixes if memory runs short", allocOrder)
 	}
 
 	// A bitset can always hold 1<<allocOrder items here: Cap() is the max

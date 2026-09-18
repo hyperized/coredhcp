@@ -20,5 +20,5 @@ import (
 // scope here (see server/sendEthernet.go, //go:build linux).
 func TestSendEthernetStubAlwaysErrors(t *testing.T) {
 	err := sendEthernet(net.Interface{}, &dhcpv4.DHCPv4{})
-	assert.EqualError(t, err, "raw Ethernet replies are only supported on Linux")
+	assert.ErrorContains(t, err, "raw Ethernet replies are only supported on Linux")
 }

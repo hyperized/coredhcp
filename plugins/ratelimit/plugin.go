@@ -211,7 +211,7 @@ var optionParsers = []struct {
 // first so that an argument only ever overrides one of them.
 func parseArgs(args []string) (*settings, error) {
 	if len(args) == 0 {
-		return nil, errors.New("need a rate as the first argument, for example 20/s or 600/m")
+		return nil, errors.New("no rate given; make the first argument the per-client rate, written as <n>/s or <n>/m, for example 20/s")
 	}
 	interval, perSecond, err := parseRate("rate", args[0])
 	if err != nil {
@@ -242,12 +242,12 @@ func applyOption(s *settings, seen map[string]struct{}, arg string) error {
 			continue
 		}
 		if _, dup := seen[o.prefix]; dup {
-			return fmt.Errorf("%s given more than once", argName(o.prefix))
+			return fmt.Errorf("%s given more than once; keep one %s<value> on the ratelimit line and remove the rest", argName(o.prefix), o.prefix)
 		}
 		seen[o.prefix] = struct{}{}
 		return o.apply(s, raw)
 	}
-	return fmt.Errorf("unknown argument %q, want one of %s<n>, %s%s|%s|%s, %s<n> or %s<rate>",
+	return fmt.Errorf("unknown argument %q; use one of %s<n>, %s%s|%s|%s, %s<n> or %s<rate>, with the rate itself first on the line",
 		arg, burstArg, perArg, perMAC, perSource, perBoth, maxArg, globalArg)
 }
 
@@ -276,7 +276,8 @@ func applyPer(s *settings, raw string) error {
 	case perBoth:
 		s.mode = modeBoth
 	default:
-		return fmt.Errorf("invalid %s%s, want %s, %s or %s", perArg, raw, perMAC, perSource, perBoth)
+		return fmt.Errorf("%q is not a way to identify a client; use %s%s, %s%s or %s%s, or leave it out for the default of %s",
+			perArg+raw, perArg, perMAC, perArg, perSource, perArg, perBoth, perMAC)
 	}
 	return nil
 }
@@ -316,7 +317,7 @@ func applyGlobal(s *settings, raw string) error {
 func parseRate(name, raw string) (interval time.Duration, perSecond int, err error) {
 	count, period, ok := strings.Cut(raw, "/")
 	if !ok {
-		return 0, 0, fmt.Errorf("invalid %s %q, want <n>/%s or <n>/%s", name, raw, periodSecond, periodMinute)
+		return 0, 0, fmt.Errorf("%s %q has no period; write it as <n>/%s or <n>/%s, for example 20/s or 600/m", name, raw, periodSecond, periodMinute)
 	}
 	n, err := parseCount(name, count, maxRate)
 	if err != nil {
@@ -328,7 +329,8 @@ func parseRate(name, raw string) (interval time.Duration, perSecond int, err err
 	case periodMinute:
 		return time.Minute / time.Duration(n), n / 60, nil
 	default:
-		return 0, 0, fmt.Errorf("invalid %s %q, want a period of %q or %q", name, raw, periodSecond, periodMinute)
+		return 0, 0, fmt.Errorf("%s %q has a period this plugin does not know; use %q for per second or %q for per minute, as in 20/s or 600/m",
+			name, raw, periodSecond, periodMinute)
 	}
 }
 
@@ -338,10 +340,10 @@ func parseRate(name, raw string) (interval time.Duration, perSecond int, err err
 func parseCount(name, raw string, upper int) (int, error) {
 	n, err := strconv.Atoi(raw)
 	if err != nil {
-		return 0, fmt.Errorf("invalid %s %q, want a whole number", name, raw)
+		return 0, fmt.Errorf("%s %q is not a whole number; use a positive integer up to %d", name, raw, upper)
 	}
 	if n < 1 || n > upper {
-		return 0, fmt.Errorf("%s %d out of range, want 1 to %d", name, n, upper)
+		return 0, fmt.Errorf("%s %d is out of range; use a whole number from 1 to %d", name, n, upper)
 	}
 	return n, nil
 }
@@ -525,7 +527,7 @@ func (s *state) allow(key []byte) bool {
 	allowed, sum := s.consume(key)
 	s.mu.Unlock()
 	if sum.emit {
-		s.warn("dropped %d requests over the last %s, %d distinct keys",
+		s.warn("dropped %d requests over the last %s from %d distinct clients; raise the rate or burst: if these are legitimate clients",
 			sum.dropped, sum.over.Round(time.Second), sum.distinct)
 	}
 	return allowed

@@ -383,19 +383,19 @@ func TestSetupRejectsBadConfiguration(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"nothing at all", nil, "server:<ip> is required"},
+		{"nothing at all", nil, "server:<ip> is missing"},
 		{"a server that has to be resolved first", []string{"server:ns.example.com", "zone:home.lan"}, "IP address"},
-		{"no key", []string{"server:10.0.0.53", "zone:home.lan"}, "key:<name>:<secret> is required"},
-		{"an unknown argument", []string{"server:10.0.0.53", "zone:home.lan", "key:k:" + keySecret, "ttls:60"}, "unknown argument"},
+		{"no key", []string{"server:10.0.0.53", "zone:home.lan"}, "key:<name>:<secret> is missing"},
+		{"an unknown argument", []string{"server:10.0.0.53", "zone:home.lan", "key:k:" + keySecret, "ttls:60"}, `argument "ttls:60" is not one this plugin takes`},
 		{
 			"a protected name in another zone",
 			[]string{"server:10.0.0.53", "zone:home.lan", "key:k:" + keySecret, "protect:vpn.example.com"},
-			"invalid protect:",
+			"protect:vpn.example.com is not a name this plugin can protect",
 		},
 		{
 			"a protect: argument with nothing in it",
 			[]string{"server:10.0.0.53", "zone:home.lan", "key:k:" + keySecret, "protect:vpn,"},
-			"invalid protect:",
+			"protect:vpn, holds an empty name",
 		},
 	}
 	for _, tc := range cases {

@@ -28,7 +28,7 @@ var sendEthernetFn = sendEthernet
 // errNoLayer2Interface is what the observer is told when a raw frame has
 // nowhere to go. There is no error from the network stack to pass on here:
 // the server never found out which interface the request arrived on.
-var errNoLayer2Interface = errors.New("no interface information for a layer-2 reply")
+var errNoLayer2Interface = errors.New("no interface information for a layer-2 reply; bind the DHCPv4 listener to an interface, for example `listen: \"%eth0\"`")
 
 // ifaceName is the interface a packet arrived on: the one the listener is
 // bound to, or the one the socket reported for this packet.
@@ -161,7 +161,7 @@ func (l *listener6) HandleMsg6(buf []byte, oob *ipv6.ControlMessage, peer *net.U
 
 	resp, err := buildReply6(req)
 	if err != nil {
-		log.Warningf("MainHandler6: %v", err)
+		log.Warningf("DHCPv6: cannot build a reply for the request from %v: %v; the packet is dropped, check the client or the relay if this repeats", peer, err)
 		rep.emit(events.OutcomeUnsupported, events.PathNone, err)
 		return
 	}
@@ -177,7 +177,7 @@ func (l *listener6) HandleMsg6(buf []byte, oob *ipv6.ControlMessage, peer *net.U
 
 	resp, err = encapsulateRelay6(req, resp)
 	if err != nil {
-		log.Warningf("DHCPv6: cannot create relay-repl from relay-forw: %v", err)
+		log.Warningf("DHCPv6: cannot create relay-repl from relay-forw: %v; the packet is dropped, check the relay agent if this repeats", err)
 		rep.emit(events.OutcomeUnsupported, events.PathNone, err)
 		return
 	}
@@ -190,7 +190,7 @@ func (l *listener6) HandleMsg6(buf []byte, oob *ipv6.ControlMessage, peer *net.U
 		if idx := replyIfIndex(l.Index, oobIfIndex6(oob)); idx != 0 {
 			woob = &ipv6.ControlMessage{IfIndex: idx}
 		} else {
-			log.Errorf("HandleMsg6: Did not receive interface information")
+			log.Errorf("DHCPv6: no interface for the link-local reply to %v, leaving the choice to the routing table; name the interface in `listen` if the reply goes astray", peer)
 		}
 	}
 	if _, err := l.WriteTo(resp.ToBytes(), woob, peer); err != nil {
@@ -257,7 +257,7 @@ func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, src *net.UD
 		if idx := replyIfIndex(l.Index, oobIfIndex4(oob)); idx != 0 {
 			woob = &ipv4.ControlMessage{IfIndex: idx}
 		} else {
-			log.Errorf("HandleMsg4: Did not receive interface information")
+			log.Errorf("DHCPv4: no interface for the reply to %v, leaving the choice to the routing table; name the interface in `listen` if the reply goes astray", peer)
 		}
 	}
 
@@ -266,7 +266,7 @@ func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, src *net.UD
 		return
 	}
 	if _, err := l.WriteTo(resp.ToBytes(), woob, peer); err != nil {
-		log.Errorf("MainHandler4: conn.Write to %v failed: %v", peer, err)
+		log.Errorf("DHCPv4: writing the reply to %v failed: %v; the client gets nothing and will retry, check the route to it and the interface the socket is bound to", peer, err)
 		rep.emit4(events.OutcomeSendError, peer, err)
 		return
 	}
@@ -279,18 +279,18 @@ func sendLayer2(rep *requestReport, woob *ipv4.ControlMessage, resp *dhcpv4.DHCP
 	if woob == nil {
 		// Without an interface there is nothing to put the frame on;
 		// dereferencing woob here used to crash the server.
-		log.Errorf("MainHandler4: cannot send layer-2 reply without interface information")
+		log.Errorf("DHCPv4: cannot send layer-2 reply without interface information; bind the listener to an interface, for example `listen: \"%%eth0\"`")
 		rep.emit(events.OutcomeSendError, events.PathLayer2, errNoLayer2Interface)
 		return
 	}
 	intf, err := net.InterfaceByIndex(woob.IfIndex)
 	if err != nil {
-		log.Errorf("MainHandler4: Can not get Interface for index %d %v", woob.IfIndex, err)
+		log.Errorf("DHCPv4: interface index %d no longer names an interface: %v; the reply is dropped, this is what a link going down under the running server looks like", woob.IfIndex, err)
 		rep.emit(events.OutcomeSendError, events.PathLayer2, err)
 		return
 	}
 	if err := sendEthernetFn(*intf, resp); err != nil {
-		log.Errorf("MainHandler4: Cannot send Ethernet packet: %v", err)
+		log.Errorf("DHCPv4: cannot send the raw layer-2 reply: %v; the client gets nothing and will retry, check that the server has CAP_NET_RAW", err)
 		rep.emit(events.OutcomeSendError, events.PathLayer2, err)
 		return
 	}

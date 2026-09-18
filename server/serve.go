@@ -261,7 +261,7 @@ func listen4(a *net.UDPAddr) (*listener4, error) {
 	if a.Zone != "" {
 		ifi, err = net.InterfaceByName(a.Zone)
 		if err != nil {
-			return nil, fmt.Errorf("DHCPv4: Listen could not find interface %s: %w", a.Zone, err)
+			return nil, fmt.Errorf("DHCPv4: Listen could not find interface %s: %w; name an interface the system has, or drop the %%%s suffix from `listen` to bind every interface", a.Zone, err, a.Zone)
 		}
 		l4.Interface = *ifi
 	} else {
@@ -303,7 +303,7 @@ func listen6(a *net.UDPAddr) (*listener6, error) {
 	if a.Zone != "" {
 		ifi, err = net.InterfaceByName(a.Zone)
 		if err != nil {
-			return nil, fmt.Errorf("DHCPv6: Listen could not find interface %s: %w", a.Zone, err)
+			return nil, fmt.Errorf("DHCPv6: Listen could not find interface %s: %w; name an interface the system has, or drop the %%%s suffix from `listen` to bind every interface", a.Zone, err, a.Zone)
 		}
 		l6.Interface = *ifi
 	} else {
@@ -354,7 +354,7 @@ func Start(config *config.Config, opts ...Option) (*Servers, error) {
 	}
 	total := countAddresses(config)
 	if total == 0 {
-		return nil, errNoListeners
+		return nil, fmt.Errorf("%w; give server6.listen or server4.listen at least one address, or drop the empty `listen` key to take the defaults", errNoListeners)
 	}
 	srv := Servers{
 		// One slot per socket. An unbuffered channel used to strand every
@@ -459,8 +459,8 @@ func warnNoRelayPlugin(family events.Family, relayChecked bool) {
 	if relayChecked {
 		return
 	}
-	log.Warningf("%s: no `relay` plugin configured, relayed requests will be dropped. "+
-		"Add `relay: allow <address|prefix> ...` naming the relays this server answers.", family)
+	log.Warningf("%s: no `relay` plugin configured, so relayed requests will be dropped; "+
+		"add `relay: allow <address|prefix> ...` to this family's plugin list, naming the relays this server answers", family)
 }
 
 // serve runs one listener's read loop until its socket closes and reports how
@@ -526,7 +526,7 @@ func (s *Servers) Close() {
 	for _, srv := range s.listeners {
 		if srv != nil {
 			if err := srv.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-				log.Errorf("error closing listener: %v", err)
+				log.Errorf("error closing listener: %v; the socket is left to the kernel, which reclaims it when the process exits", err)
 			}
 		}
 	}
@@ -535,6 +535,6 @@ func (s *Servers) Close() {
 func (s *Servers) drain() {
 	s.gate.stop()
 	if !s.gate.wait(s.drainTimeout) {
-		log.Warningf("handlers still running after %s, closing the sockets under them", s.drainTimeout)
+		log.Warningf("handlers still running after %s, closing the sockets under them; the replies they were building are lost, look for a plugin that blocks on the network", s.drainTimeout)
 	}
 }

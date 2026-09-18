@@ -238,7 +238,8 @@ func parseArgs(args []string) (*settings, error) {
 			return nil, err
 		}
 		if seen[p.key] {
-			return nil, fmt.Errorf("%s given more than once", strings.TrimSuffix(p.key, ":"))
+			return nil, fmt.Errorf("%s given more than once; keep one %s<value> on the leasehook line and remove the rest",
+				strings.TrimSuffix(p.key, ":"), p.key)
 		}
 		seen[p.key] = true
 		if err := p.apply(s, raw); err != nil {
@@ -256,7 +257,7 @@ func parserFor(arg string) (argParser, string, error) {
 			return p, raw, nil
 		}
 	}
-	return argParser{}, "", fmt.Errorf("unknown argument %q, want one of %s", arg, knownArgs())
+	return argParser{}, "", fmt.Errorf("unknown argument %q; use one of %s", arg, knownArgs())
 }
 
 // knownArgs lists the accepted keys for an error message.
@@ -272,11 +273,11 @@ func knownArgs() string {
 func validate(s *settings) error {
 	switch {
 	case s.url == "" && s.path == "":
-		return fmt.Errorf("need one of %s<url> or %s<absolute path>", urlArg, execArg)
+		return fmt.Errorf("no destination for the events; add %s<url> for a webhook or %s<absolute path> for a program to run", urlArg, execArg)
 	case s.url != "" && s.path != "":
-		return fmt.Errorf("%s and %s are mutually exclusive, events go to one place", urlArg, execArg)
+		return fmt.Errorf("%s and %s cannot both be set, events go to one place; remove whichever of the two you do not want", urlArg, execArg)
 	case len(s.secret) > 0 && s.url == "":
-		return fmt.Errorf("%s signs the webhook body and has no meaning with %s", secretArg, execArg)
+		return fmt.Errorf("%s signs the webhook body and has no meaning with %s; remove the secret, or send to %s<url> instead", secretArg, execArg, urlArg)
 	}
 	return nil
 }
@@ -292,13 +293,13 @@ func applyURL(s *settings, raw string) error {
 		if uerr, ok := errors.AsType[*url.Error](err); ok {
 			err = uerr.Err
 		}
-		return fmt.Errorf("invalid webhook URL: %w", err)
+		return fmt.Errorf("the webhook URL does not parse: %w; write it as %s%s://host/path or %s%s://host/path", err, urlArg, schemeHTTP, urlArg, schemeHTTPS)
 	}
 	if u.Scheme != schemeHTTP && u.Scheme != schemeHTTPS {
-		return fmt.Errorf("unsupported URL scheme %q, want %s:// or %s://", u.Scheme, schemeHTTP, schemeHTTPS)
+		return fmt.Errorf("unsupported URL scheme %q in the webhook URL; use %s:// or %s://", u.Scheme, schemeHTTP, schemeHTTPS)
 	}
 	if u.Host == "" {
-		return errors.New("webhook URL has no host")
+		return errors.New("the webhook URL has no host; write it as url:https://host/path, with the host straight after the scheme")
 	}
 	s.url = u.String()
 	s.shown = u.Redacted()
@@ -310,7 +311,7 @@ func applyURL(s *settings, raw string) error {
 // happens to have been started in.
 func applyExec(s *settings, raw string) error {
 	if !filepath.IsAbs(raw) {
-		return fmt.Errorf("%s needs an absolute path, got %q", strings.TrimSuffix(execArg, ":"), raw)
+		return fmt.Errorf("%s needs an absolute path, got %q; give the full path, such as /usr/local/bin/lease-event", strings.TrimSuffix(execArg, ":"), raw)
 	}
 	s.path = filepath.Clean(raw)
 	return nil
@@ -322,17 +323,19 @@ func applySecret(s *settings, raw string) error {
 	name, fromEnv := strings.CutPrefix(raw, secretEnvPrefix)
 	if !fromEnv {
 		if raw == "" {
-			return fmt.Errorf("%s needs a value", secretArg)
+			return fmt.Errorf("%s needs a value; use %s%sHOOK_SECRET to read it from the environment and keep it out of config.yml",
+				secretArg, secretArg, secretEnvPrefix)
 		}
 		s.secret = []byte(raw)
 		return nil
 	}
 	if name == "" {
-		return fmt.Errorf("%s%s needs an environment variable name", secretArg, secretEnvPrefix)
+		return fmt.Errorf("%s%s needs an environment variable name; use %s%sHOOK_SECRET and export it before starting coredhcp",
+			secretArg, secretEnvPrefix, secretArg, secretEnvPrefix)
 	}
 	value := os.Getenv(name)
 	if value == "" {
-		return fmt.Errorf("environment variable %s is unset or empty", name)
+		return fmt.Errorf("environment variable %s is unset or empty; export it with the webhook secret before starting coredhcp", name)
 	}
 	s.secret = []byte(value)
 	return nil
@@ -342,10 +345,11 @@ func applySecret(s *settings, raw string) error {
 func applyTimeout(s *settings, raw string) error {
 	d, err := time.ParseDuration(raw)
 	if err != nil {
-		return fmt.Errorf("invalid %s%s: %w", timeoutArg, raw, err)
+		return fmt.Errorf("timeout %q is not a duration: %w; use a Go duration such as 2s or 500ms, or leave it out for the default of %s",
+			raw, err, defaultTimeout)
 	}
 	if d <= 0 {
-		return fmt.Errorf("%s has to be positive, got %s", strings.TrimSuffix(timeoutArg, ":"), raw)
+		return fmt.Errorf("timeout %q is not positive; use a duration above zero such as 2s, or leave it out for the default of %s", raw, defaultTimeout)
 	}
 	s.timeout = d
 	return nil
@@ -355,7 +359,8 @@ func applyTimeout(s *settings, raw string) error {
 func applyQueue(s *settings, raw string) error {
 	n, err := strconv.Atoi(raw)
 	if err != nil || n < 1 {
-		return fmt.Errorf("invalid %s%s, want a positive number of events", queueArg, raw)
+		return fmt.Errorf("queue %q is not a positive number of events; use a whole number such as 1000, or leave it out for the default of %d",
+			raw, defaultQueue)
 	}
 	s.queue = n
 	return nil
@@ -368,7 +373,7 @@ func applyEvents(s *settings, raw string) error {
 	for _, name := range names {
 		name = strings.TrimSpace(name)
 		if !knownEvents[name] {
-			return fmt.Errorf("unknown event %q, want one of %s", name, eventNames())
+			return fmt.Errorf("unknown event %q; use a comma-separated list of %s, or leave %s out for all of them", name, eventNames(), eventsArg)
 		}
 		allowed[name] = true
 	}
@@ -528,7 +533,7 @@ func (p *pluginState) enqueue(ev event) {
 	}
 	payload, err := marshalEvent(ev)
 	if err != nil {
-		log.Errorf("BUG: could not serialise a %s event: %v", ev.Event, err)
+		log.Errorf("BUG: could not serialise a %s event, so it was dropped: %v; please report this with the log line", ev.Event, err)
 		return
 	}
 	select {
@@ -541,7 +546,8 @@ func (p *pluginState) enqueue(ev event) {
 // dropped records one event the queue had no room for.
 func (p *pluginState) dropped() {
 	if total, warn := p.countDrop(); warn {
-		log.Warningf("event queue is full, %d event(s) dropped so far", total)
+		log.Warningf("the event queue is full and %d event(s) have been dropped; check that the hook keeps up, or raise queue: above %d",
+			total, cap(p.queue))
 	}
 }
 
@@ -580,7 +586,7 @@ func (p *pluginState) deliverOne(d delivery) {
 	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
 	defer cancel()
 	if err := p.target.deliver(ctx, d); err != nil {
-		log.Errorf("delivering the %s event failed: %v", d.ev.Event, err)
+		log.Errorf("delivering the %s event failed and it is not retried: %v; check the hook target and the configured timeout", d.ev.Event, err)
 	}
 }
 

@@ -75,13 +75,13 @@ func TestParseBaseURL(t *testing.T) {
 		{name: "host with a subpath", raw: "https://netbox.example.com/netbox", want: "https://netbox.example.com/netbox"},
 		{name: "trailing slash stripped", raw: "https://netbox.example.com/", want: "https://netbox.example.com"},
 		{name: "subpath with trailing slash stripped", raw: "https://netbox.example.com/netbox/", want: "https://netbox.example.com/netbox"},
-		{name: "empty string errors", raw: "", wantErrText: "scheme must be http or https"},
-		{name: "scheme is not http or https", raw: "ftp://host", wantErrText: "scheme must be http or https"},
-		{name: "missing scheme entirely", raw: "netbox.example.com", wantErrText: "scheme must be http or https"},
-		{name: "missing host", raw: "https://", wantErrText: "missing host"},
+		{name: "empty string errors", raw: "", wantErrText: "has no http or https scheme"},
+		{name: "scheme is not http or https", raw: "ftp://host", wantErrText: "has no http or https scheme"},
+		{name: "missing scheme entirely", raw: "netbox.example.com", wantErrText: "has no http or https scheme"},
+		{name: "missing host", raw: "https://", wantErrText: "has no host"},
 		{name: "URL carrying a query", raw: "https://h/?a=b", wantErrText: "query or fragment"},
 		{name: "URL carrying a fragment", raw: "https://h/#f", wantErrText: "query or fragment"},
-		{name: "syntactically invalid URL", raw: "http://%zz", wantErrText: "invalid NetBox URL"},
+		{name: "syntactically invalid URL", raw: "http://%zz", wantErrText: "does not parse"},
 	}
 
 	for _, tc := range cases {
@@ -114,7 +114,7 @@ func TestResolveToken(t *testing.T) {
 		{
 			name:        "an empty string errors",
 			arg:         "",
-			wantErrText: "cannot be empty",
+			wantErrText: "the API token argument is empty",
 		},
 		{
 			name:        "env: with no name errors",
@@ -575,7 +575,7 @@ func TestGetRequestBuildFailure(t *testing.T) {
 	var out macAddressPage
 	err := c.get(context.Background(), macAddressPath, url.Values{}, &out)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "building request")
+	assert.Contains(t, err.Error(), "building the request")
 }
 
 // errReadCloser is an io.ReadCloser whose Read always fails with something
@@ -607,7 +607,7 @@ func TestGetReadFailure(t *testing.T) {
 	var out macAddressPage
 	err := c.get(context.Background(), macAddressPath, url.Values{}, &out)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "reading response")
+	assert.Contains(t, err.Error(), "reading the response")
 }
 
 func TestInterfaceRefString(t *testing.T) {

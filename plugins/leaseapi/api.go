@@ -40,9 +40,9 @@ const (
 // what was asked for: an API that echoes its input back is one more place for
 // something downstream to render it.
 var (
-	ErrUnknownParameter = errors.New("unknown query parameter, want family or source")
-	ErrUnknownFamily    = errors.New("family must be 4 or 6")
-	ErrUnknownSource    = errors.New("no such source")
+	ErrUnknownParameter = errors.New("unknown query parameter; use family=4, family=6 or source=<name>, or send none of them for everything")
+	ErrUnknownFamily    = errors.New("family must be 4 or 6; use family=4 for DHCPv4 or family=6 for DHCPv6, or leave it out for both")
+	ErrUnknownSource    = errors.New("no lease source goes by that name; use a name from the source field of GET /v1/leases, or leave source out")
 )
 
 // streamThreshold is how many entries a response may hold before it is written
@@ -253,8 +253,9 @@ func writeJSON(w http.ResponseWriter, status int, encode func(io.Writer) error) 
 	if err := encode(&buf); err != nil {
 		// Nothing this package encodes has a field encoding/json can refuse,
 		// so reaching this is a bug rather than a bad request.
-		log.Errorf("BUG: encoding a %d response: %v", status, err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		log.Errorf("BUG: encoding a %d response failed: %v; nothing this package encodes can do that, please report it with this log line", status, err)
+		http.Error(w, "the response could not be encoded; this is a coredhcp bug, check the server log for the line starting BUG and report it",
+			http.StatusInternalServerError)
 		return
 	}
 	setJSONHeaders(w)

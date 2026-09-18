@@ -343,7 +343,7 @@ func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 	// an address that a crash then forgets would find it handed to the next
 	// client at the following start.
 	if err := p.settle(pending); err != nil {
-		log.Errorf("Not leasing to MAC %s: %v", mac, err)
+		log.Errorf("Not leasing to MAC %s, its lease could not be written: %v; the client will retry, check the lease database is writable and not held by another process", mac, err)
 		return nil, true
 	}
 	if ip == nil {
@@ -405,7 +405,7 @@ func (p *pluginState) allocateLease(mac string, hint net.IPNet, hostname string,
 	}
 	ip, err := p.allocate(hint)
 	if err != nil {
-		log.Errorf("Could not allocate IP for MAC %s: %v", mac, err)
+		log.Errorf("Could not allocate an address for MAC %s: %v; the client will retry, widen the pool or shorten the lease time if this keeps happening", mac, err)
 		return nil
 	}
 	rec := &Record{
@@ -417,7 +417,7 @@ func (p *pluginState) allocateLease(mac string, hint net.IPNet, hostname string,
 	// it after a restart, so the address goes back whether the write is
 	// refused now or fails later.
 	if err := p.saveIPAddress(mac, rec, func() { p.dropUnwritten(mac, rec) }); err != nil {
-		log.Errorf("SaveIPAddress for MAC %s failed: %v", mac, err)
+		log.Errorf("Could not write the lease for MAC %s, so it was not handed out: %v; check the lease database is writable and not held by another process", mac, err)
 		p.freeUnrecorded(rec)
 		return nil
 	}
@@ -444,7 +444,7 @@ func (p *pluginState) dropUnwritten(mac string, rec *Record) {
 // lock.
 func (p *pluginState) freeUnrecorded(rec *Record) {
 	if err := p.allocator.Free(net.IPNet{IP: rec.IP}); err != nil {
-		log.Errorf("Could not return the unrecorded address %s to the pool: %v", rec.IP, err)
+		log.Errorf("Could not return the unrecorded address %s to the pool: %v; it stays out of circulation until the server is restarted", rec.IP, err)
 	}
 }
 
@@ -464,8 +464,8 @@ func (p *pluginState) atLeaseLimit(now time.Time) bool {
 		return false
 	}
 	if skipped, ok := p.leaseLimit.ready(now, leaseLimitEvery); ok {
-		log.Warningf("Holding %d leases, the %s bound, refusing new ones (%d refusal(s) since the last of these)",
-			p.maxLeases, maxLeasesArg, skipped)
+		log.Warningf("Holding %d leases, the %s bound, so new clients are turned away (%d refusal(s) since the last of these); raise %s or shorten the lease time",
+			p.maxLeases, maxLeasesArg, skipped, maxLeasesArg)
 	}
 	return true
 }
@@ -516,7 +516,7 @@ func (p *pluginState) evictOldestDeclined() bool {
 		return false
 	}
 	if err := p.allocator.Free(net.IPNet{IP: net.ParseIP(oldest)}); err != nil {
-		log.Errorf("Could not return declined IP %s to the pool: %v", oldest, err)
+		log.Errorf("Could not end the probation of declined address %s: %v; it stays out of the pool until the server is restarted", oldest, err)
 		return false
 	}
 	delete(p.declined, oldest)
@@ -533,7 +533,7 @@ func (p *pluginState) reallocateExpired(mac string, record *Record, hostname str
 	log.Printf("lease on %s for MAC %s has expired, re-allocating", record.IP, mac)
 	hint := net.IPNet{IP: record.IP}
 	if err := p.releaseLease(mac, record); err != nil {
-		log.Errorf("Could not reclaim expired lease for MAC %s: %v", mac, err)
+		log.Errorf("Could not reclaim the expired lease for MAC %s: %v; the client keeps the address it has and the next sweep will try again", mac, err)
 		// The address is still spoken for somewhere (a row we failed to
 		// delete, or an allocator that would not free it), so allocating
 		// again could hand a second client the same address. Keep this client
@@ -570,7 +570,7 @@ func (p *pluginState) renew(mac string, record *Record, hostname string, now tim
 		}
 	}
 	if err := p.saveIPAddress(mac, record, undo); err != nil {
-		log.Errorf("Could not persist lease for MAC %s: %v", mac, err)
+		log.Errorf("Could not write the renewed lease for MAC %s: %v; the client will retry, check the lease database is writable and not held by another process", mac, err)
 		undo()
 		return false
 	}
@@ -605,7 +605,7 @@ func (p *pluginState) releaseLease(mac string, record *Record) error {
 // and dropped here.
 func (p *pluginState) handleRelease(req *dhcpv4.DHCPv4) {
 	if err := p.settle(p.withLock(func() { p.release(req) })); err != nil {
-		log.Errorf("Could not record the release from MAC %s: %v", req.ClientHWAddr, err)
+		log.Errorf("Could not record the release from MAC %s: %v; the lease stays until it expires, check the lease database is writable and not held by another process", req.ClientHWAddr, err)
 	}
 }
 
@@ -623,7 +623,7 @@ func (p *pluginState) release(req *dhcpv4.DHCPv4) {
 		return
 	}
 	if err := p.releaseLease(mac, record); err != nil {
-		log.Errorf("Could not release lease for MAC %s: %v", mac, err)
+		log.Errorf("Could not release the lease for MAC %s: %v; it stays until it expires, check the lease database is writable and not held by another process", mac, err)
 		return
 	}
 	log.Printf("Released IP address %s for MAC %s", record.IP, mac)
@@ -637,7 +637,7 @@ func (p *pluginState) release(req *dhcpv4.DHCPv4) {
 // actually holds the address may decline it, and a decline never allocates.
 func (p *pluginState) handleDecline(req *dhcpv4.DHCPv4) {
 	if err := p.settle(p.withLock(func() { p.decline(req) })); err != nil {
-		log.Errorf("Could not record the decline from MAC %s: %v", req.ClientHWAddr, err)
+		log.Errorf("Could not record the decline from MAC %s: %v; the address stays leased until it expires, check the lease database is writable", req.ClientHWAddr, err)
 	}
 }
 
@@ -682,7 +682,7 @@ func (p *pluginState) quarantine(mac string, record *Record) {
 		return
 	}
 	if err := p.freeIPAddress(mac, record); err != nil {
-		log.Errorf("Could not remove declined lease for MAC %s from storage: %v", mac, err)
+		log.Errorf("Could not remove the declined lease for MAC %s from storage: %v; it stays until it expires, check the lease database is writable", mac, err)
 		return
 	}
 	delete(p.Recordsv4, mac)
@@ -696,7 +696,7 @@ func (p *pluginState) quarantine(mac string, record *Record) {
 // cases where no quarantine applies. The caller must hold p's lock.
 func (p *pluginState) freeDeclined(mac string, record *Record) {
 	if err := p.releaseLease(mac, record); err != nil {
-		log.Errorf("Could not free declined lease for MAC %s: %v", mac, err)
+		log.Errorf("Could not free the declined lease for MAC %s: %v; it stays until it expires, check the lease database is writable", mac, err)
 		return
 	}
 	log.Printf("Freed declined IP address %s for MAC %s", record.IP, mac)
@@ -713,7 +713,7 @@ func (p *pluginState) sweepExpired(t time.Time) int {
 			continue
 		}
 		if err := p.releaseLease(mac, record); err != nil {
-			log.Errorf("Could not reclaim expired lease for MAC %s: %v", mac, err)
+			log.Errorf("Could not reclaim the expired lease for MAC %s while sweeping: %v; check the lease database is writable and not held by another process", mac, err)
 			continue
 		}
 		freed++
@@ -735,7 +735,7 @@ func (p *pluginState) sweepDeclined(t time.Time) int {
 			continue
 		}
 		if err := p.allocator.Free(net.IPNet{IP: net.ParseIP(ip)}); err != nil {
-			log.Errorf("Could not return declined IP %s to the pool: %v", ip, err)
+			log.Errorf("Could not return the declined address %s to the pool: %v; it stays out of circulation until the server is restarted", ip, err)
 			continue
 		}
 		delete(p.declined, ip)
@@ -757,7 +757,7 @@ func (p *pluginState) sweepOnce() {
 	var freed int
 	pending := p.withLock(func() { freed = p.reclaim(p.timeNow()) })
 	if err := p.settle(pending); err != nil {
-		log.Errorf("Could not clear a reclaimed lease from storage: %v", err)
+		log.Errorf("Could not clear a reclaimed lease from storage: %v; check the lease database is writable and not held by another process", err)
 	}
 	if freed > 0 {
 		log.Printf("Returned %d DHCPv4 address(es) to the pool", freed)
@@ -879,10 +879,10 @@ func parseOptions(leaseTime time.Duration, size uint64, extra []string) (pluginO
 		key, value, hasValue := strings.Cut(arg, ":")
 		parse, known := optionParsers[key]
 		if !hasValue || !known {
-			return pluginOptions{}, fmt.Errorf("unexpected argument %q, want %s", arg, optionSyntax)
+			return pluginOptions{}, fmt.Errorf("argument %q is not one this plugin takes; use %s, or leave them out for their defaults", arg, optionSyntax)
 		}
 		if seen[key] {
-			return pluginOptions{}, fmt.Errorf("argument %s given more than once", key)
+			return pluginOptions{}, fmt.Errorf("argument %s is given more than once; keep one and remove the rest", key)
 		}
 		seen[key] = true
 		if err := parse(&opts, value); err != nil {
@@ -896,10 +896,12 @@ func parseOptions(leaseTime time.Duration, size uint64, extra []string) (pluginO
 func parseSweepInterval(opts *pluginOptions, raw string) error {
 	interval, err := time.ParseDuration(raw)
 	if err != nil {
-		return fmt.Errorf("invalid sweep interval %q: %w", raw, err)
+		return fmt.Errorf("%s:%s is not a duration: %w; use a Go duration such as 5m, or leave it out for half the lease time, floored at %s",
+			sweepArg, raw, err, minSweepInterval)
 	}
 	if interval <= 0 {
-		return fmt.Errorf("sweep interval has to be positive, got: %v", raw)
+		return fmt.Errorf("%s:%s is not above zero; use a duration such as 5m, or leave it out for half the lease time, floored at %s",
+			sweepArg, raw, minSweepInterval)
 	}
 	opts.sweepInterval = interval
 	return nil
@@ -911,10 +913,12 @@ func parseSweepInterval(opts *pluginOptions, raw string) error {
 func parseDeclineProbation(opts *pluginOptions, raw string) error {
 	probation, err := time.ParseDuration(raw)
 	if err != nil {
-		return fmt.Errorf("invalid decline probation %q: %w", raw, err)
+		return fmt.Errorf("%s:%s is not a duration: %w; use a Go duration such as 1h, or leave it out for the default of %s",
+			declineArg, raw, err, defaultDeclineProbation)
 	}
 	if probation < 0 {
-		return fmt.Errorf("decline probation cannot be negative, got: %v", raw)
+		return fmt.Errorf("%s:%s is negative; use 0 to hand a declined address straight back, or a duration such as 1h",
+			declineArg, raw)
 	}
 	opts.declineProbation = probation
 	return nil
@@ -926,10 +930,11 @@ func parseDeclineProbation(opts *pluginOptions, raw string) error {
 func parseDeclineMax(opts *pluginOptions, raw string) error {
 	count, err := strconv.Atoi(raw)
 	if err != nil {
-		return fmt.Errorf("invalid decline maximum %q: %w", raw, err)
+		return fmt.Errorf("%s:%s is not a number: %w; use a count such as 8, 0 to turn the quarantine off, or leave it out for a tenth of the pool",
+			declineMaxArg, raw, err)
 	}
 	if count < 0 {
-		return fmt.Errorf("decline maximum cannot be negative, got: %v", raw)
+		return fmt.Errorf("%s:%s is negative; use 0 to turn the quarantine off, or a count such as 8", declineMaxArg, raw)
 	}
 	opts.declineMax = count
 	return nil
@@ -941,10 +946,11 @@ func parseDeclineMax(opts *pluginOptions, raw string) error {
 func parseMaxLeases(opts *pluginOptions, raw string) error {
 	count, err := strconv.Atoi(raw)
 	if err != nil {
-		return fmt.Errorf("invalid lease maximum %q: %w", raw, err)
+		return fmt.Errorf("%s:%s is not a number: %w; use a count such as 4096, 0 to turn the bound off, or leave it out for the default of %d",
+			maxLeasesArg, raw, err, defaultMaxLeases)
 	}
 	if count < 0 {
-		return fmt.Errorf("lease maximum cannot be negative, got: %v", raw)
+		return fmt.Errorf("%s:%s is negative; use 0 to turn the bound off, or a count such as 4096", maxLeasesArg, raw)
 	}
 	opts.maxLeases = count
 	return nil
@@ -969,8 +975,8 @@ func setupRange(args ...string) (handler.Handler4, error) {
 	// poolSizeAsInt saturates rather than wraps, which is also what makes
 	// the comparison safe on a 32-bit build.
 	if size := poolSizeAsInt(p.poolSize); p.maxLeases > 0 && size > p.maxLeases {
-		log.Warningf("The pool holds %d addresses but %s bounds the lease table at %d, so the last %d will never be handed out",
-			size, maxLeasesArg, p.maxLeases, size-p.maxLeases)
+		log.Warningf("The pool holds %d addresses but %s bounds the lease table at %d, so the last %d will never be handed out; raise %s or narrow the pool",
+			size, maxLeasesArg, p.maxLeases, size-p.maxLeases, maxLeasesArg)
 	}
 	return p.Handler4, nil
 }
@@ -990,32 +996,32 @@ func newPluginState(args ...string) (*pluginState, error) {
 	p.dbCtx, p.dbCancel = context.WithCancel(context.Background())
 
 	if len(args) < 4 {
-		return nil, fmt.Errorf("invalid number of arguments, want: 4 (file name, start IP, end IP, lease time), got: %d", len(args))
+		return nil, fmt.Errorf("got %d arguments, want at least 4; pass <lease file> <first address> <last address> <lease time>, such as leases.sqlite3 10.0.0.100 10.0.0.200 1h", len(args))
 	}
 	filename := args[0]
 	if filename == "" {
-		return nil, errors.New("file name cannot be empty")
+		return nil, errors.New("the lease file name is empty; give a path the server's user may write, such as /var/lib/coredhcp/leases.sqlite3")
 	}
 	ipRangeStart := net.ParseIP(args[1])
 	if ipRangeStart.To4() == nil {
-		return nil, fmt.Errorf("invalid IPv4 address: %v", args[1])
+		return nil, fmt.Errorf("the first pool address %q is not IPv4; write it in dotted-quad notation, such as 10.0.0.100", args[1])
 	}
 	ipRangeEnd := net.ParseIP(args[2])
 	if ipRangeEnd.To4() == nil {
-		return nil, fmt.Errorf("invalid IPv4 address: %v", args[2])
+		return nil, fmt.Errorf("the last pool address %q is not IPv4; write it in dotted-quad notation, such as 10.0.0.200", args[2])
 	}
 	if binary.BigEndian.Uint32(ipRangeStart.To4()) > binary.BigEndian.Uint32(ipRangeEnd.To4()) {
-		return nil, errors.New("start of IP range has to be lower than or equal to the end of an IP range")
+		return nil, errors.New("the first pool address is above the last; swap the two arguments")
 	}
 
 	p.allocator, err = newIPv4Allocator(ipRangeStart, ipRangeEnd)
 	if err != nil {
-		return nil, fmt.Errorf("could not create an allocator: %w", err)
+		return nil, fmt.Errorf("could not build the address allocator: %w; check the two pool addresses", err)
 	}
 
 	p.LeaseTime, err = time.ParseDuration(args[3])
 	if err != nil {
-		return nil, fmt.Errorf("invalid lease duration: %v", args[3])
+		return nil, fmt.Errorf("lease time %q is not a duration; use a Go duration such as 1h or 30m", args[3])
 	}
 
 	p.poolSize = poolSize(ipRangeStart, ipRangeEnd)
@@ -1037,7 +1043,7 @@ func newPluginState(args ...string) (*pluginState, error) {
 	// bound at startup hands out nothing new until it shrinks.
 	p.Recordsv4, err = loadRecords(p.dbCtx, p.leasedb)
 	if err != nil {
-		return nil, fmt.Errorf("could not load records from file: %w", err)
+		return nil, fmt.Errorf("could not load the leases in %s: %w; check the server's user may read the file and that no other process holds it", filename, err)
 	}
 
 	log.Printf("Loaded %d DHCPv4 leases from %s", len(p.Recordsv4), filename)
@@ -1045,10 +1051,10 @@ func newPluginState(args ...string) (*pluginState, error) {
 	for _, v := range p.Recordsv4 {
 		ip, err := p.allocator.Allocate(net.IPNet{IP: v.IP})
 		if err != nil {
-			return nil, fmt.Errorf("failed to re-allocate leased ip %v: %w", v.IP.String(), err)
+			return nil, fmt.Errorf("the stored lease on %v does not fit the configured pool: %w; widen the pool, or delete that row from %s", v.IP, err, filename)
 		}
 		if ip.IP.String() != v.IP.String() {
-			return nil, fmt.Errorf("allocator did not re-allocate requested leased ip %v: %v", v.IP.String(), ip.String())
+			return nil, fmt.Errorf("the stored lease on %v sits outside the configured pool, the allocator offered %v instead; widen the pool, or delete that row from %s", v.IP, ip.IP, filename)
 		}
 	}
 

@@ -295,12 +295,12 @@ func TestRejectedRequests(t *testing.T) {
 		query string
 		want  string
 	}{
-		{name: "a family that is not a family", query: "family=5", want: "family must be 4 or 6"},
-		{name: "a family in another notation", query: "family=ipv4", want: "family must be 4 or 6"},
-		{name: "an empty family", query: "family=", want: "family must be 4 or 6"},
-		{name: "a source that is not registered", query: "source=range+other.sqlite3", want: "no such source"},
-		{name: "an unknown parameter", query: "limit=10", want: "unknown query parameter, want family or source"},
-		{name: "a misspelt parameter", query: "familly=4", want: "unknown query parameter, want family or source"},
+		{name: "a family that is not a family", query: "family=5", want: leaseapi.ErrUnknownFamily.Error()},
+		{name: "a family in another notation", query: "family=ipv4", want: leaseapi.ErrUnknownFamily.Error()},
+		{name: "an empty family", query: "family=", want: leaseapi.ErrUnknownFamily.Error()},
+		{name: "a source that is not registered", query: "source=range+other.sqlite3", want: leaseapi.ErrUnknownSource.Error()},
+		{name: "an unknown parameter", query: "limit=10", want: leaseapi.ErrUnknownParameter.Error()},
+		{name: "a misspelt parameter", query: "familly=4", want: leaseapi.ErrUnknownParameter.Error()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, path := range []string{"/v1/leases", "/v1/pools"} {
@@ -492,7 +492,7 @@ func TestASecondAddressIsRefused(t *testing.T) {
 	// the same answers on another socket.
 	_, err = leaseapi.Plugin.Setup6("unix:" + second)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "refusing to also listen on")
+	assert.Contains(t, err.Error(), "cannot also be served")
 	assert.NoFileExists(t, second)
 }
 

@@ -24,8 +24,8 @@ import (
 )
 
 var (
-	errIPv6NotInRange = errors.New("IPv6 address outside of allowed range")
-	errInvalidIPv6    = errors.New("invalid IPv6 address passed as input")
+	errIPv6NotInRange = errors.New("IPv6 address outside of allowed range; check the start and end addresses the `range6` plugin was given")
+	errInvalidIPv6    = errors.New("not an IPv6 address; use colon-hex form such as 2001:db8::5")
 )
 
 // maxIPv6RangeSize caps how many addresses one range may hold: 2^32, one
@@ -147,7 +147,7 @@ func (a *IPv6Allocator) Size() uint64 {
 func NewIPv6Allocator(start, end net.IP) (*IPv6Allocator, error) {
 	s6, e6 := start.To16(), end.To16()
 	if s6 == nil || start.To4() != nil || e6 == nil || end.To4() != nil {
-		return nil, fmt.Errorf("invalid IPv6 addresses given to create the allocator: [%s,%s]", start, end)
+		return nil, fmt.Errorf("invalid IPv6 addresses given to create the allocator: [%s,%s]; give `range6` a start and an end in colon-hex form, such as 2001:db8:1::100 2001:db8:1::1ff", start, end)
 	}
 
 	startHi := binary.BigEndian.Uint64(s6[:8])
@@ -158,10 +158,10 @@ func NewIPv6Allocator(start, end net.IP) (*IPv6Allocator, error) {
 	distLo, borrow := bits.Sub64(endLo, startLo, 0)
 	distHi, borrow := bits.Sub64(endHi, startHi, borrow)
 	if borrow != 0 {
-		return nil, errors.New("no IPs in the given range to allocate")
+		return nil, errors.New("no IPs in the given range to allocate, its start is above its end; swap the start and end addresses the `range6` plugin was given")
 	}
 	if distHi != 0 || distLo >= maxIPv6RangeSize {
-		return nil, fmt.Errorf("IPv6 range [%s,%s] holds more than %d addresses, the widest supported pool is a /96",
+		return nil, fmt.Errorf("IPv6 range [%s,%s] holds more than %d addresses, the widest supported pool is a /96; narrow the `range6` start and end to at most a /96 apart",
 			start, end, uint64(maxIPv6RangeSize))
 	}
 

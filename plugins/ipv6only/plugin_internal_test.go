@@ -27,24 +27,18 @@ func TestSetup4(t *testing.T) {
 	t.Run("invalid duration", func(t *testing.T) {
 		h, err := setup4("not-a-duration")
 		assert.Nil(t, h)
-		if assert.Error(t, err) {
-			assert.Equal(t, "ipv6only failed to initialize", err.Error())
-		}
+		assert.ErrorContains(t, err, `"not-a-duration" is not a duration`)
 	})
 
 	t.Run("too many arguments", func(t *testing.T) {
 		h, err := setup4("10s", "extra")
 		assert.Nil(t, h)
-		if assert.Error(t, err) {
-			assert.Equal(t, "too many arguments", err.Error())
-		}
+		assert.ErrorContains(t, err, "ipv6only takes at most one")
 	})
 
 	t.Run("invalid duration takes precedence over too many arguments", func(t *testing.T) {
 		h, err := setup4("not-a-duration", "extra")
 		assert.Nil(t, h)
-		if assert.Error(t, err) {
-			assert.Equal(t, "ipv6only failed to initialize", err.Error())
-		}
+		assert.ErrorContains(t, err, `"not-a-duration" is not a duration`)
 	})
 }

@@ -136,16 +136,18 @@ type options struct {
 	lifetime    time.Duration
 }
 
-// durationOptions maps each trailing argument prefix to the field it sets.
+// durationOptions maps each trailing argument prefix to its default and the
+// field it sets.
 // Adding a knob here is all it takes; parseOne stays a loop either way.
 var durationOptions = []struct {
 	prefix string
+	def    time.Duration
 	set    func(*options, time.Duration)
 }{
-	{"ttl:", func(o *options, d time.Duration) { o.ttl = d }},
-	{"negative-ttl:", func(o *options, d time.Duration) { o.negativeTTL = d }},
-	{"timeout:", func(o *options, d time.Duration) { o.timeout = d }},
-	{"lifetime:", func(o *options, d time.Duration) { o.lifetime = d }},
+	{"ttl:", defaultTTL, func(o *options, d time.Duration) { o.ttl = d }},
+	{"negative-ttl:", defaultNegativeTTL, func(o *options, d time.Duration) { o.negativeTTL = d }},
+	{"timeout:", defaultTimeout, func(o *options, d time.Duration) { o.timeout = d }},
+	{"lifetime:", defaultLifetime, func(o *options, d time.Duration) { o.lifetime = d }},
 }
 
 // defaultOptions returns the options as they stand before any argument is read.
@@ -177,15 +179,18 @@ func (o *options) parseOne(arg string) error {
 		}
 		d, err := time.ParseDuration(raw)
 		if err != nil {
-			return fmt.Errorf("invalid duration in argument %q: %w", arg, err)
+			return fmt.Errorf("the duration in %q does not parse: %w; use a Go duration such as 5m, or leave %s out for the default of %s",
+				arg, err, opt.prefix, opt.def)
 		}
 		if d <= 0 {
-			return fmt.Errorf("duration in argument %q has to be positive", arg)
+			return fmt.Errorf("the duration in %q is not positive; use a duration above zero, or leave %s out for the default of %s",
+				arg, opt.prefix, opt.def)
 		}
 		opt.set(o, d)
 		return nil
 	}
-	return fmt.Errorf("unexpected argument %q, want %s followed by a duration", arg, knownOptions())
+	return fmt.Errorf("unexpected argument %q; use one of %s each followed by a duration, and give the NetBox URL and token first",
+		arg, knownOptions())
 }
 
 // knownOptions lists the accepted trailing argument prefixes for error
@@ -242,7 +247,8 @@ func setup6(args ...string) (handler.Handler6Ctx, error) {
 // enough whether the credentials work.
 func setupState(args ...string) (*pluginState, error) {
 	if len(args) < 2 {
-		return nil, fmt.Errorf("need at least 2 arguments (NetBox URL and API token), got %d", len(args))
+		return nil, fmt.Errorf("got %d argument(s); give the NetBox URL and the API token first, as in https://netbox.example.com token:env:NETBOX_TOKEN",
+			len(args))
 	}
 	base, err := parseBaseURL(args[0])
 	if err != nil {
@@ -326,10 +332,10 @@ func skipsLookup4(msgType dhcpv4.MessageType) bool {
 // it, so it gets a warning. Either way the request is dropped.
 func logLookupFailure(mac net.HardwareAddr, err error) {
 	if errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrNotFound) {
-		log.Errorf("dropping request from MAC address %s, NetBox lookup will keep failing until the configuration is fixed: %v", mac, err)
+		log.Errorf("dropping the request from MAC address %s, the NetBox lookup keeps failing until the configuration is fixed: %v", mac, err)
 		return
 	}
-	log.Warningf("dropping request from MAC address %s, NetBox lookup failed: %v", mac, err)
+	log.Warningf("dropping the request from MAC address %s, the NetBox lookup failed: %v; the client retransmits and the lookup is retried then", mac, err)
 }
 
 // Handler4 handles DHCPv4 packets for the netbox plugin.
@@ -370,7 +376,7 @@ func skipsLookup6(msgType dhcpv6.MessageType) bool {
 func (p *pluginState) Handler6(ctx context.Context, req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	m, err := req.GetInnerMessage()
 	if err != nil {
-		log.Errorf("BUG: could not decapsulate: %v", err)
+		log.Errorf("BUG: could not decapsulate the DHCPv6 request, dropping it: %v; please report this with the log line", err)
 		return nil, true
 	}
 

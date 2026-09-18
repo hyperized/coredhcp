@@ -439,7 +439,7 @@ func TestAutorefresh(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		return strings.Contains(string(data), "failed to refresh from")
+		return strings.Contains(string(data), "the leases already loaded stay in force")
 	}, 5*time.Second, 20*time.Millisecond, "expected a refresh-failure warning to be logged")
 	assert.True(t, resolves(mac1)(), "previously loaded lease must keep resolving after a bad reload")
 	assert.True(t, resolves(mac2)(), "previously loaded lease must keep resolving after a bad reload")
@@ -872,7 +872,7 @@ func TestAutorefreshDUID(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		return strings.Contains(string(data), "failed to refresh from")
+		return strings.Contains(string(data), "the leases already loaded stay in force")
 	}, 5*time.Second, 20*time.Millisecond, "expected a refresh-failure warning to be logged")
 	assert.True(t, resolves(duid1)(), "previously loaded lease must keep resolving after a bad reload")
 	assert.True(t, resolves(duid2)(), "previously loaded lease must keep resolving after a bad reload")

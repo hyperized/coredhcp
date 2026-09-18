@@ -65,7 +65,7 @@ func (p *pluginState) exchange(ctx context.Context, msg []byte) ([]byte, error) 
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(dialCtx, "udp", p.server)
 	if err != nil {
-		return nil, fmt.Errorf("dialling %s: %w", p.server, err)
+		return nil, fmt.Errorf("dialling %s: %w; check the server: address and that nothing blocks UDP to it", p.server, err)
 	}
 	defer func() { _ = conn.Close() }()
 	return p.roundTrip(ctx, conn, msg)
@@ -84,18 +84,18 @@ func (p *pluginState) roundTrip(ctx context.Context, conn net.Conn, msg []byte) 
 			return nil, fmt.Errorf("setting the deadline: %w", err)
 		}
 		if _, err := conn.Write(msg); err != nil {
-			return nil, fmt.Errorf("sending to %s: %w", p.server, err)
+			return nil, fmt.Errorf("sending to %s: %w; check the route to the name server", p.server, err)
 		}
 		n, err := conn.Read(buf)
 		if err == nil {
 			return buf[:n], nil
 		}
 		if !errors.Is(err, os.ErrDeadlineExceeded) {
-			return nil, fmt.Errorf("reading from %s: %w", p.server, err)
+			return nil, fmt.Errorf("reading from %s: %w; check the name server is listening on that address and port", p.server, err)
 		}
 		log.Debugf("%s did not answer within %s, attempt %d of %d", p.server, p.timeout, attempt, attempts)
 	}
-	return nil, fmt.Errorf("%w %s after %d attempts", ErrNoAnswer, p.server, attempts)
+	return nil, fmt.Errorf("%w %s after %d attempts; check the name server is running and reachable, or raise timeout:<duration>", ErrNoAnswer, p.server, attempts)
 }
 
 // checkResponse decides whether an answer says what it appears to say.
@@ -113,7 +113,8 @@ func (p *pluginState) checkResponse(resp, requestMAC []byte, requestID uint16) e
 		return fmt.Errorf("parsing the response: %w", err)
 	}
 	if hdr.ID != requestID {
-		return fmt.Errorf("%w: asked with id %d, answered with %d", ErrResponseID, requestID, hdr.ID)
+		return fmt.Errorf("%w: asked with id %d, answered with %d; the update was dropped, check what else is answering on the path to the server",
+			ErrResponseID, requestID, hdr.ID)
 	}
 	if hdr.Truncated {
 		return ErrTruncated

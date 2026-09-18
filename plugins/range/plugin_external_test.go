@@ -151,7 +151,7 @@ func TestPluginSetupLoadRecordsFailure(t *testing.T) {
 
 	_, err := rangeplugin.Plugin.Setup4(dbPath, "10.0.0.1", "10.0.0.5", "1h")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "could not load records from file")
+	assert.Contains(t, err.Error(), "could not load the leases in")
 }
 
 func TestPluginSetupReallocationExhausted(t *testing.T) {
@@ -166,7 +166,7 @@ func TestPluginSetupReallocationExhausted(t *testing.T) {
 
 	_, err := rangeplugin.Plugin.Setup4(dbPath, "10.0.2.1", "10.0.2.1", "1h")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to re-allocate leased ip")
+	assert.Contains(t, err.Error(), "does not fit the configured pool")
 }
 
 func TestPluginSetupReallocationMismatch(t *testing.T) {
@@ -181,7 +181,7 @@ func TestPluginSetupReallocationMismatch(t *testing.T) {
 
 	_, err := rangeplugin.Plugin.Setup4(dbPath, "10.0.3.1", "10.0.3.2", "1h")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "did not re-allocate requested leased ip")
+	assert.Contains(t, err.Error(), "sits outside the configured pool")
 }
 
 // TestPluginSetupSweepArgument covers the optional fifth argument end to end.

@@ -581,35 +581,35 @@ func TestSetupErrors(t *testing.T) {
 		args    []string
 		errText string
 	}{
-		{name: "no arguments", errText: "need a mapping file"},
-		{name: "no key", args: []string{"file:ports.txt"}, errText: "need a key to match on"},
+		{name: "no arguments", errText: "no mapping file given"},
+		{name: "no key", args: []string{"file:ports.txt"}, errText: "no key given"},
 		{
 			name: "unknown argument", args: []string{"file:ports.txt", "key:circuit-id", "reload"},
-			errText: "unexpected argument `reload`",
+			errText: `argument "reload" is not recognised`,
 		},
 		{
 			name: "no allow list", args: []string{"file:ports.txt", "key:circuit-id"},
-			errText: "need a relay allow list",
+			errText: "no relay allow list given",
 		},
 		{
 			name:    "allow list has no entry of this family",
 			args:    []string{"file:ports.txt", "key:circuit-id", "allow", "::1"},
-			errText: "need at least one address or prefix after `allow` for DHCPv4",
+			errText: "the allow list has no entry for DHCPv4",
 		},
 		{
 			name:    "malformed address after allow",
 			args:    []string{"file:ports.txt", "key:circuit-id", "allow", "not-an-address"},
-			errText: `invalid address "not-an-address"`,
+			errText: `allow list entry "not-an-address" does not parse`,
 		},
 		{
 			name:    "a DHCPv6 key in a server4 section",
 			args:    []string{"file:ports.txt", "key:interface-id", "allow", "10.0.1.1"},
-			errText: "unknown DHCPv4 key `interface-id`",
+			errText: `DHCPv4 key "interface-id" is not recognised`,
 		},
 		{
 			name:    "misspelled key",
 			args:    []string{"file:ports.txt", "key:circuitid", "allow", "10.0.1.1"},
-			errText: "unknown DHCPv4 key `circuitid`",
+			errText: `DHCPv4 key "circuitid" is not recognised`,
 		},
 		{
 			name:    "missing file",
@@ -629,7 +629,7 @@ func TestSetupErrors(t *testing.T) {
 		h, err := relayinfo.Plugin.Setup6Ctx(writeMappings(t, valid), "key:subscriber-id", "allow", "::1")
 		require.Error(t, err)
 		assert.Nil(t, h)
-		assert.Contains(t, err.Error(), "unknown DHCPv6 key `subscriber-id`")
+		assert.Contains(t, err.Error(), `DHCPv6 key "subscriber-id" is not recognised`)
 	})
 
 	t.Run("the parse error names the file and the line", func(t *testing.T) {
@@ -638,14 +638,14 @@ func TestSetupErrors(t *testing.T) {
 		require.Error(t, err)
 		assert.Nil(t, h)
 		assert.Contains(t, err.Error(), strings.TrimPrefix(fileArg, "file:"))
-		assert.Contains(t, err.Error(), "line 2: expected an IPv4 address")
+		assert.Contains(t, err.Error(), `line 2: "not-an-address" is not an IP address`)
 	})
 
 	t.Run("a mapping file for the other family", func(t *testing.T) {
 		h, err := relayinfo.Plugin.Setup6Ctx(writeMappings(t, valid), "key:interface-id", "allow", "::1")
 		require.Error(t, err)
 		assert.Nil(t, h)
-		assert.Contains(t, err.Error(), "expected an IPv6 address")
+		assert.Contains(t, err.Error(), "192.0.2.31 is not an IPv6 address")
 	})
 }
 
@@ -691,7 +691,7 @@ func TestAutorefresh(t *testing.T) {
 	overwrite(t, path, "port-1 this-is-not-an-address\n")
 	require.Eventually(t, func() bool {
 		data, err := os.ReadFile(logPath)
-		return err == nil && strings.Contains(string(data), "failed to refresh from")
+		return err == nil && strings.Contains(string(data), "the mappings already loaded stay in force")
 	}, 5*time.Second, 20*time.Millisecond, "expected a refresh-failure warning to be logged")
 	assert.True(t, resolves("port-1")(), "a mapping must keep resolving after a bad reload")
 	assert.True(t, resolves("port-2")(), "a mapping must keep resolving after a bad reload")

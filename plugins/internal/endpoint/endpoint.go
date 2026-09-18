@@ -95,8 +95,8 @@ func Parse(plugin string, args []string, opts ...Option) (Endpoint, error) {
 		opt(p)
 	}
 	if len(args) == 0 || len(args) > 2 {
-		return Endpoint{}, fmt.Errorf("%s: expected one or two arguments, an address (%s) and an optional %s:<octal>, got %d",
-			p.plugin, p.syntax(), modeArg, len(args))
+		return Endpoint{}, fmt.Errorf("%s: expected one or two arguments and got %d; write the address (%s), optionally followed by %s:<octal>",
+			p.plugin, len(args), p.syntax(), modeArg)
 	}
 	mode, err := p.parseMode(args[1:])
 	if err != nil {
@@ -115,7 +115,7 @@ func (p *parser) syntax() string {
 func (p *parser) parseAddress(arg string, mode os.FileMode) (Endpoint, error) {
 	network, address, ok := strings.Cut(arg, ":")
 	if !ok {
-		return Endpoint{}, fmt.Errorf("%s: invalid address %q, want %s", p.plugin, arg, p.syntax())
+		return Endpoint{}, fmt.Errorf("%s: invalid address %q, it carries neither a scheme nor a port; write it as %s", p.plugin, arg, p.syntax())
 	}
 	switch {
 	case network == NetworkUnix:
@@ -127,7 +127,7 @@ func (p *parser) parseAddress(arg string, mode os.FileMode) (Endpoint, error) {
 		// loopback literal, which is the error the operator needs either way.
 		return p.tcp(arg, mode)
 	default:
-		return Endpoint{}, fmt.Errorf("%s: unknown address scheme %q, want %s", p.plugin, network, p.syntax())
+		return Endpoint{}, fmt.Errorf("%s: unknown address scheme %q; write the address as %s", p.plugin, network, p.syntax())
 	}
 }
 
@@ -138,22 +138,22 @@ func (p *parser) parseMode(extra []string) (os.FileMode, error) {
 	}
 	key, value, ok := strings.Cut(strings.TrimSpace(extra[0]), ":")
 	if !ok || key != modeArg {
-		return 0, fmt.Errorf("%s: unexpected argument %q, want %s:<octal>", p.plugin, extra[0], modeArg)
+		return 0, fmt.Errorf("%s: unexpected argument %q; the only second argument accepted is %s:<octal>, such as %s:0660", p.plugin, extra[0], modeArg, modeArg)
 	}
 	parsed, err := strconv.ParseUint(value, 8, 32)
 	if err != nil {
-		return 0, fmt.Errorf("%s: invalid %s %q, want an octal permission such as 0660: %w", p.plugin, modeArg, value, err)
+		return 0, fmt.Errorf("%s: invalid %s %q, it is not an octal number: %w; write three or four octal digits, such as %s:0660", p.plugin, modeArg, value, err, modeArg)
 	}
 	mode := os.FileMode(parsed)
 	if mode == 0 || mode > maxSocketMode {
-		return 0, fmt.Errorf("%s: %s %q is outside 0001-0777", p.plugin, modeArg, value)
+		return 0, fmt.Errorf("%s: %s %q is outside 0001-0777; use %s:0600 to keep the socket to the server's own user, or %s:0660 to let its group in", p.plugin, modeArg, value, modeArg, modeArg)
 	}
 	return mode, nil
 }
 
 func (p *parser) unix(address string, mode os.FileMode) (Endpoint, error) {
 	if address == "" {
-		return Endpoint{}, fmt.Errorf("%s: unix socket path cannot be empty", p.plugin)
+		return Endpoint{}, fmt.Errorf("%s: unix socket path cannot be empty; write unix:/path/to/socket, such as unix:/run/coredhcp/%s.sock", p.plugin, p.plugin)
 	}
 	if mode == 0 {
 		mode = defaultSocketMode
@@ -167,17 +167,17 @@ func (p *parser) unix(address string, mode os.FileMode) (Endpoint, error) {
 // the operator's back.
 func (p *parser) tcp(address string, mode os.FileMode) (Endpoint, error) {
 	if mode != 0 {
-		return Endpoint{}, fmt.Errorf("%s: %s applies to a unix socket, not to %s:%s", p.plugin, modeArg, NetworkTCP, address)
+		return Endpoint{}, fmt.Errorf("%s: %s applies to a unix socket, not to %s:%s; drop the %s argument, or listen on unix:/path/to/socket instead", p.plugin, modeArg, NetworkTCP, address, modeArg)
 	}
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
-		return Endpoint{}, fmt.Errorf("%s: invalid tcp address %q, want host:port: %w", p.plugin, address, err)
+		return Endpoint{}, fmt.Errorf("%s: invalid tcp address %q, it is not host:port: %w; write 127.0.0.1:<port> or [::1]:<port>", p.plugin, address, err)
 	}
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
-		return Endpoint{}, fmt.Errorf("%s: %q is not a loopback address: this endpoint is unauthenticated and publishes "+
-			"what the server knows, so it listens on a unix socket or on 127.0.0.0/8 or ::1 only, and anything wider "+
-			"belongs behind a reverse proxy that authenticates", p.plugin, host)
+		return Endpoint{}, fmt.Errorf("%s: %q is not a loopback address and this endpoint is unauthenticated; "+
+			"use unix:/path/to/socket, 127.0.0.1:<port> or [::1]:<port>, with a reverse proxy in front "+
+			"for anything wider", p.plugin, host)
 	}
 	return Endpoint{plugin: p.plugin, network: NetworkTCP, address: address}, nil
 }

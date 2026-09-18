@@ -168,12 +168,12 @@ var Plugin = plugins.Plugin{
 // Setup errors callers and tests can match with errors.Is. Errors that quote
 // the offending argument are built with fmt.Errorf instead.
 var (
-	errNoFile         = errors.New("need a mapping file, as file:<path>")
-	errNoKey          = errors.New("need a key to match on, as key:<name>")
-	errNoAllow        = errors.New("need a relay allow list, `allow` followed by addresses or prefixes")
-	errNoAllowEntries = errors.New("need at least one address or prefix after `allow`")
-	errMappedEntry    = errors.New("IPv4-mapped IPv6 entry never matches, write it as a plain IPv4 address")
-	errZonedEntry     = errors.New("zoned address never matches, the interface is matched separately")
+	errNoFile         = errors.New("no mapping file given; add file:<path>, for example file:/etc/coredhcp/ports.txt")
+	errNoKey          = errors.New("no key given; add key:<name>, for example key:circuit-id under server4 or key:interface-id under server6")
+	errNoAllow        = errors.New("no relay allow list given; add `allow` followed by addresses or prefixes, for example allow 10.0.1.1 10.0.2.0/24")
+	errNoAllowEntries = errors.New("the allow list has no entry")
+	errMappedEntry    = errors.New("an IPv4-mapped IPv6 entry never matches; write it as a plain IPv4 address")
+	errZonedEntry     = errors.New("a zoned address never matches; drop the zone suffix, the interface is matched separately")
 )
 
 // fsnotifyNewWatcher and watcherAdd are indirections tests substitute to
@@ -292,14 +292,14 @@ func (s *pluginState) logDrop(r reason, format string, args ...any) {
 func (s *pluginState) fromAllowedRelay(ctx context.Context) bool {
 	info, ok := handler.RequestInfoFrom(ctx)
 	if !ok {
-		s.logDrop(reasonNoRequestInfo, "cannot tell where the request came from")
+		s.logDrop(reasonNoRequestInfo, "cannot tell where the request came from; the client will retry, this happens outside the server's dispatch path")
 		return false
 	}
 	// Unmapping means an IPv4 peer read off a dual-stack socket compares equal
 	// to the same address written in dotted-quad form in the configuration.
 	peer := info.Peer.Addr().Unmap()
 	if !slices.ContainsFunc(s.allow, func(p netip.Prefix) bool { return p.Contains(peer) }) {
-		s.logDrop(reasonPeerNotAllowed, "source %s", peer)
+		s.logDrop(reasonPeerNotAllowed, "source %s; add it after `allow` to answer this relay", peer)
 		return false
 	}
 	return true
@@ -388,7 +388,7 @@ func (s *pluginState) Handler6(ctx context.Context, req, resp dhcpv6.DHCPv6) (dh
 	}
 	m, err := req.GetInnerMessage()
 	if err != nil {
-		log.Errorf("BUG: could not decapsulate: %v", err)
+		log.Errorf("BUG: cannot read the client message inside the relayed request, dropping it: %v; the client will retry, report this with the server log", err)
 		return nil, true
 	}
 
@@ -481,7 +481,7 @@ func (a *pluginArgs) apply(arg string) error {
 	if a.sawAllow {
 		return a.addAllowEntry(arg)
 	}
-	return fmt.Errorf("unexpected argument `%s`, want %s<path>, %s<name>, %s <addr|cidr>... or %s",
+	return fmt.Errorf("argument %q is not recognised; use %s<path>, %s<name>, %s <addr|cidr>... or %s",
 		arg, fileArgPrefix, keyArgPrefix, allowArg, autoRefreshArg)
 }
 
@@ -536,7 +536,7 @@ func parseAllowEntry(arg string) (netip.Prefix, error) {
 	if strings.Contains(arg, "/") {
 		prefix, err := netip.ParsePrefix(arg)
 		if err != nil {
-			return netip.Prefix{}, fmt.Errorf("invalid prefix %q: %w", arg, err)
+			return netip.Prefix{}, fmt.Errorf("allow list prefix %q does not parse: %w; write it as <address>/<prefix length>, for example 10.0.2.0/24", arg, err)
 		}
 		if prefix.Addr().Is4In6() {
 			return netip.Prefix{}, fmt.Errorf("prefix %q: %w", arg, errMappedEntry)
@@ -545,7 +545,7 @@ func parseAllowEntry(arg string) (netip.Prefix, error) {
 	}
 	addr, err := netip.ParseAddr(arg)
 	if err != nil {
-		return netip.Prefix{}, fmt.Errorf("invalid address %q: %w", arg, err)
+		return netip.Prefix{}, fmt.Errorf("allow list entry %q does not parse: %w; write a plain address such as 10.0.1.1, or a prefix such as 10.0.2.0/24", arg, err)
 	}
 	if addr.Is4In6() {
 		return netip.Prefix{}, fmt.Errorf("address %q: %w", arg, errMappedEntry)
@@ -561,7 +561,7 @@ func keySource[F any](family, name string, allowed map[string]F) (F, error) {
 	fn, ok := allowed[name]
 	if !ok {
 		var zero F
-		return zero, fmt.Errorf("unknown %s key `%s`, want one of %s",
+		return zero, fmt.Errorf("%s key %q is not recognised; use one of: %s",
 			family, name, strings.Join(slices.Sorted(maps.Keys(allowed)), ", "))
 	}
 	return fn, nil
@@ -588,7 +588,7 @@ func setupState(v6 bool, args ...string) (*pluginState, error) {
 		limiter: newDropLimiter(time.Now),
 	}
 	if len(s.allow) == 0 {
-		return nil, fmt.Errorf("%w for %s", errNoAllowEntries, familyName(v6))
+		return nil, fmt.Errorf("%w for %s; add at least one %s address or prefix after `allow`", errNoAllowEntries, familyName(v6), familyOf(v6))
 	}
 	if v6 {
 		s.extract6, err = keySource("DHCPv6", a.key, keys6)
@@ -620,11 +620,11 @@ func setupState(v6 bool, args ...string) (*pluginState, error) {
 func (s *pluginState) watch(v6 bool, filename string) error {
 	watcher, err := fsnotifyNewWatcher()
 	if err != nil {
-		return fmt.Errorf("failed to create watcher: %w", err)
+		return fmt.Errorf("cannot create a file watcher for autorefresh: %w; check the inotify limits, or drop the %s argument", err, autoRefreshArg)
 	}
 	dir := filepath.Dir(filename)
 	if err = watcherAdd(watcher, dir); err != nil {
-		return fmt.Errorf("failed to watch %s: %w", dir, err)
+		return fmt.Errorf("cannot watch directory %s for changes: %w; check that it exists and the server's user may read it, or drop the %s argument", dir, err, autoRefreshArg)
 	}
 
 	go s.watchLoop(v6, filename, watcher)
@@ -656,7 +656,7 @@ func (s *pluginState) watchLoop(v6 bool, filename string, watcher *fsnotify.Watc
 			if !ok {
 				return
 			}
-			log.Warningf("watch on %s reported an error: %s", filename, err)
+			log.Warningf("the watch on %s reported an error: %s; events may have been dropped, the file is being reread now", filename, err)
 			s.refresh(v6, filename)
 		}
 	}
@@ -667,7 +667,7 @@ func (s *pluginState) watchLoop(v6 bool, filename string, watcher *fsnotify.Watc
 // network.
 func (s *pluginState) refresh(v6 bool, filename string) {
 	if err := s.loadFromFile(v6, filename); err != nil {
-		log.Warningf("failed to refresh from %s: %s", filename, err)
+		log.Warningf("cannot reread %s: %s; the mappings already loaded stay in force, fix the file and save it again", filename, err)
 		return
 	}
 	log.Infof("updated to %d mappings from %s", s.numRecords(), filename)

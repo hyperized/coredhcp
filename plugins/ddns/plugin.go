@@ -400,12 +400,12 @@ func applyOption(s *settings, arg string, seen map[string]bool) error {
 			continue
 		}
 		if seen[o.prefix] && !o.repeat {
-			return fmt.Errorf("%s given more than once", strings.TrimSuffix(o.prefix, ":"))
+			return fmt.Errorf("%s is given more than once; keep one and remove the rest", strings.TrimSuffix(o.prefix, ":"))
 		}
 		seen[o.prefix] = true
 		return o.apply(s, raw)
 	}
-	return fmt.Errorf("unknown argument %q, want one of %s", arg, knownArgs())
+	return fmt.Errorf("argument %q is not one this plugin takes; use one of %s", arg, knownArgs())
 }
 
 // knownArgs lists the argument prefixes for an error message.
@@ -422,11 +422,12 @@ func knownArgs() string {
 func (s *settings) finish() error {
 	switch {
 	case s.server == "":
-		return fmt.Errorf("%s<ip> is required", serverArg)
+		return fmt.Errorf("%s<ip> is missing; add the name server to send updates to, for example %s10.0.0.53", serverArg, serverArg)
 	case s.zone == "":
-		return fmt.Errorf("%s<name> is required", zoneArg)
+		return fmt.Errorf("%s<name> is missing; add the forward zone to write into, for example %shome.lan", zoneArg, zoneArg)
 	case s.keyName == "":
-		return fmt.Errorf("%s<name>:<secret> is required", keyArg)
+		return fmt.Errorf("%s<name>:<secret> is missing; add the TSIG key the name server knows, for example %sddns-key:%sTSIG_KEY",
+			keyArg, keyArg, envPrefix)
 	}
 	key, err := newTSIGKey(s.keyName, s.algo, s.keySecret)
 	if err != nil {
@@ -447,7 +448,7 @@ func protectedNames(raw []string, zone string) (map[string]bool, error) {
 	for _, entry := range raw {
 		name, err := hostFQDN(entry, zone)
 		if err != nil {
-			return nil, fmt.Errorf("invalid %s%s: %w", protectArg, entry, err)
+			return nil, fmt.Errorf("%s%s is not a name this plugin can protect: %w; use a bare label or a name under the zone", protectArg, entry, err)
 		}
 		out[name] = true
 	}
@@ -462,11 +463,11 @@ func applyServer(s *settings, raw string) error {
 	}
 	addr, err := netip.ParseAddr(host)
 	if err != nil {
-		return fmt.Errorf("%s%s has to be an IP address, optionally followed by a port", serverArg, raw)
+		return fmt.Errorf("%s%s is not an IP address; write a literal address with an optional port, such as %s10.0.0.53:5353", serverArg, raw, serverArg)
 	}
 	n, err := strconv.ParseUint(port, 10, 16)
 	if err != nil || n == 0 {
-		return fmt.Errorf("invalid port %q in %s%s", port, serverArg, raw)
+		return fmt.Errorf("port %q in %s%s is not a port number; use 1 to 65535, or leave the port off for the default of %s", port, serverArg, raw, defaultPort)
 	}
 	s.server = netip.AddrPortFrom(addr.Unmap(), uint16(n)).String()
 	return nil
@@ -492,7 +493,8 @@ func applyZone(s *settings, raw string) error {
 func applyKey(s *settings, raw string) error {
 	name, secret, ok := strings.Cut(raw, ":")
 	if !ok || name == "" {
-		return fmt.Errorf("%s needs <name>:<secret>, where the secret is base64 or %s<VARIABLE>", keyArg, envPrefix)
+		return fmt.Errorf("%s needs <name>:<secret>; give the secret as base64 or as %s<VARIABLE>, for example %sddns-key:%sTSIG_KEY",
+			keyArg, envPrefix, keyArg, envPrefix)
 	}
 	value, err := secretValue(secret)
 	if err != nil {
@@ -500,7 +502,7 @@ func applyKey(s *settings, raw string) error {
 	}
 	decoded, err := base64.StdEncoding.DecodeString(value)
 	if err != nil || len(decoded) == 0 {
-		return fmt.Errorf("the secret of key %s is not usable base64", name)
+		return fmt.Errorf("the secret of key %s is not usable base64; copy the secret as the name server's key configuration spells it", name)
 	}
 	s.keyName, s.keySecret = name, decoded
 	return nil
@@ -514,11 +516,11 @@ func secretValue(raw string) (string, error) {
 		return raw, nil
 	}
 	if name == "" {
-		return "", fmt.Errorf("%s%s needs the name of an environment variable", keyArg, envPrefix)
+		return "", fmt.Errorf("%s%s names no environment variable; write it as %s<VARIABLE>, for example %sTSIG_KEY", keyArg, envPrefix, envPrefix, envPrefix)
 	}
 	value := os.Getenv(name)
 	if value == "" {
-		return "", fmt.Errorf("environment variable %s is unset or empty", name)
+		return "", fmt.Errorf("environment variable %s is unset or empty; set it to the key's base64 secret in the server's environment", name)
 	}
 	return value, nil
 }
@@ -526,7 +528,7 @@ func secretValue(raw string) (string, error) {
 // applyAlgo picks the TSIG algorithm.
 func applyAlgo(s *settings, raw string) error {
 	if _, ok := algorithms[raw]; !ok {
-		return fmt.Errorf("%w %q, want one of %v", ErrUnknownAlgorithm, raw, algorithmNames())
+		return fmt.Errorf("%w %q; use one of %v, whichever the name server has for this key", ErrUnknownAlgorithm, raw, algorithmNames())
 	}
 	s.algo = raw
 	return nil
@@ -536,7 +538,7 @@ func applyAlgo(s *settings, raw string) error {
 func applyTTL(s *settings, raw string) error {
 	n, err := strconv.ParseUint(raw, 10, 32)
 	if err != nil || n > maxTTL {
-		return fmt.Errorf("invalid %s%s, want a number of seconds up to %d", ttlArg, raw, maxTTL)
+		return fmt.Errorf("%s%s is not a TTL; use a number of seconds up to %d, or leave it out for the default of %d", ttlArg, raw, maxTTL, defaultTTL)
 	}
 	s.ttl = uint32(n)
 	return nil
@@ -546,7 +548,7 @@ func applyTTL(s *settings, raw string) error {
 func applyReverse(s *settings, raw string) error {
 	pfx, err := netip.ParsePrefix(raw)
 	if err != nil {
-		return fmt.Errorf("invalid %s%s: it has to be a CIDR", reverseArg, raw)
+		return fmt.Errorf("%s%s is not a CIDR; write it as <prefix>/<length>, such as %s10.0.0.0/24", reverseArg, raw, reverseArg)
 	}
 	pfx = pfx.Masked()
 	zone, err := reverseZone(pfx)
@@ -561,7 +563,7 @@ func applyReverse(s *settings, raw string) error {
 func applyTimeout(s *settings, raw string) error {
 	d, err := time.ParseDuration(raw)
 	if err != nil || d <= 0 {
-		return fmt.Errorf("invalid %s%s, want a positive duration such as 2s", timeoutArg, raw)
+		return fmt.Errorf("%s%s is not a positive duration; use a Go duration such as 2s, or leave it out for the default of %s", timeoutArg, raw, defaultTimeout)
 	}
 	s.timeout = d
 	return nil
@@ -571,7 +573,7 @@ func applyTimeout(s *settings, raw string) error {
 func applyQueue(s *settings, raw string) error {
 	n, err := strconv.Atoi(raw)
 	if err != nil || n < 1 || n > maxQueueLen {
-		return fmt.Errorf("invalid %s%s, want a number between 1 and %d", queueArg, raw, maxQueueLen)
+		return fmt.Errorf("%s%s is not a queue length; use a number between 1 and %d, or leave it out for the default of %d", queueArg, raw, maxQueueLen, defaultQueueLen)
 	}
 	s.queueLen = n
 	return nil
@@ -584,7 +586,7 @@ func applyProtect(s *settings, raw string) error {
 	for name := range strings.SplitSeq(raw, ",") {
 		name = strings.TrimSpace(name)
 		if name == "" {
-			return fmt.Errorf("invalid %s%s, want one name or several separated by commas", protectArg, raw)
+			return fmt.Errorf("%s%s holds an empty name; write one name or several separated by commas, such as %sgateway,ns", protectArg, raw, protectArg)
 		}
 		s.protectRaw = append(s.protectRaw, name)
 	}
@@ -599,7 +601,7 @@ func applyRemove(s *settings, raw string) error {
 	case "off":
 		s.removeOnRelease = false
 	default:
-		return fmt.Errorf("invalid %s%s, want on or off", removeArg, raw)
+		return fmt.Errorf("%s%s is neither on nor off; use %son or %soff, or leave it out for the default of on", removeArg, raw, removeArg, removeArg)
 	}
 	return nil
 }

@@ -166,11 +166,11 @@ const (
 // Setup errors that callers and tests can match with errors.Is. Errors that
 // have to quote the offending argument are built with fmt.Errorf instead.
 var (
-	errNoAllowKeyword = errors.New("first argument must be `allow`, followed by addresses or prefixes")
-	errNoAllowEntries = errors.New("need at least one address or prefix after `allow`")
+	errNoAllowKeyword = errors.New("no allow list given; make the first argument `allow`, followed by addresses or prefixes, for example: relay: allow 10.0.1.1 10.0.2.0/24")
+	errNoAllowEntries = errors.New("the allow list is empty; add at least one address or prefix after `allow`, for example 10.0.2.0/24")
 	errRepeatedOption = errors.New("option given more than once")
-	errMappedEntry    = errors.New("IPv4-mapped IPv6 entry never matches, write it as a plain IPv4 address")
-	errZonedEntry     = errors.New("zoned address never matches, the interface is matched separately")
+	errMappedEntry    = errors.New("an IPv4-mapped IPv6 entry never matches; write it as a plain IPv4 address")
+	errZonedEntry     = errors.New("a zoned address never matches; drop the zone suffix, the interface is matched separately")
 )
 
 // reason names one cause for dropping a request. Every value is a constant,
@@ -302,7 +302,7 @@ func (p *pluginState) applyArg(arg string, seen map[string]bool) error {
 // silently.
 func markSeen(seen map[string]bool, key string) error {
 	if seen[key] {
-		return fmt.Errorf("%w: %s", errRepeatedOption, strings.TrimSuffix(key, ":"))
+		return fmt.Errorf("%w: %s; remove the duplicate", errRepeatedOption, strings.TrimSuffix(key, ":"))
 	}
 	seen[key] = true
 	return nil
@@ -316,7 +316,7 @@ func (p *pluginState) setReleaseCheck(value string) error {
 	case "off":
 		p.releaseCheck = false
 	default:
-		return fmt.Errorf("invalid release-check value %q, expected `on` or `off`", value)
+		return fmt.Errorf("release-check value %q is neither `on` nor `off`; write release-check:on or release-check:off, or leave it out for the default of on", value)
 	}
 	return nil
 }
@@ -347,7 +347,7 @@ func parseAllowEntry(arg string) (netip.Prefix, error) {
 	if strings.Contains(arg, "/") {
 		prefix, err := netip.ParsePrefix(arg)
 		if err != nil {
-			return netip.Prefix{}, fmt.Errorf("invalid prefix %q: %w", arg, err)
+			return netip.Prefix{}, fmt.Errorf("allow list prefix %q does not parse: %w; write it as <address>/<prefix length>, for example 10.0.2.0/24", arg, err)
 		}
 		if prefix.Addr().Is4In6() {
 			return netip.Prefix{}, fmt.Errorf("prefix %q: %w", arg, errMappedEntry)
@@ -356,7 +356,7 @@ func parseAllowEntry(arg string) (netip.Prefix, error) {
 	}
 	addr, err := netip.ParseAddr(arg)
 	if err != nil {
-		return netip.Prefix{}, fmt.Errorf("invalid address %q: %w", arg, err)
+		return netip.Prefix{}, fmt.Errorf("allow list entry %q does not parse: %w; write a plain address such as 10.0.1.1, or a prefix such as 10.0.2.0/24", arg, err)
 	}
 	if addr.Is4In6() {
 		return netip.Prefix{}, fmt.Errorf("address %q: %w", arg, errMappedEntry)
@@ -425,16 +425,16 @@ func (p *pluginState) Handler4(ctx context.Context, req, resp *dhcpv4.DHCPv4) (*
 // needing a case of its own.
 func (p *pluginState) checkRelayed4(ctx context.Context, giaddr netip.Addr, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	if !allowed(p.allow4, giaddr) {
-		p.logDrop(reasonGiaddrNotAllowed, "giaddr %s", giaddr)
+		p.logDrop(reasonGiaddrNotAllowed, "giaddr %s; add it after `allow` to answer this relay", giaddr)
 		return nil, true
 	}
 	info, ok := handler.RequestInfoFrom(ctx)
 	if !ok {
-		p.logDrop(reasonNoRequestInfo, "relayed request with giaddr %s", giaddr)
+		p.logDrop(reasonNoRequestInfo, "relayed request with giaddr %s; the server could not attribute the datagram, the client will retry", giaddr)
 		return nil, true
 	}
 	if peer := peerAddr(info); p.strictGiaddr && peer != giaddr {
-		p.logDrop(reasonGiaddrMismatch, "giaddr %s, source %s", giaddr, peer)
+		p.logDrop(reasonGiaddrMismatch, "giaddr %s, source %s; drop the strict-giaddr argument if the relay is multi-homed", giaddr, peer)
 		return nil, true
 	}
 	return resp, false
@@ -460,7 +460,7 @@ func (p *pluginState) checkOnLink4(ctx context.Context, req, resp *dhcpv4.DHCPv4
 	ciaddr, _ := packetAddr(req.ClientIPAddr)
 	peer := peerAddr(info)
 	if ciaddr != peer {
-		p.logDrop(reasonReleaseMismatch, "ciaddr %s, source %s", req.ClientIPAddr, peer)
+		p.logDrop(reasonReleaseMismatch, "ciaddr %s, source %s; set release-check:off if clients release from another address", req.ClientIPAddr, peer)
 		return nil, true
 	}
 	return resp, false
@@ -478,12 +478,12 @@ func (p *pluginState) Handler6(ctx context.Context, req, resp dhcpv6.DHCPv6) (dh
 	}
 	info, ok := handler.RequestInfoFrom(ctx)
 	if !ok {
-		p.logDrop(reasonNoRequestInfo, "relayed DHCPv6 request")
+		p.logDrop(reasonNoRequestInfo, "relayed DHCPv6 request; the server could not attribute the datagram, the client will retry")
 		return nil, true
 	}
 	peer := peerAddr(info)
 	if !allowed(p.allow6, peer) {
-		p.logDrop(reasonPeerNotAllowed, "source %s", peer)
+		p.logDrop(reasonPeerNotAllowed, "source %s; add it after `allow` to answer this relay", peer)
 		return nil, true
 	}
 	return p.checkRelayShape(relay, resp)
@@ -493,11 +493,11 @@ func (p *pluginState) Handler6(ctx context.Context, req, resp dhcpv6.DHCPv6) (dh
 // around too long or has been wrapped too many times.
 func (p *pluginState) checkRelayShape(relay *dhcpv6.RelayMessage, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	if unspecifiedLink(relay.LinkAddr) && relay.HopCount > hopCountLimit {
-		p.logDrop(reasonHopCount, "no link address, hop count %d above %d", relay.HopCount, hopCountLimit)
+		p.logDrop(reasonHopCount, "no link address, hop count %d above %d; check the relays for a forwarding loop", relay.HopCount, hopCountLimit)
 		return nil, true
 	}
 	if relayDepth(relay) > maxRelayDepth {
-		p.logDrop(reasonRelayDepth, "more than %d nested relays", maxRelayDepth)
+		p.logDrop(reasonRelayDepth, "more than %d nested relays; check the relays for a forwarding loop", maxRelayDepth)
 		return nil, true
 	}
 	return resp, false

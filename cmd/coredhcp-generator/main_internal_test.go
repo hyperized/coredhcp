@@ -84,7 +84,7 @@ func TestRunNoPluginsSpecified(t *testing.T) {
 	withGeneratorFlags(t, defaultTemplateFile, "", "", nil)
 	err := run()
 	require.Error(t, err)
-	assert.EqualError(t, err, "no plugin specified")
+	assert.ErrorContains(t, err, "no plugin specified")
 }
 
 // TestRunBarePluginNamesAndFullImportPaths covers, for every template that

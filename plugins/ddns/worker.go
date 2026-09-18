@@ -79,7 +79,8 @@ func (p *pluginState) dropped(j job) {
 		return
 	}
 	p.drops.last = now
-	log.Warningf("the update queue is full, %d update(s) dropped so far, most recently for %s", total, j.name)
+	log.Warningf("the update queue is full, %d update(s) dropped so far, most recently for %s; raise %s<n> or find out why %s is slow to answer",
+		total, j.name, queueArg, p.server)
 }
 
 // run is the worker. One goroutine owns the exchange with the DNS server, so
@@ -135,7 +136,8 @@ func (p *pluginState) sendForward(ctx context.Context, j job) bool {
 	err := p.forwardExchange(ctx, j)
 	if prereqFailed(err) {
 		p.stats.conflicts.Add(1)
-		log.Warningf("leaving %s to the client that holds it: %v", j.name, err)
+		log.Warningf("%s is held by another client, so the record was left as it was (%v); add it to %s<name> or give this client a different hostname",
+			j.name, err, protectArg)
 		return false
 	}
 	p.tally(p.zone, err)
@@ -186,7 +188,7 @@ func (p *pluginState) sendReverse(ctx context.Context, j job) {
 		}
 		changes, err := reverseChanges(j, addr, p.ttl)
 		if err != nil {
-			log.Warningf("%s: %v", zone, err)
+			log.Warningf("no PTR was written in %s: %v; check the %s<cidr> network and the name the client asked for", zone, err, reverseArg)
 			continue
 		}
 		p.tally(zone, p.update(ctx, zone, nil, changes))
@@ -222,7 +224,8 @@ func (p *pluginState) tally(zone string, err error) {
 	default:
 		p.stats.failed.Add(1)
 	}
-	log.Warningf("updating %s failed: %v", zone, err)
+	log.Warningf("updating %s at %s failed: %v; check the zone's update ACL on that server and that it accepts TSIG key %s",
+		zone, p.server, err, p.key.name)
 }
 
 // update builds, signs and sends one message, and checks the answer.

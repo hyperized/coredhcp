@@ -58,9 +58,13 @@ type pluginState struct {
 
 func parseArgs(args ...string) (*url.URL, error) {
 	if len(args) != 1 {
-		return nil, fmt.Errorf("exactly one argument must be passed to NBP plugin, got %d", len(args))
+		return nil, fmt.Errorf("need exactly one argument, got %d; give one boot program URL, for example tftp://10.0.0.254/nbp", len(args))
 	}
-	return url.Parse(args[0])
+	u, err := url.Parse(args[0])
+	if err != nil {
+		return nil, fmt.Errorf("argument %q is not a URL: %w; give the boot program as a URL, for example tftp://10.0.0.254/nbp", args[0], err)
+	}
+	return u, nil
 }
 
 func setup6(args ...string) (handler.Handler6, error) {
@@ -111,7 +115,7 @@ func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	}
 	decap, err := req.GetInnerMessage()
 	if err != nil {
-		log.Errorf("Could not decapsulate request: %v", err)
+		log.Errorf("cannot read the client message inside the relayed request, dropping it: %v; the client will retry, check the relay that forwarded it", err)
 		// drop the request, this is probably a critical error in the packet.
 		return nil, true
 	}

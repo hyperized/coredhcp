@@ -60,8 +60,7 @@ import (
 
 var log = logger.GetLogger("plugins/leaseapi")
 
-// pluginName is what the plugin is called in config.yml and what every error
-// this package returns is prefixed with.
+// pluginName is what the plugin is called in config.yml.
 const pluginName = "leaseapi"
 
 // Plugin wraps the leaseapi plugin information.
@@ -174,7 +173,7 @@ func obtain(e endpoint.Endpoint) (*server, error) {
 	for running := range registry.servers {
 		// The map holds at most one entry, so this loop reads the address
 		// already bound and returns; see the doc comment above.
-		return nil, fmt.Errorf("%s: already listening on %s, refusing to also listen on %s", pluginName, running, key)
+		return nil, fmt.Errorf("already listening on %s, so %s cannot also be served; give both server sections the same leaseapi address, or configure leaseapi under one of them", running, key)
 	}
 	s, err := newServer(e)
 	if err != nil {
@@ -225,7 +224,7 @@ func newServer(e endpoint.Endpoint) (*server, error) {
 	go func() {
 		defer close(s.done)
 		if err := s.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Errorf("leaseapi listener on %s stopped: %v", e.Key(), err)
+			log.Errorf("the lease API listener on %s stopped and requests will fail from now on: %v; restart coredhcp to serve the API again", e.Key(), err)
 		}
 	}()
 	log.Infof("serving the lease API on %s (read-only, unauthenticated: %s)", e.Key(), e.Guard())

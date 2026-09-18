@@ -205,13 +205,13 @@ func recordKey(d dhcpv6.DUID) string {
 func (h *pluginState) Handle(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	msg, err := req.GetInnerMessage()
 	if err != nil {
-		log.Error(err)
+		log.Errorf("Dropping a request that could not be decoded: %v; find the client or relay on the link that is sending malformed messages", err)
 		return nil, true
 	}
 
 	client := msg.Options.ClientID()
 	if client == nil {
-		log.Error("Invalid packet received, no clientID")
+		log.Error("Dropping a request that carries no client ID option; find the client on the link sending it, every DHCPv6 message has to have one")
 		return nil, true
 	}
 	if n := len(client.ToBytes()); n > maxDUIDLength {
@@ -335,7 +335,7 @@ func listed(released []*dhcpv6.OptIAPrefix, l lease) bool {
 // holding on to a lease we have already stopped honouring.
 func (h *pluginState) free(l lease) {
 	if err := h.allocator.Free(l.Prefix); err != nil {
-		log.Errorf("Could not return prefix %s to the pool: %v", &l.Prefix, err)
+		log.Errorf("Could not return prefix %s to the pool: %v; it stays out of circulation until the server is restarted", &l.Prefix, err)
 	}
 }
 
@@ -730,10 +730,12 @@ func parseLeaseDuration(extra []string) (time.Duration, []string, error) {
 	}
 	duration, err := time.ParseDuration(extra[0])
 	if err != nil {
-		return 0, nil, fmt.Errorf("invalid lease duration %q: %w", extra[0], err)
+		return 0, nil, fmt.Errorf("lease duration %q is not a duration: %w; use a Go duration such as 1h or 30m, or leave it out for the default of %s",
+			extra[0], err, defaultLeaseDuration)
 	}
 	if duration <= 0 {
-		return 0, nil, fmt.Errorf("lease duration has to be positive, got: %v", extra[0])
+		return 0, nil, fmt.Errorf("lease duration %q is not above zero; use a duration such as 1h, or leave it out for the default of %s",
+			extra[0], defaultLeaseDuration)
 	}
 	return duration, extra[1:], nil
 }
@@ -767,10 +769,10 @@ func parseOptions(leaseDuration time.Duration, extra []string) (pluginOptions, e
 		key, value, hasValue := strings.Cut(arg, ":")
 		parse, known := optionParsers[key]
 		if !hasValue || !known {
-			return pluginOptions{}, fmt.Errorf("unexpected argument %q, want %s", arg, optionSyntax)
+			return pluginOptions{}, fmt.Errorf("argument %q is not one this plugin takes; use %s, or leave both out for their defaults", arg, optionSyntax)
 		}
 		if seen[key] {
-			return pluginOptions{}, fmt.Errorf("argument %s given more than once", key)
+			return pluginOptions{}, fmt.Errorf("argument %s is given more than once; keep one and remove the rest", key)
 		}
 		seen[key] = true
 		if err := parse(&opts, value); err != nil {
@@ -784,10 +786,12 @@ func parseOptions(leaseDuration time.Duration, extra []string) (pluginOptions, e
 func parseSweepInterval(opts *pluginOptions, raw string) error {
 	interval, err := time.ParseDuration(raw)
 	if err != nil {
-		return fmt.Errorf("invalid sweep interval %q: %w", raw, err)
+		return fmt.Errorf("%s:%s is not a duration: %w; use a Go duration such as 30m, or leave it out for half the lease duration, floored at %s",
+			sweepArg, raw, err, minSweepInterval)
 	}
 	if interval <= 0 {
-		return fmt.Errorf("sweep interval has to be positive, got: %v", raw)
+		return fmt.Errorf("%s:%s is not above zero; use a duration such as 30m, or leave it out for half the lease duration, floored at %s",
+			sweepArg, raw, minSweepInterval)
 	}
 	opts.sweepInterval = interval
 	return nil
@@ -799,10 +803,12 @@ func parseSweepInterval(opts *pluginOptions, raw string) error {
 func parseMaxPrefixes(opts *pluginOptions, raw string) error {
 	count, err := strconv.Atoi(raw)
 	if err != nil {
-		return fmt.Errorf("invalid prefix maximum %q: %w", raw, err)
+		return fmt.Errorf("%s:%s is not a number: %w; use a count such as 8, or leave it out for the default of %d",
+			maxPrefixesArg, raw, err, defaultMaxPrefixes)
 	}
 	if count < 1 {
-		return fmt.Errorf("prefix maximum has to be positive, got: %v", raw)
+		return fmt.Errorf("%s:%s is below one; use a count such as 8, or leave the plugin out of the config to delegate nothing",
+			maxPrefixesArg, raw)
 	}
 	opts.maxPrefixes = count
 	return nil
@@ -830,23 +836,23 @@ func setupPrefix(args ...string) (handler.Handler6, error) {
 func newPluginState(args ...string) (*pluginState, error) {
 	// - prefix: 2001:db8::/48 64 1h sweep:30m
 	if len(args) < 2 {
-		return nil, errors.New("need both a subnet and an allocation max size")
+		return nil, errors.New("want at least two arguments, the pool prefix and the allocation size; write them as <prefix> <length>, for example 2001:db8::/48 64")
 	}
 
 	_, prefix, err := net.ParseCIDR(args[0])
 	if err != nil {
-		return nil, fmt.Errorf("invalid pool subnet: %w", err)
+		return nil, fmt.Errorf("pool subnet %q is not a CIDR: %w; write it as <prefix>/<length>, such as 2001:db8::/48", args[0], err)
 	}
 	// Prefix delegation is DHCPv6 only. An IPv4 pool used to pass setup and
 	// then fail every allocation at runtime, because the allocator carves
 	// 128-bit prefixes out of whatever it is given.
 	if prefix.IP.To4() != nil {
-		return nil, fmt.Errorf("pool subnet %q is not IPv6", args[0])
+		return nil, fmt.Errorf("pool subnet %q is not IPv6; prefix delegation is DHCPv6 only, use a prefix such as 2001:db8::/48", args[0])
 	}
 
 	allocSize, err := strconv.Atoi(args[1])
 	if err != nil || allocSize > 128 || allocSize < 0 {
-		return nil, fmt.Errorf("invalid prefix length: %w", err)
+		return nil, fmt.Errorf("allocation size %q is not a prefix length between 0 and 128; use a number longer than the pool prefix, such as 64", args[1])
 	}
 
 	leaseDuration, rest, err := parseLeaseDuration(args[2:])
@@ -861,7 +867,7 @@ func newPluginState(args ...string) (*pluginState, error) {
 	// TODO: select allocators based on heuristics or user configuration
 	alloc, err := bitmap.NewBitmapAllocator(*prefix, allocSize)
 	if err != nil {
-		return nil, fmt.Errorf("could not initialize prefix allocator: %w", err)
+		return nil, fmt.Errorf("could not build the prefix allocator: %w; check the allocation size is longer than the pool prefix", err)
 	}
 
 	poolLen, _ := prefix.Mask.Size()

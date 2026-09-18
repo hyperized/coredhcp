@@ -116,13 +116,13 @@ func run(w io.Writer) error {
 
 	log := logger.GetLogger("main")
 	if err := logger.SetLevel(*flagLogLevel); err != nil {
-		return err
+		return fmt.Errorf("%w; pass --loglevel one of those names, or leave it out for the default of info", err)
 	}
 	log.Infof("Setting log level to '%s'", *flagLogLevel)
 	if *flagLogFile != "" {
 		log.Infof("Logging to file %s", *flagLogFile)
 		if err := logger.WithFile(*flagLogFile); err != nil {
-			return fmt.Errorf("failed to open log file: %w", err)
+			return fmt.Errorf("%w; point --logfile at a path the server's user can write, or leave it out to log to stdout and stderr only", err)
 		}
 	}
 	if *flagLogNoStdout {
@@ -131,19 +131,20 @@ func run(w io.Writer) error {
 	}
 	config, err := config.Load(*flagConfig)
 	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
+		return fmt.Errorf("cannot load the configuration: %w; fix the file it names, or pass --conf with the path to a config.yml to read instead", err)
 	}
 	// register plugins
 	for _, plugin := range desiredPlugins {
 		if regErr := plugins.RegisterPlugin(plugin); regErr != nil {
-			return fmt.Errorf("failed to register plugin '%s': %w", plugin.Name, regErr)
+			// A nil entry is one of the errors, so the name is left to regErr.
+			return fmt.Errorf("cannot register a built-in plugin: %w; nothing an operator can change causes this, so report it as a bug", regErr)
 		}
 	}
 
 	// start server
 	srv, err := server.Start(config)
 	if err != nil {
-		return err
+		return fmt.Errorf("cannot start the server: %w; check that the listen addresses in the config are free, and run as root or with CAP_NET_BIND_SERVICE for ports 67 and 547", err)
 	}
 
 	// shut down cleanly on SIGINT/SIGTERM

@@ -25,18 +25,18 @@ import (
 // the message names what was wrong with the file rather than only what rule
 // it broke.
 var (
-	errNoSubnets       = errors.New("no subnets configured")
-	errNoName          = errors.New("every subnet needs a name")
-	errNoMatchRule     = errors.New("needs match.interfaces, match.relays or default: true")
-	errEmptyInterface  = errors.New("empty interface name in match.interfaces")
-	errNoLease         = errors.New("a subnet that hands out addresses needs a lease")
-	errPoolWithoutDB   = errors.New("pool needs a leasedb to persist its leases in")
-	errDBWithoutPool   = errors.New("leasedb is only used together with a pool")
-	errPrefixOnV4      = errors.New("prefixpool and prefixsize are DHCPv6 only")
-	errPoolOnV6        = errors.New("pool and leasedb are DHCPv4 only")
-	errSizeWithoutPool = errors.New("prefixsize is only used together with a prefixpool")
-	errReservationsV6  = errors.New("reservations are DHCPv4 only")
-	errOptionsV4Only   = errors.New("options router, domain and ntp are DHCPv4 only")
+	errNoSubnets       = errors.New("no subnets configured; add a subnets: list with at least one entry")
+	errNoName          = errors.New("every subnet needs a name; add a name: to this entry")
+	errNoMatchRule     = errors.New("nothing can select this subnet; give it match.interfaces, match.relays or default: true")
+	errEmptyInterface  = errors.New("match.interfaces holds an empty name; write the interface name, such as eth1, or drop the entry")
+	errNoLease         = errors.New("a subnet that hands out addresses needs a lease; add lease: with a Go duration such as 12h")
+	errPoolWithoutDB   = errors.New("pool needs a leasedb to persist its leases in; add leasedb: with a path such as /var/lib/coredhcp/<name>.sqlite3")
+	errDBWithoutPool   = errors.New("leasedb is set without a pool; add pool: <start>-<end> or remove leasedb")
+	errPrefixOnV4      = errors.New("prefixpool and prefixsize are DHCPv6 only; remove them, or give this subnet an IPv6 cidr")
+	errPoolOnV6        = errors.New("pool and leasedb are DHCPv4 only; use prefixpool and prefixsize instead, or give this subnet an IPv4 cidr")
+	errSizeWithoutPool = errors.New("prefixsize is set without a prefixpool; add prefixpool: <cidr> or remove prefixsize")
+	errReservationsV6  = errors.New("reservations are DHCPv4 only; remove them, or give this subnet an IPv4 cidr")
+	errOptionsV4Only   = errors.New("options router, domain and ntp are DHCPv4 only; keep options.dns and remove the rest")
 	errMappedPrefix    = errors.New("write an IPv4 prefix in dotted-quad notation, not as IPv4-mapped IPv6")
 )
 
@@ -119,7 +119,7 @@ type scope struct {
 func parseFile(path string) ([]*scope, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", path, err)
+		return nil, fmt.Errorf("reading %s: %w; check the path in the file: argument and that the server's user may read it", path, err)
 	}
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
@@ -129,7 +129,7 @@ func parseFile(path string) ([]*scope, error) {
 		// An empty document decodes to EOF rather than to an empty struct.
 		return nil, fmt.Errorf("%s: %w", path, errNoSubnets)
 	case decodeErr != nil:
-		return nil, fmt.Errorf("parsing %s: %w", path, decodeErr)
+		return nil, fmt.Errorf("parsing %s: %w; fix the YAML at the line named, the keys a subnet takes are in the plugin documentation", path, decodeErr)
 	}
 	scopes, err := compile(cfg.Subnets)
 	if err != nil {
@@ -249,10 +249,10 @@ func parseLease(s *scope, sc *subnetConfig) error {
 	}
 	d, err := time.ParseDuration(sc.Lease)
 	if err != nil {
-		return fmt.Errorf("invalid lease %q: %w", sc.Lease, err)
+		return fmt.Errorf("lease %q is not a duration: %w; use a Go duration such as 12h or 30m", sc.Lease, err)
 	}
 	if d <= 0 {
-		return fmt.Errorf("lease %q has to be positive", sc.Lease)
+		return fmt.Errorf("lease %q is not above zero; use a duration such as 12h", sc.Lease)
 	}
 	s.lease = d
 	s.sub.lease = d
@@ -287,7 +287,7 @@ func parsePool4(s *scope, sc *subnetConfig) error {
 		return err
 	}
 	if !s.sub.cidr.Contains(r.start) || !s.sub.cidr.Contains(r.end) {
-		return fmt.Errorf("pool %s is not inside %s", r, s.sub.cidr)
+		return fmt.Errorf("pool %s is not inside %s; move both ends of the pool into the cidr, or widen the cidr", r, s.sub.cidr)
 	}
 	s.pool = &r
 	s.leasedb = sc.LeaseDB
@@ -299,7 +299,7 @@ func parsePool4(s *scope, sc *subnetConfig) error {
 func parseRange(value string) (addrRange, error) {
 	first, last, ok := strings.Cut(value, "-")
 	if !ok {
-		return addrRange{}, fmt.Errorf("pool %q: expected <start>-<end>", value)
+		return addrRange{}, fmt.Errorf("pool %q is not a range; write it as <start>-<end>, for example 10.0.1.100-10.0.1.200", value)
 	}
 	start, err := parseIP(strings.TrimSpace(first), true, "pool start")
 	if err != nil {
@@ -310,7 +310,7 @@ func parseRange(value string) (addrRange, error) {
 		return addrRange{}, err
 	}
 	if start.Compare(end) > 0 {
-		return addrRange{}, fmt.Errorf("pool %q: start is above end", value)
+		return addrRange{}, fmt.Errorf("pool %q starts above where it ends; swap the two addresses", value)
 	}
 	return addrRange{start: start, end: end}, nil
 }
@@ -336,7 +336,7 @@ func parsePool6(s *scope, sc *subnetConfig) error {
 		return familyError("prefixpool", sc.PrefixPool, false)
 	}
 	if sc.PrefixSize < p.Bits() || sc.PrefixSize > 128 {
-		return fmt.Errorf("prefixsize %d has to be between %d, the prefixpool length, and 128",
+		return fmt.Errorf("prefixsize %d is outside %d, the prefixpool length, to 128; use a longer prefix than the pool, such as 64",
 			sc.PrefixSize, p.Bits())
 	}
 	s.prefixPool = p
@@ -358,17 +358,17 @@ func parseReservations(s *scope, sc *subnetConfig) error {
 	for _, key := range slices.Sorted(maps.Keys(sc.Reservations)) {
 		mac, err := net.ParseMAC(key)
 		if err != nil {
-			return fmt.Errorf("reservation %q: invalid MAC address", key)
+			return fmt.Errorf("reservation key %q is not a MAC address; write six hex octets separated by colons, such as aa:bb:cc:dd:ee:01", key)
 		}
 		if _, dup := res[mac.String()]; dup {
-			return fmt.Errorf("reservation %q: duplicate MAC address", key)
+			return fmt.Errorf("reservation %q repeats a MAC another reservation already has; remove one of the two entries", key)
 		}
 		ip, err := parseIP(sc.Reservations[key], true, "reservation "+key)
 		if err != nil {
 			return err
 		}
 		if !s.sub.cidr.Contains(ip) {
-			return fmt.Errorf("reservation %q: %s is not inside %s", key, ip, s.sub.cidr)
+			return fmt.Errorf("reservation %q points at %s, which is not inside %s; give it an address from this subnet", key, ip, s.sub.cidr)
 		}
 		res[mac.String()] = net.IP(ip.AsSlice())
 	}
@@ -395,7 +395,7 @@ func parseOptions4(s *scope, o *optionsConfig) error {
 			return err
 		}
 		if !s.sub.cidr.Contains(router) {
-			return fmt.Errorf("router %s is not inside %s", router, s.sub.cidr)
+			return fmt.Errorf("router %s is not inside %s; set options.router to an address on this subnet", router, s.sub.cidr)
 		}
 		opts.router = net.IP(router.AsSlice())
 	}
@@ -442,7 +442,7 @@ func checkNames(scopes []*scope) error {
 	seen := make(map[string]bool, len(scopes))
 	for _, s := range scopes {
 		if seen[s.sub.name] {
-			return fmt.Errorf("subnet %q: duplicate name", s.sub.name)
+			return fmt.Errorf("subnet %q: two subnets carry this name; rename one of them", s.sub.name)
 		}
 		seen[s.sub.name] = true
 	}
@@ -459,7 +459,7 @@ func checkDefaults(scopes []*scope) error {
 			continue
 		}
 		if prev, ok := defaults[s.v4]; ok {
-			return fmt.Errorf("subnet %q: %s subnet %q is already the default",
+			return fmt.Errorf("subnet %q: %s subnet %q is already the default; remove default: true from one of the two",
 				s.sub.name, familyName(s.v4), prev)
 		}
 		defaults[s.v4] = s.sub.name
@@ -477,7 +477,7 @@ func checkLeaseDBs(scopes []*scope) error {
 			continue
 		}
 		if prev, ok := seen[s.leasedb]; ok {
-			return fmt.Errorf("subnet %q: leasedb %q is already used by subnet %q",
+			return fmt.Errorf("subnet %q: leasedb %q is already used by subnet %q; give each subnet a lease file of its own",
 				s.sub.name, s.leasedb, prev)
 		}
 		seen[s.leasedb] = s.sub.name
@@ -503,9 +503,10 @@ func checkPools(scopes []*scope) error {
 func poolConflict(a, b *scope) error {
 	switch {
 	case a.pool != nil && b.pool != nil && a.pool.overlaps(*b.pool):
-		return fmt.Errorf("subnet %q: pool %s overlaps the pool of subnet %q", a.sub.name, a.pool, b.sub.name)
+		return fmt.Errorf("subnet %q: pool %s overlaps the pool of subnet %q; move one of the two so they share no address",
+			a.sub.name, a.pool, b.sub.name)
 	case a.prefixPool.IsValid() && b.prefixPool.IsValid() && a.prefixPool.Overlaps(b.prefixPool):
-		return fmt.Errorf("subnet %q: prefixpool %s overlaps the prefixpool of subnet %q",
+		return fmt.Errorf("subnet %q: prefixpool %s overlaps the prefixpool of subnet %q; move one of the two so they do not overlap",
 			a.sub.name, a.prefixPool, b.sub.name)
 	}
 	return nil
@@ -517,10 +518,10 @@ func poolConflict(a, b *scope) error {
 func parsePrefix(value, what string) (netip.Prefix, error) {
 	p, err := netip.ParsePrefix(value)
 	if err != nil {
-		return netip.Prefix{}, fmt.Errorf("invalid %s %q", what, value)
+		return netip.Prefix{}, fmt.Errorf("%s %q is not a CIDR; write it as <address>/<length>, such as 10.0.1.0/24", what, value)
 	}
 	if p.Addr().Is4In6() {
-		return netip.Prefix{}, fmt.Errorf("invalid %s %q: %w", what, value, errMappedPrefix)
+		return netip.Prefix{}, fmt.Errorf("%s %q: %w", what, value, errMappedPrefix)
 	}
 	return p.Masked(), nil
 }
@@ -530,7 +531,7 @@ func parsePrefix(value, what string) (netip.Prefix, error) {
 func parseIP(value string, v4 bool, what string) (netip.Addr, error) {
 	a, err := netip.ParseAddr(value)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("invalid %s address %q", what, value)
+		return netip.Addr{}, fmt.Errorf("%s address %q is not an IP address; write a literal address, not a host name", what, value)
 	}
 	a = a.Unmap()
 	if a.Is4() != v4 {
@@ -558,7 +559,7 @@ func parseIPs(values []string, v4 bool, what string) ([]net.IP, error) {
 
 // familyError reports a value from the wrong protocol family.
 func familyError(what, value string, v4 bool) error {
-	return fmt.Errorf("%s %q is not %s, which is the family of this subnet", what, value, familyName(v4))
+	return fmt.Errorf("%s %q is not %s, the family of this subnet's cidr; use an %s value here", what, value, familyName(v4), familyName(v4))
 }
 
 // familyName spells a family out for an error message.

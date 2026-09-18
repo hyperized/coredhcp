@@ -115,7 +115,7 @@ func newWebhook(rawURL string, secret []byte) *webhook {
 func (w *webhook) deliver(ctx context.Context, d delivery) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.url, bytes.NewReader(d.payload))
 	if err != nil {
-		return fmt.Errorf("building the request: %w", err)
+		return fmt.Errorf("building the request for the webhook failed: %w; check the url: argument on the leasehook line", err)
 	}
 	req.Header.Set("Content-Type", contentType)
 	if len(w.secret) > 0 {
@@ -123,12 +123,12 @@ func (w *webhook) deliver(ctx context.Context, d delivery) error {
 	}
 	resp, err := w.hc.Do(req)
 	if err != nil {
-		return fmt.Errorf("posting the event: %w", err)
+		return fmt.Errorf("posting the event failed: %w; check the webhook host is reachable from this server and its certificate is valid", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBytes))
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("the endpoint answered %s", resp.Status)
+		return fmt.Errorf("the endpoint answered %s; redirects are not followed, so point url: at the final URL and check it accepts a POST", resp.Status)
 	}
 	return nil
 }
@@ -162,7 +162,8 @@ func (c *command) deliver(ctx context.Context, d delivery) error {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("running %s: %w%s", c.path, err, stderrSuffix(stderr.Bytes()))
+		return fmt.Errorf("running %s failed: %w%s; check the file exists and is executable by the user coredhcp runs as",
+			c.path, err, stderrSuffix(stderr.Bytes()))
 	}
 	return nil
 }

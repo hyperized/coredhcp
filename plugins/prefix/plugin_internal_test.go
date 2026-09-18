@@ -364,9 +364,9 @@ func TestParseLeaseDuration(t *testing.T) {
 		{name: "skipped, sweep argument follows", extra: []string{"sweep:45s"}, want: defaultLeaseDuration, wantRest: []string{"sweep:45s"}},
 		{name: "skipped, max-prefixes argument follows", extra: []string{"max-prefixes:4"}, want: defaultLeaseDuration, wantRest: []string{"max-prefixes:4"}},
 		{name: "followed by a sweep argument", extra: []string{"30m", "sweep:45s"}, want: 30 * time.Minute, wantRest: []string{"sweep:45s"}},
-		{name: "malformed", extra: []string{"forever"}, wantErrSub: "invalid lease duration"},
-		{name: "zero", extra: []string{"0s"}, wantErrSub: "has to be positive"},
-		{name: "negative", extra: []string{"-1h"}, wantErrSub: "has to be positive"},
+		{name: "malformed", extra: []string{"forever"}, wantErrSub: `lease duration "forever" is not a duration`},
+		{name: "zero", extra: []string{"0s"}, wantErrSub: `lease duration "0s" is not above zero`},
+		{name: "negative", extra: []string{"-1h"}, wantErrSub: `lease duration "-1h" is not above zero`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, rest, err := parseLeaseDuration(tc.extra)
@@ -420,52 +420,52 @@ func TestParseOptions(t *testing.T) {
 		{
 			name:       "unknown key",
 			extra:      []string{"reap:5m"},
-			wantErrSub: "unexpected argument",
+			wantErrSub: `argument "reap:5m" is not one this plugin takes`,
 		},
 		{
 			name:       "a key with no value",
 			extra:      []string{"sweep"},
-			wantErrSub: "unexpected argument",
+			wantErrSub: `argument "sweep" is not one this plugin takes`,
 		},
 		{
 			name:       "sweep given twice",
 			extra:      []string{"sweep:90s", "sweep:2m"},
-			wantErrSub: "argument sweep given more than once",
+			wantErrSub: "argument sweep is given more than once",
 		},
 		{
 			name:       "max-prefixes given twice",
 			extra:      []string{"max-prefixes:4", "max-prefixes:8"},
-			wantErrSub: "argument max-prefixes given more than once",
+			wantErrSub: "argument max-prefixes is given more than once",
 		},
 		{
 			name:       "malformed sweep interval",
 			extra:      []string{"sweep:soon"},
-			wantErrSub: "invalid sweep interval",
+			wantErrSub: "sweep:soon is not a duration",
 		},
 		{
 			name:       "zero sweep interval",
 			extra:      []string{"sweep:0s"},
-			wantErrSub: "has to be positive",
+			wantErrSub: "sweep:0s is not above zero",
 		},
 		{
 			name:       "negative sweep interval",
 			extra:      []string{"sweep:-1m"},
-			wantErrSub: "has to be positive",
+			wantErrSub: "sweep:-1m is not above zero",
 		},
 		{
 			name:       "non-numeric max-prefixes",
 			extra:      []string{"max-prefixes:abc"},
-			wantErrSub: "invalid prefix maximum",
+			wantErrSub: "max-prefixes:abc is not a number",
 		},
 		{
 			name:       "zero max-prefixes",
 			extra:      []string{"max-prefixes:0"},
-			wantErrSub: "prefix maximum has to be positive",
+			wantErrSub: "max-prefixes:0 is below one",
 		},
 		{
 			name:       "negative max-prefixes",
 			extra:      []string{"max-prefixes:-1"},
-			wantErrSub: "prefix maximum has to be positive",
+			wantErrSub: "max-prefixes:-1 is below one",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

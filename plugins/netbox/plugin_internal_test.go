@@ -84,17 +84,17 @@ func TestOptionsParse(t *testing.T) {
 		{
 			name:    "bad duration",
 			args:    []string{"ttl:nope"},
-			wantErr: `invalid duration in argument "ttl:nope"`,
+			wantErr: `the duration in "ttl:nope" does not parse`,
 		},
 		{
 			name:    "zero duration",
 			args:    []string{"ttl:0s"},
-			wantErr: `duration in argument "ttl:0s" has to be positive`,
+			wantErr: `the duration in "ttl:0s" is not positive`,
 		},
 		{
 			name:    "negative duration",
 			args:    []string{"ttl:-1s"},
-			wantErr: `duration in argument "ttl:-1s" has to be positive`,
+			wantErr: `the duration in "ttl:-1s" is not positive`,
 		},
 		{
 			name:    "unknown argument",
@@ -144,17 +144,17 @@ func TestSetupStateErrors(t *testing.T) {
 		{
 			name:    "no arguments",
 			args:    nil,
-			wantErr: "need at least 2 arguments",
+			wantErr: "give the NetBox URL and the API token first",
 		},
 		{
 			name:    "one argument",
 			args:    []string{"https://netbox.example.com"},
-			wantErr: "need at least 2 arguments",
+			wantErr: "give the NetBox URL and the API token first",
 		},
 		{
 			name:    "bad URL",
 			args:    []string{"ftp://netbox.example.com", "sometoken"},
-			wantErr: "scheme must be http or https",
+			wantErr: "has no http or https scheme",
 		},
 		{
 			name: "bad token, missing environment variable",

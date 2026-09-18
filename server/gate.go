@@ -47,6 +47,15 @@ var reasonText = [numReasons]string{
 	reasonRelayed:  "relayed request and no relay plugin configured",
 }
 
+// reasonAdvice is what the operator should do about a drop, or what it means
+// when there is nothing to do. It rides along with reasonText in the log line
+// dropped writes.
+var reasonAdvice = [numReasons]string{
+	reasonOverload: "clients will retry, look for a plugin that blocks on the network such as redis, netbox or ddns",
+	reasonShutdown: "nothing to do, the shutdown discards what arrives after it began",
+	reasonRelayed:  "add `relay: allow <address|prefix> ...` to the family's plugin list, naming the relays this server answers",
+}
+
 func (r reason) String() string { return reasonText[r] }
 
 // Drops counts the datagrams a server threw away before any plugin saw them.
@@ -197,7 +206,7 @@ func (g *gate) dropped(r reason) {
 	if !g.allowLog(r) {
 		return
 	}
-	log.Warningf("dropping datagram (%s), %d so far", r, n)
+	log.Warningf("dropping datagram (%s), %d so far; %s", r, n, reasonAdvice[r])
 }
 
 // allowLog reports whether r may log now, and records the time when it may.

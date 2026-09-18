@@ -89,12 +89,12 @@ func TestParseArgs(t *testing.T) {
 		{
 			name:    "unknown argument",
 			args:    []string{"file:ports.txt", "key:remote-id", "refresh"},
-			errText: "unexpected argument `refresh`",
+			errText: `argument "refresh" is not recognised`,
 		},
 		{
 			name:    "bare argument before allow is still unexpected",
 			args:    []string{"file:ports.txt", "key:circuit-id", "typo", "allow", "10.0.1.1"},
-			errText: "unexpected argument `typo`",
+			errText: `argument "typo" is not recognised`,
 		},
 		{name: "no arguments", args: nil, wantErr: errNoFile},
 		{name: "no file", args: []string{"key:circuit-id"}, wantErr: errNoFile},
@@ -105,7 +105,7 @@ func TestParseArgs(t *testing.T) {
 		{
 			name:    "malformed address after allow",
 			args:    []string{"file:ports.txt", "key:circuit-id", "allow", "not-an-address"},
-			errText: `invalid address "not-an-address"`,
+			errText: `allow list entry "not-an-address" does not parse`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -135,7 +135,7 @@ func TestKeySource(t *testing.T) {
 		}
 		_, err := keySource("DHCPv4", "interface-id", keys4)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "unknown DHCPv4 key `interface-id`")
+		assert.Contains(t, err.Error(), `DHCPv4 key "interface-id" is not recognised`)
 		assert.Contains(t, err.Error(), "circuit-id, remote-id, subscriber-id")
 	})
 
@@ -147,7 +147,7 @@ func TestKeySource(t *testing.T) {
 		}
 		_, err := keySource("DHCPv6", "subscriber-id", keys6)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "unknown DHCPv6 key `subscriber-id`")
+		assert.Contains(t, err.Error(), `DHCPv6 key "subscriber-id" is not recognised`)
 		assert.Contains(t, err.Error(), "interface-id, remote-id")
 	})
 }
@@ -165,8 +165,8 @@ func TestParseAllowEntry(t *testing.T) {
 		{name: "a bare IPv4 address becomes a /32", arg: "10.0.1.1", want: "10.0.1.1/32"},
 		{name: "a bare IPv6 address becomes a /128", arg: "2001:db8::1", want: "2001:db8::1/128"},
 		{name: "a CIDR is masked down to its network", arg: "10.0.2.5/24", want: "10.0.2.0/24"},
-		{name: "malformed prefix", arg: "10.0.0.0/99", errText: `invalid prefix "10.0.0.0/99"`},
-		{name: "malformed address", arg: "not-an-address", errText: `invalid address "not-an-address"`},
+		{name: "malformed prefix", arg: "10.0.0.0/99", errText: `allow list prefix "10.0.0.0/99" does not parse`},
+		{name: "malformed address", arg: "not-an-address", errText: `allow list entry "not-an-address" does not parse`},
 		{
 			name:    "an IPv4-mapped IPv6 address",
 			arg:     "::ffff:10.0.0.1",
@@ -293,27 +293,27 @@ func TestParseRecords(t *testing.T) {
 			want:     map[string]record{"port-1": {netip.MustParseAddr("::ffff:192.0.2.40"), time.Hour}},
 		},
 
-		{name: "only a key", contents: "port-1\n", errText: "line 1: malformed line, want `<key> <ip> [lease]`, got 1 fields"},
-		{name: "one field too many", contents: "port-1 192.0.2.1 1h extra\n", errText: "line 1: malformed line"},
-		{name: "odd number of hex digits", contents: "0xabc 192.0.2.1\n", errText: "malformed hex key 0xabc"},
-		{name: "not a hex digit", contents: "0xzz 192.0.2.1\n", errText: "malformed hex key 0xzz"},
-		{name: "empty hex key", contents: "0x 192.0.2.1\n", errText: "empty hex key: 0x"},
+		{name: "only a key", contents: "port-1\n", errText: `line 1: "port-1" has 1 fields`},
+		{name: "one field too many", contents: "port-1 192.0.2.1 1h extra\n", errText: `line 1: "port-1 192.0.2.1 1h extra" has 4 fields`},
+		{name: "odd number of hex digits", contents: "0xabc 192.0.2.1\n", errText: `hex key "0xabc" is not hexadecimal`},
+		{name: "not a hex digit", contents: "0xzz 192.0.2.1\n", errText: `hex key "0xzz" is not hexadecimal`},
+		{name: "empty hex key", contents: "0x 192.0.2.1\n", errText: `hex key "0x" has no digits`},
 		{name: "unprintable byte in a text key", contents: "por\x01t 192.0.2.1\n", errText: "neither printable ASCII nor 0x-prefixed hex"},
 		{
 			name:     "key over the length limit",
 			contents: longKey + "a 192.0.2.1\n",
-			errText:  "key is 256 bytes, over the 255 byte limit",
+			errText:  "is 256 bytes, over the 255 byte limit",
 		},
-		{name: "not an address", contents: "port-1 no-such-address\n", errText: "expected an IPv4 address, got: no-such-address"},
-		{name: "IPv6 address in a DHCPv4 file", contents: "port-1 2001:db8::1\n", errText: "expected an IPv4 address, got: 2001:db8::1"},
-		{name: "IPv4 address in a DHCPv6 file", contents: "port-1 192.0.2.1\n", v6: true, errText: "expected an IPv6 address, got: 192.0.2.1"},
-		{name: "not a duration", contents: "port-1 192.0.2.1 1year\n", errText: "malformed lease duration: 1year"},
-		{name: "lease under a second", contents: "port-1 192.0.2.1 500ms\n", errText: "lease duration must be at least 1s, got: 500ms"},
-		{name: "negative lease", contents: "port-1 192.0.2.1 -1h\n", errText: "lease duration must be at least 1s, got: -1h"},
+		{name: "not an address", contents: "port-1 no-such-address\n", errText: `"no-such-address" is not an IP address`},
+		{name: "IPv6 address in a DHCPv4 file", contents: "port-1 2001:db8::1\n", errText: "2001:db8::1 is not an IPv4 address"},
+		{name: "IPv4 address in a DHCPv6 file", contents: "port-1 192.0.2.1\n", v6: true, errText: "192.0.2.1 is not an IPv6 address"},
+		{name: "not a duration", contents: "port-1 192.0.2.1 1year\n", errText: `lease "1year" is not a duration`},
+		{name: "lease under a second", contents: "port-1 192.0.2.1 500ms\n", errText: `lease "500ms" is under the one second resolution`},
+		{name: "negative lease", contents: "port-1 192.0.2.1 -1h\n", errText: `lease "-1h" is under the one second resolution`},
 		{
 			name:     "the error names the offending line",
 			contents: "port-1 192.0.2.1\n\n# comment\nport-2 not-an-address\n",
-			errText:  "line 4: expected an IPv4 address",
+			errText:  `line 4: "not-an-address" is not an IP address`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -467,7 +467,7 @@ func TestSetupStateWatcherCreateError(t *testing.T) {
 
 	_, err := setupState(false, "file:"+path, "key:circuit-id", "allow", "10.0.1.1", autoRefreshArg)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to create watcher")
+	assert.Contains(t, err.Error(), "cannot create a file watcher for autorefresh")
 }
 
 func TestSetupStateWatcherAddError(t *testing.T) {
@@ -482,7 +482,7 @@ func TestSetupStateWatcherAddError(t *testing.T) {
 
 	_, err := setupState(false, "file:"+path, "key:circuit-id", "allow", "10.0.1.1", autoRefreshArg)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to watch")
+	assert.Contains(t, err.Error(), "for changes: simulated watch failure")
 }
 
 // TestWatchLoop uses a bare *fsnotify.Watcher rather than one from

@@ -278,7 +278,8 @@ func newSelector(v4 bool, args []string) (*selector, error) {
 		}
 	}
 	if len(s.subnets) == 0 {
-		return nil, fmt.Errorf("%s: no %s subnets configured", path, familyName(v4))
+		return nil, fmt.Errorf("%s lists no %s subnets; add a subnet with an %s cidr, or take the subnet plugin out of this server section",
+			path, familyName(v4), familyName(v4))
 	}
 	log.Printf("%s: serving %d subnets from %s", familyName(v4), len(s.subnets), path)
 	return s, nil
@@ -322,11 +323,13 @@ func registeredDelegate(name string) leases.Source {
 // filePath picks the configuration file out of the plugin arguments.
 func filePath(args []string) (string, error) {
 	if len(args) != 1 {
-		return "", fmt.Errorf("want exactly one argument, %s<path>, got %d", fileArgPrefix, len(args))
+		return "", fmt.Errorf("got %d arguments, want exactly one; pass %s<path>, for example %s/etc/coredhcp/subnets.yml",
+			len(args), fileArgPrefix, fileArgPrefix)
 	}
 	path, ok := strings.CutPrefix(args[0], fileArgPrefix)
 	if !ok || path == "" {
-		return "", fmt.Errorf("expected %s<path>, got %q", fileArgPrefix, args[0])
+		return "", fmt.Errorf("argument %q names no file; write it as %s<path>, for example %s/etc/coredhcp/subnets.yml",
+			args[0], fileArgPrefix, fileArgPrefix)
 	}
 	return path, nil
 }

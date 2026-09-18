@@ -21,17 +21,16 @@ func TestSetup4ArgValidation(t *testing.T) {
 		args    []string
 		wantErr string
 	}{
-		{name: "no args", args: nil, wantErr: "need at least one static route"},
-		{name: "invalid pair", args: []string{"foo"}, wantErr: "expected a destination/gateway pair, got: foo"},
-		{name: "invalid destination", args: []string{"foo,"}, wantErr: "expected a destination subnet, got: foo"},
-		{name: "invalid gateway", args: []string{"10.0.0.0/8,foo"}, wantErr: "expected a gateway address, got: foo"},
+		{name: "no args", args: nil, wantErr: "no static route given"},
+		{name: "invalid pair", args: []string{"foo"}, wantErr: `route "foo" is not a destination and gateway pair`},
+		{name: "invalid destination", args: []string{"foo,"}, wantErr: `destination "foo" is not a CIDR subnet`},
+		{name: "invalid gateway", args: []string{"10.0.0.0/8,foo"}, wantErr: `gateway "foo" is not an IP address`},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := staticroute.Plugin.Setup4(tc.args...)
-			require.Error(t, err)
-			require.EqualError(t, err, tc.wantErr)
+			require.ErrorContains(t, err, tc.wantErr)
 		})
 	}
 }

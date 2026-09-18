@@ -20,8 +20,8 @@ import (
 )
 
 var (
-	errNotInRange = errors.New("IPv4 address outside of allowed range")
-	errInvalidIP  = errors.New("invalid IPv4 address passed as input")
+	errNotInRange = errors.New("IPv4 address outside of allowed range; check the start and end addresses the `range` plugin was given")
+	errInvalidIP  = errors.New("not an IPv4 address; use dotted-quad form such as 10.0.0.5")
 )
 
 // IPv4Allocator allocates IPv4 addresses, tracking utilization with a bitmap
@@ -107,7 +107,7 @@ func (a *IPv4Allocator) Free(n net.IPNet) error {
 // NewIPv4Allocator creates a new allocator suitable for giving out IPv4 addresses
 func NewIPv4Allocator(start, end net.IP) (*IPv4Allocator, error) {
 	if start.To4() == nil || end.To4() == nil {
-		return nil, fmt.Errorf("invalid IPv4 addresses given to create the allocator: [%s,%s]", start, end)
+		return nil, fmt.Errorf("invalid IPv4 addresses given to create the allocator: [%s,%s]; give `range` a start and an end in dotted-quad form, such as 10.0.0.100 10.0.0.200", start, end)
 	}
 
 	alloc := IPv4Allocator{
@@ -116,7 +116,7 @@ func NewIPv4Allocator(start, end net.IP) (*IPv4Allocator, error) {
 	}
 
 	if alloc.start > alloc.end {
-		return nil, errors.New("no IPs in the given range to allocate")
+		return nil, errors.New("no IPs in the given range to allocate, its start is above its end; swap the start and end addresses the `range` plugin was given")
 	}
 	alloc.bitmap = bitset.New(uint(alloc.end - alloc.start + 1))
 

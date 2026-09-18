@@ -84,7 +84,7 @@ func hostFQDN(raw, zone string) (string, error) {
 func canonicalZone(raw string) (string, error) {
 	name := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(raw), "."))
 	if err := validName(name); err != nil {
-		return "", fmt.Errorf("invalid zone %q: %w", raw, err)
+		return "", fmt.Errorf("zone %q is not a DNS name: %w; write the zone as the name server spells it, such as home.lan", raw, err)
 	}
 	return name + ".", nil
 }
@@ -186,7 +186,8 @@ func reverseUnits(pfx netip.Prefix) (int, error) {
 		per, unit = 8, "8"
 	}
 	if pfx.Bits()%per != 0 {
-		return 0, fmt.Errorf("%w: %s, the prefix length has to be a multiple of %s", ErrReverseBoundary, pfx, unit)
+		return 0, fmt.Errorf("%w: %s; use a prefix length that is a multiple of %s, this plugin will not guess at an RFC 2317 delegation",
+			ErrReverseBoundary, pfx, unit)
 	}
 	return pfx.Bits() / per, nil
 }

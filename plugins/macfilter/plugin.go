@@ -128,7 +128,7 @@ func setup4(args ...string) (handler.Handler4, error) {
 // setupState parses the mode and MAC sources shared by setup4 and setup6.
 func setupState(args ...string) (*pluginState, error) {
 	if len(args) < 1 {
-		return nil, errors.New("need a mode argument: allow or deny")
+		return nil, errors.New("no mode given; make the first argument allow or deny, for example: macfilter: allow 00:11:22:33:44:55")
 	}
 
 	var allow bool
@@ -138,7 +138,7 @@ func setupState(args ...string) (*pluginState, error) {
 	case modeDeny:
 		allow = false
 	default:
-		return nil, fmt.Errorf("invalid mode %q, expected %q or %q", args[0], modeAllow, modeDeny)
+		return nil, fmt.Errorf("mode %q is not recognised; make the first argument %q or %q", args[0], modeAllow, modeDeny)
 	}
 
 	macs := make(map[string]struct{})
@@ -151,13 +151,13 @@ func setupState(args ...string) (*pluginState, error) {
 		}
 		hwaddr, err := net.ParseMAC(arg)
 		if err != nil {
-			return nil, fmt.Errorf("invalid MAC address %q: %w", arg, err)
+			return nil, fmt.Errorf("argument %q is not a MAC address: %w; write it as 00:11:22:33:44:55, or name a list file with file:/path/to/list", arg, err)
 		}
 		macs[hwaddr.String()] = struct{}{}
 	}
 
 	if len(macs) == 0 {
-		return nil, errors.New("need at least one MAC address, directly or via a file: entry")
+		return nil, errors.New("no MAC addresses given; list them after the mode, or name a list file with file:/path/to/list")
 	}
 
 	mode := modeDeny
@@ -174,11 +174,11 @@ func setupState(args ...string) (*pluginState, error) {
 // ignored.
 func loadMACFile(filename string, macs map[string]struct{}) error {
 	if filename == "" {
-		return errors.New("empty file path in file: entry")
+		return errors.New("the file: entry has no path; write it as file:/path/to/list")
 	}
 	contents, err := os.ReadFile(filename)
 	if err != nil {
-		return fmt.Errorf("failed to read %s: %w", filename, err)
+		return fmt.Errorf("cannot read the MAC list %s: %w; check that it exists and the server's user may read it", filename, err)
 	}
 	for i, line := range strings.Split(string(contents), "\n") {
 		line = strings.TrimSpace(line)
@@ -187,7 +187,7 @@ func loadMACFile(filename string, macs map[string]struct{}) error {
 		}
 		hwaddr, err := net.ParseMAC(line)
 		if err != nil {
-			return fmt.Errorf("%s:%d: invalid MAC address %q: %w", filename, i+1, line, err)
+			return fmt.Errorf("%s:%d: %q is not a MAC address: %w; write one address per line, for example 00:11:22:33:44:55", filename, i+1, line, err)
 		}
 		macs[hwaddr.String()] = struct{}{}
 	}

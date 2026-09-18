@@ -49,7 +49,7 @@ func loadRecords(filename string, v6 bool) (map[string]record, error) {
 
 	f, err := os.Open(filename)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cannot open the mapping file: %w; check that it exists and that the server's user may read it", err)
 	}
 	defer f.Close() //nolint:errcheck // read-only open()
 
@@ -81,7 +81,7 @@ func parseRecords(r io.Reader, v6 bool) (map[string]record, error) {
 		addrCounts[rec.addr.String()]++
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("stopped reading the file: %w; check for a line over 64 kB and for a filesystem problem", err)
 	}
 
 	duplicatesWarning("Key", keyCounts)
@@ -93,8 +93,8 @@ func parseRecords(r io.Reader, v6 bool) (map[string]record, error) {
 func parseRecord(line string, v6 bool) ([]byte, record, error) {
 	tokens := strings.Fields(line)
 	if len(tokens) < 2 || len(tokens) > 3 {
-		return nil, record{}, fmt.Errorf("malformed line, want `<key> <ip> [lease]`, got %d fields: %s",
-			len(tokens), line)
+		return nil, record{}, fmt.Errorf("%q has %d fields; write the line as <key> <ip> [lease], for example rack4-sw1:eth3 192.0.2.31 24h",
+			line, len(tokens))
 	}
 
 	key, err := parseKey(tokens[0])
@@ -123,22 +123,22 @@ func parseKey(token string) ([]byte, error) {
 	if hasHexPrefix(token) {
 		digits := token[len(hexPrefix):]
 		if digits == "" {
-			return nil, fmt.Errorf("empty hex key: %s", token)
+			return nil, fmt.Errorf("hex key %q has no digits; write the bytes after 0x, for example 0x0004010203", token)
 		}
 		decoded, err := hex.DecodeString(digits)
 		if err != nil {
-			return nil, fmt.Errorf("malformed hex key %s: %w", token, err)
+			return nil, fmt.Errorf("hex key %q is not hexadecimal: %w; write an even number of hex digits after 0x, for example 0x0004010203", token, err)
 		}
 		key = decoded
 	} else {
 		if i := strings.IndexFunc(token, func(r rune) bool { return r < '!' || r > '~' }); i >= 0 {
-			return nil, fmt.Errorf("key is neither printable ASCII nor %s-prefixed hex: %q", hexPrefix, token)
+			return nil, fmt.Errorf("key %q is neither printable ASCII nor %s-prefixed hex; write a text key with no spaces, or the raw bytes as 0x0004010203", token, hexPrefix)
 		}
 		key = []byte(token)
 	}
 
 	if len(key) > maxKeyLen {
-		return nil, fmt.Errorf("key is %d bytes, over the %d byte limit: %s", len(key), maxKeyLen, token)
+		return nil, fmt.Errorf("key %q is %d bytes, over the %d byte limit; shorten it to what the relay actually sends", token, len(key), maxKeyLen)
 	}
 	return key, nil
 }
@@ -155,12 +155,12 @@ func parseAddr(token string, v6 bool) (netip.Addr, error) {
 	family := familyOf(v6)
 	addr, err := netip.ParseAddr(token)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("expected an %s address, got: %s", family, token)
+		return netip.Addr{}, fmt.Errorf("%q is not an IP address; write the line as <key> <ip> [lease], for example rack4-sw1:eth3 192.0.2.31", token)
 	}
 	// Is4 is false for a v4-mapped v6 address, which is what a server6
 	// section wants: an IA_NA carries sixteen bytes either way.
 	if addr.Is4() == v6 {
-		return netip.Addr{}, fmt.Errorf("expected an %s address, got: %s", family, addr)
+		return netip.Addr{}, fmt.Errorf("%s is not an %s address; this section serves %s, use an address of that family", addr, family, family)
 	}
 	return addr, nil
 }
@@ -169,10 +169,10 @@ func parseAddr(token string, v6 bool) (netip.Addr, error) {
 func parseLease(token string) (time.Duration, error) {
 	lease, err := time.ParseDuration(token)
 	if err != nil {
-		return 0, fmt.Errorf("malformed lease duration: %s", token)
+		return 0, fmt.Errorf("lease %q is not a duration; write it the Go way such as 24h, or leave it out for the default of 1h", token)
 	}
 	if lease < leaseResolution {
-		return 0, fmt.Errorf("lease duration must be at least %s, got: %s", leaseResolution, token)
+		return 0, fmt.Errorf("lease %q is under the one second resolution of the protocol; use at least 1s, or leave it out for the default of 1h", token)
 	}
 	return lease.Round(leaseResolution), nil
 }
@@ -213,7 +213,7 @@ func duplicatesWarning(what string, counts map[string]int) {
 	var duplicates []string
 	for value, count := range counts {
 		if count > 1 {
-			duplicates = append(duplicates, fmt.Sprintf("%s %s is in %d records", what, value, count))
+			duplicates = append(duplicates, fmt.Sprintf("%s %s is in %d records; the last line wins, remove the ones you did not mean", what, value, count))
 		}
 	}
 

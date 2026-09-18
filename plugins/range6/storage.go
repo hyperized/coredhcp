@@ -103,7 +103,7 @@ func validateDBPath(path string) error {
 	if i < 0 {
 		return nil
 	}
-	return fmt.Errorf("lease database path %q may not contain %q", path, path[i:i+1])
+	return fmt.Errorf("lease database path %q may not contain %q; sqlite reads the name as a URI, so move the file to a path without it", path, path[i:i+1])
 }
 
 // isBusy reports whether err is sqlite saying the database is locked. The
@@ -167,14 +167,15 @@ func iaidValue(iaid [4]byte) int64 {
 // the allocator.
 func recordFromRow(duid []byte, iaid int64, ip string, expiry int64, hostname string) (*Record, error) {
 	if len(duid) == 0 || len(duid) > maxDUIDLen {
-		return nil, fmt.Errorf("%w: stored client DUID is %d octets, want 1 to %d", ErrCorruptRecord, len(duid), maxDUIDLen)
+		return nil, fmt.Errorf("%w: the stored client DUID is %d octets, want 1 to %d; fix or delete that row in the lease database",
+			ErrCorruptRecord, len(duid), maxDUIDLen)
 	}
 	if iaid < 0 || iaid > math.MaxUint32 {
-		return nil, fmt.Errorf("%w: stored IAID %d is outside the 32-bit range", ErrCorruptRecord, iaid)
+		return nil, fmt.Errorf("%w: the stored IAID %d is outside the 32-bit range; fix or delete that row in the lease database", ErrCorruptRecord, iaid)
 	}
 	addr := net.ParseIP(ip)
 	if addr.To16() == nil || addr.To4() != nil {
-		return nil, fmt.Errorf("%w: expected an IPv6 address, got: %v", ErrCorruptRecord, ip)
+		return nil, fmt.Errorf("%w: %q is not an IPv6 address; fix or delete that row in the lease database", ErrCorruptRecord, ip)
 	}
 	rec := &Record{DUID: duid, IP: addr.To16(), expires: expiry, hostname: hostname}
 	// The conversion is safe: iaid was bounds-checked against MaxUint32
@@ -307,7 +308,7 @@ func (p *pluginState) enqueue(w bindingWrite, undo func()) error {
 		return nil
 	default:
 		w.cancel()
-		return fmt.Errorf("could not %s: %w", w.describe(), ErrWriteQueueFull)
+		return fmt.Errorf("could not %s: %w; the database is not keeping up with the clients, check the disk it is on", w.describe(), ErrWriteQueueFull)
 	}
 }
 
@@ -500,13 +501,13 @@ func (p *pluginState) stopWriter() {
 // for bindings.
 func (p *pluginState) registerBackingDB(ctx context.Context, filename string) error {
 	if p.leasedb != nil {
-		return errors.New("cannot swap out a lease database while running")
+		return errors.New("this instance already has a lease database open; list the range6 plugin once per lease file")
 	}
 	// We never close this, but that's ok because plugins are never
 	// stopped/unregistered.
 	newLeaseDB, err := loadDB(ctx, filename)
 	if err != nil {
-		return fmt.Errorf("failed to open lease database %s: %w", filename, err)
+		return fmt.Errorf("could not open lease database %s: %w; check that the directory exists, that the server's user may write to it, and that no other process holds the file", filename, err)
 	}
 	p.leasedb = newLeaseDB
 	return nil

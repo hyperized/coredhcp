@@ -172,7 +172,7 @@ func (l *Logger) Panicf(format string, args ...any) {
 func SetLevel(name string) error {
 	lvl, ok := levels[strings.ToLower(name)]
 	if !ok {
-		return fmt.Errorf("unknown log level '%s', valid levels are %v", name, Levels())
+		return fmt.Errorf("unknown log level %q; use one of %v", name, Levels())
 	}
 	level.Set(lvl)
 	return nil

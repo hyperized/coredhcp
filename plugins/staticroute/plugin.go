@@ -8,6 +8,7 @@ package staticroute
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 
@@ -37,25 +38,25 @@ func setup4(args ...string) (handler.Handler4, error) {
 	p := pluginState{routes: make(dhcpv4.Routes, 0)}
 
 	if len(args) < 1 {
-		return nil, errors.New("need at least one static route")
+		return nil, errors.New("no static route given; write each route as <destination/prefix>,<gateway>, for example 10.0.0.0/8,192.0.2.1")
 	}
 
 	var err error
 	for _, arg := range args {
 		fields := strings.Split(arg, ",")
 		if len(fields) != 2 {
-			return p.Handler4, errors.New("expected a destination/gateway pair, got: " + arg)
+			return p.Handler4, fmt.Errorf("route %q is not a destination and gateway pair; write it as <destination/prefix>,<gateway>, for example 10.0.0.0/8,192.0.2.1", arg)
 		}
 
 		route := &dhcpv4.Route{}
 		_, route.Dest, err = net.ParseCIDR(fields[0])
 		if err != nil {
-			return p.Handler4, errors.New("expected a destination subnet, got: " + fields[0])
+			return p.Handler4, fmt.Errorf("destination %q is not a CIDR subnet; write it as <address>/<prefix length>, for example 10.0.0.0/8", fields[0])
 		}
 
 		route.Router = net.ParseIP(fields[1])
 		if route.Router == nil {
-			return p.Handler4, errors.New("expected a gateway address, got: " + fields[1])
+			return p.Handler4, fmt.Errorf("gateway %q is not an IP address; give it as a dotted address, for example 192.0.2.1", fields[1])
 		}
 
 		p.routes = append(p.routes, route)

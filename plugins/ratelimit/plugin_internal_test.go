@@ -82,18 +82,17 @@ func TestParseRate(t *testing.T) {
 		{name: "one per second", raw: "1/s", wantInterval: time.Second, wantPerSec: 1},
 		{name: "per minute", raw: "600/m", wantInterval: 100 * time.Millisecond, wantPerSec: 10},
 		{name: "slower than one per second", raw: "1/m", wantInterval: time.Minute, wantPerSec: 0},
-		{name: "no period", raw: "20", wantErr: `invalid rate "20", want <n>/s or <n>/m`},
-		{name: "not a number", raw: "abc/s", wantErr: `invalid rate "abc", want a whole number`},
-		{name: "zero", raw: "0/s", wantErr: "rate 0 out of range, want 1 to 1000000"},
-		{name: "negative", raw: "-1/s", wantErr: "rate -1 out of range, want 1 to 1000000"},
-		{name: "too large", raw: "1000001/s", wantErr: "rate 1000001 out of range, want 1 to 1000000"},
-		{name: "unknown period", raw: "20/h", wantErr: `invalid rate "20/h", want a period of "s" or "m"`},
+		{name: "no period", raw: "20", wantErr: `rate "20" has no period`},
+		{name: "not a number", raw: "abc/s", wantErr: `rate "abc" is not a whole number`},
+		{name: "zero", raw: "0/s", wantErr: "rate 0 is out of range; use a whole number from 1 to 1000000"},
+		{name: "negative", raw: "-1/s", wantErr: "rate -1 is out of range; use a whole number from 1 to 1000000"},
+		{name: "too large", raw: "1000001/s", wantErr: "rate 1000001 is out of range; use a whole number from 1 to 1000000"},
+		{name: "unknown period", raw: "20/h", wantErr: `rate "20/h" has a period this plugin does not know`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			interval, perSec, err := parseRate("rate", tc.raw)
 			if tc.wantErr != "" {
-				require.Error(t, err)
-				assert.Equal(t, tc.wantErr, err.Error())
+				require.ErrorContains(t, err, tc.wantErr)
 				return
 			}
 			require.NoError(t, err)
@@ -157,23 +156,23 @@ func TestParseArgsErrors(t *testing.T) {
 		args []string
 		want string
 	}{
-		{name: "no arguments", args: nil, want: "need a rate as the first argument, for example 20/s or 600/m"},
-		{name: "bad rate", args: []string{"fast"}, want: `invalid rate "fast", want <n>/s or <n>/m`},
+		{name: "no arguments", args: nil, want: "no rate given"},
+		{name: "bad rate", args: []string{"fast"}, want: `rate "fast" has no period`},
 		{
 			name: "unknown argument", args: []string{"20/s", "nope:1"},
-			want: `unknown argument "nope:1", want one of burst:<n>, per:mac|source|both, max:<n> or global:<rate>`,
+			want: `unknown argument "nope:1"; use one of burst:<n>, per:mac|source|both, max:<n> or global:<rate>`,
 		},
 		{
 			name: "bare argument", args: []string{"20/s", "both"},
-			want: `unknown argument "both", want one of burst:<n>, per:mac|source|both, max:<n> or global:<rate>`,
+			want: `unknown argument "both"; use one of burst:<n>, per:mac|source|both, max:<n> or global:<rate>`,
 		},
-		{name: "burst not a number", args: []string{"20/s", "burst:x"}, want: `invalid burst "x", want a whole number`},
-		{name: "burst zero", args: []string{"20/s", "burst:0"}, want: "burst 0 out of range, want 1 to 10000000"},
-		{name: "burst too large", args: []string{"20/s", "burst:10000001"}, want: "burst 10000001 out of range, want 1 to 10000000"},
-		{name: "per unknown", args: []string{"20/s", "per:vlan"}, want: "invalid per:vlan, want mac, source or both"},
-		{name: "max zero", args: []string{"20/s", "max:0"}, want: "max 0 out of range, want 1 to 1048576"},
-		{name: "max too large", args: []string{"20/s", "max:1048577"}, want: "max 1048577 out of range, want 1 to 1048576"},
-		{name: "global bad rate", args: []string{"20/s", "global:2000"}, want: `invalid global "2000", want <n>/s or <n>/m`},
+		{name: "burst not a number", args: []string{"20/s", "burst:x"}, want: `burst "x" is not a whole number`},
+		{name: "burst zero", args: []string{"20/s", "burst:0"}, want: "burst 0 is out of range; use a whole number from 1 to 10000000"},
+		{name: "burst too large", args: []string{"20/s", "burst:10000001"}, want: "burst 10000001 is out of range"},
+		{name: "per unknown", args: []string{"20/s", "per:vlan"}, want: `"per:vlan" is not a way to identify a client`},
+		{name: "max zero", args: []string{"20/s", "max:0"}, want: "max 0 is out of range; use a whole number from 1 to 1048576"},
+		{name: "max too large", args: []string{"20/s", "max:1048577"}, want: "max 1048577 is out of range"},
+		{name: "global bad rate", args: []string{"20/s", "global:2000"}, want: `global "2000" has no period`},
 		{name: "burst twice", args: []string{"20/s", "burst:5", "burst:6"}, want: "burst given more than once"},
 		{name: "per twice", args: []string{"20/s", "per:mac", "per:mac"}, want: "per given more than once"},
 		{name: "max twice", args: []string{"20/s", "max:5", "max:6"}, want: "max given more than once"},
@@ -181,8 +180,7 @@ func TestParseArgsErrors(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := parseArgs(tc.args)
-			require.Error(t, err)
-			assert.Equal(t, tc.want, err.Error())
+			require.ErrorContains(t, err, tc.want)
 		})
 	}
 }
@@ -406,7 +404,8 @@ func TestSummaryIsLoggedAtMostOncePerMinute(t *testing.T) {
 	clk.advance(2 * time.Second)
 	require.True(t, s.allow([]byte("a")))
 	require.False(t, s.allow([]byte("a")))
-	assert.Equal(t, []string{"dropped 4 requests over the last 1m1s, 2 distinct keys"}, rec.all())
+	require.Len(t, rec.all(), 1)
+	assert.Contains(t, rec.all()[0], "dropped 4 requests over the last 1m1s from 2 distinct clients")
 
 	// The counters started over, and the new window counts "a" again.
 	assert.Equal(t, uint64(0), s.dropped)

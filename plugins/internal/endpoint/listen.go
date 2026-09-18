@@ -37,7 +37,7 @@ func (e Endpoint) Listen(ctx context.Context) (net.Listener, error) {
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, NetworkTCP, e.address)
 	if err != nil {
-		return nil, fmt.Errorf("%s: cannot listen on %s: %w", e.plugin, e.Key(), err)
+		return nil, fmt.Errorf("%s: cannot listen on %s: %w; check what already holds the port with `ss -ltnp`, or give the plugin another port", e.plugin, e.Key(), err)
 	}
 	return ln, nil
 }
@@ -53,13 +53,13 @@ func (e Endpoint) listenUnix(ctx context.Context) (net.Listener, error) {
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, NetworkUnix, e.address)
 	if err != nil {
-		return nil, fmt.Errorf("%s: cannot listen on %s: %w", e.plugin, e.Key(), err)
+		return nil, fmt.Errorf("%s: cannot listen on %s: %w; check that the directory exists and that the server's user may create a socket in it", e.plugin, e.Key(), err)
 	}
 	if err := chmodFile(e.address, e.mode); err != nil {
 		// Serving on a socket with permissions nobody asked for is worse
 		// than not serving: those permissions are the authentication.
 		_ = ln.Close()
-		return nil, fmt.Errorf("%s: cannot set mode %#o on %s: %w", e.plugin, e.mode, e.address, err)
+		return nil, fmt.Errorf("%s: cannot set mode %#o on %s: %w; check that the socket's directory belongs to the server's user", e.plugin, e.mode, e.address, err)
 	}
 	return ln, nil
 }
@@ -73,21 +73,21 @@ func (e Endpoint) clearStaleSocket(ctx context.Context) error {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("%s: cannot inspect %s: %w", e.plugin, e.address, err)
+		return fmt.Errorf("%s: cannot inspect %s: %w; check the path, and the server's permissions on the directories leading to it", e.plugin, e.address, err)
 	}
 	if info.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf("%s: %s exists and is not a socket, refusing to remove it", e.plugin, e.address)
+		return fmt.Errorf("%s: %s exists and is not a socket, refusing to remove it; move that file aside, or give the plugin another path", e.plugin, e.address)
 	}
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, NetworkUnix, e.address)
 	if err == nil {
 		_ = conn.Close()
-		return fmt.Errorf("%s: something is already listening on %s", e.plugin, e.address)
+		return fmt.Errorf("%s: something is already listening on %s; stop the other coredhcp, or give this one another socket path", e.plugin, e.address)
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		// The probe ran out of time rather than finding nobody home, so
 		// whether the socket is stale is unknown.
-		return fmt.Errorf("%s: cannot tell whether %s is stale: %w", e.plugin, e.address, ctxErr)
+		return fmt.Errorf("%s: cannot tell within %s whether %s is stale: %w; remove the socket by hand once nothing is listening on it", e.plugin, bindTimeout, e.address, ctxErr)
 	}
 	return os.Remove(e.address)
 }

@@ -231,7 +231,8 @@ func setupState(v6 bool, args ...string) (*pluginState, error) {
 		return nil, err
 	}
 	if err := p.client.ping(); err != nil {
-		log.Warningf("redis at %s did not answer PING, continuing anyway: %v", p.client.cfg.addr, err)
+		log.Warningf("redis at %s did not answer PING, starting anyway: %v; check the server is up and the password is right, lookups fail until it is",
+			p.client.cfg.addr, err)
 		return p, nil
 	}
 	log.Infof("using redis at %s, key prefix %q", p.client.cfg.addr, p.prefix)
@@ -273,7 +274,7 @@ var optionParsers = []struct {
 // the line may have changed, so it is filled in once the line is read.
 func parseArgs(v6 bool, args []string) (*settings, error) {
 	if len(args) < 1 {
-		return nil, fmt.Errorf("need a redis address, either host:port or a %s:// or %s:// URL", schemePlain, schemeTLS)
+		return nil, fmt.Errorf("no redis address given; make the first argument host:port, or a %s:// URL, or a %s:// one for TLS", schemePlain, schemeTLS)
 	}
 	s := &settings{
 		lifetime: defaultLifetime,
@@ -303,7 +304,7 @@ func applyOption(s *settings, arg string) error {
 			return o.apply(s, raw)
 		}
 	}
-	return fmt.Errorf("unknown argument %q, want one of %s %s %s %s %s",
+	return fmt.Errorf("unknown argument %q; use one of %s %s %s %s %s, with the redis address first on the line",
 		arg, passwordArg, timeoutArg, prefixArg, lifetimeArg, keyArg)
 }
 
@@ -313,17 +314,19 @@ func applyPassword(s *settings, raw string) error {
 	name, fromEnv := strings.CutPrefix(raw, envPrefix)
 	if !fromEnv {
 		if raw == "" {
-			return fmt.Errorf("%s needs a value", passwordArg)
+			return fmt.Errorf("%s needs a value; use %s%sREDIS_PASSWORD to read it from the environment and keep it out of config.yml",
+				passwordArg, passwordArg, envPrefix)
 		}
 		s.client.password = raw
 		return nil
 	}
 	if name == "" {
-		return fmt.Errorf("%s%s needs an environment variable name", passwordArg, envPrefix)
+		return fmt.Errorf("%s%s needs an environment variable name; use %s%sREDIS_PASSWORD and export it before starting coredhcp",
+			passwordArg, envPrefix, passwordArg, envPrefix)
 	}
 	value := os.Getenv(name)
 	if value == "" {
-		return fmt.Errorf("environment variable %s is unset or empty", name)
+		return fmt.Errorf("environment variable %s is unset or empty; export it with the redis password before starting coredhcp", name)
 	}
 	s.client.password = value
 	return nil
@@ -331,7 +334,7 @@ func applyPassword(s *settings, raw string) error {
 
 // applyTimeout sets the dial and per-command timeout.
 func applyTimeout(s *settings, raw string) error {
-	d, err := parsePositiveDuration(timeoutArg, raw)
+	d, err := parsePositiveDuration(timeoutArg, raw, defaultTimeout)
 	if err != nil {
 		return err
 	}
@@ -341,7 +344,7 @@ func applyTimeout(s *settings, raw string) error {
 
 // applyLifetime sets the DHCPv6 lifetime used when a hash has no leaseTime.
 func applyLifetime(s *settings, raw string) error {
-	d, err := parsePositiveDuration(lifetimeArg, raw)
+	d, err := parsePositiveDuration(lifetimeArg, raw, defaultLifetime)
 	if err != nil {
 		return err
 	}
@@ -369,13 +372,15 @@ func applyKey(s *settings, raw string) error {
 
 // parsePositiveDuration parses a Go duration and refuses anything that would
 // disable the setting it configures.
-func parsePositiveDuration(arg, raw string) (time.Duration, error) {
+func parsePositiveDuration(arg, raw string, def time.Duration) (time.Duration, error) {
+	name := strings.TrimSuffix(arg, ":")
 	d, err := time.ParseDuration(raw)
 	if err != nil {
-		return 0, fmt.Errorf("invalid %s%s: %w", arg, raw, err)
+		return 0, fmt.Errorf("%s %q is not a duration: %w; use a Go duration such as 2s or 1h, or leave it out for the default of %s",
+			name, raw, err, def)
 	}
 	if d <= 0 {
-		return 0, fmt.Errorf("%s has to be positive, got %s", strings.TrimSuffix(arg, ":"), raw)
+		return 0, fmt.Errorf("%s %q is not positive; use a duration above zero, or leave it out for the default of %s", name, raw, def)
 	}
 	return d, nil
 }
@@ -401,14 +406,14 @@ func parseURL(arg string, s *settings) error {
 		if uerr, ok := errors.AsType[*url.Error](err); ok {
 			err = uerr.Err
 		}
-		return fmt.Errorf("invalid redis URL: %w", err)
+		return fmt.Errorf("the redis URL does not parse: %w; write it as %s://host:port/db, or %s://host:port/db for TLS", err, schemePlain, schemeTLS)
 	}
 	if u.Scheme != schemePlain && u.Scheme != schemeTLS {
-		return fmt.Errorf("unsupported URL scheme %q, want %s:// or %s://", u.Scheme, schemePlain, schemeTLS)
+		return fmt.Errorf("unsupported URL scheme %q in the redis address; use %s:// for cleartext or %s:// for TLS", u.Scheme, schemePlain, schemeTLS)
 	}
 	host := u.Hostname()
 	if host == "" {
-		return errors.New("redis URL has no host")
+		return errors.New("the redis URL has no host; write it as redis://host:port/db, with the host straight after the scheme")
 	}
 	port := u.Port()
 	if port == "" {
@@ -441,10 +446,10 @@ func parseURL(arg string, s *settings) error {
 func validAddr(addr string) error {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return fmt.Errorf("invalid redis address %q, want host:port: %w", addr, err)
+		return fmt.Errorf("the redis address %q is not host:port: %w; add the port, redis listens on 6379 unless told otherwise", addr, err)
 	}
 	if host == "" {
-		return fmt.Errorf("invalid redis address %q, it has no host", addr)
+		return fmt.Errorf("the redis address %q has no host; write it as host:port, for example 10.0.0.9:6379", addr)
 	}
 	return validPort(port)
 }
@@ -455,7 +460,7 @@ func validAddr(addr string) error {
 func validPort(port string) error {
 	n, err := strconv.Atoi(port)
 	if err != nil || n < 1 || n > 65535 {
-		return fmt.Errorf("invalid redis port %q", port)
+		return fmt.Errorf("the redis port %q is not a number from 1 to 65535; use 6379 unless the server was told to listen elsewhere", port)
 	}
 	return nil
 }
@@ -468,7 +473,7 @@ func parseDB(path string) (int, error) {
 	}
 	db, err := strconv.Atoi(trimmed)
 	if err != nil || db < 0 {
-		return 0, fmt.Errorf("invalid database %q in redis URL, want a non-negative number", trimmed)
+		return 0, fmt.Errorf("the database %q in the redis URL is not a non-negative number; use a path such as /0, or leave it off for database 0", trimmed)
 	}
 	return db, nil
 }
@@ -521,13 +526,13 @@ func splitAddr(value string) (addr netip.Addr, bits int, err error) {
 	if strings.Contains(value, "/") {
 		pfx, prefixErr := netip.ParsePrefix(value)
 		if prefixErr != nil {
-			return netip.Addr{}, 0, fmt.Errorf("invalid CIDR %q: %w", value, prefixErr)
+			return netip.Addr{}, 0, fmt.Errorf("%q is not a CIDR address: %w; fix the field in redis, it has to look like 10.0.0.5/24", value, prefixErr)
 		}
 		return pfx.Addr(), pfx.Bits(), nil
 	}
 	addr, err = netip.ParseAddr(value)
 	if err != nil {
-		return netip.Addr{}, 0, fmt.Errorf("invalid address %q: %w", value, err)
+		return netip.Addr{}, 0, fmt.Errorf("%q is not an IP address: %w; fix the field in redis, it takes a bare address or a CIDR one", value, err)
 	}
 	// An IPv4 address written the ::ffff:a.b.c.d way is still an IPv4
 	// address as far as DHCP is concerned.
@@ -542,7 +547,7 @@ func parseIPv4(value string) (net.IP, net.IPMask, error) {
 		return nil, nil, err
 	}
 	if !addr.Is4() {
-		return nil, nil, fmt.Errorf("%q is not an IPv4 address", value)
+		return nil, nil, fmt.Errorf("%q is not an IPv4 address; set the %s field in redis to an IPv4 address such as 10.0.0.5/24", value, fieldIPv4)
 	}
 	if bits < 0 {
 		return addr.AsSlice(), nil, nil
@@ -558,7 +563,7 @@ func parseIPv6(value string) (net.IP, error) {
 		return nil, err
 	}
 	if !addr.Is6() || addr.Is4In6() {
-		return nil, fmt.Errorf("%q is not an IPv6 address", value)
+		return nil, fmt.Errorf("%q is not an IPv6 address; set the %s field in redis to an IPv6 address such as 2001:db8::10", value, fieldIPv6)
 	}
 	return addr.AsSlice(), nil
 }
@@ -576,7 +581,7 @@ func dnsServers(value string, want4 bool) []net.IP {
 		}
 		addr, err := netip.ParseAddr(part)
 		if err != nil {
-			log.Warningf("ignoring invalid %s entry %q", fieldDNS, part)
+			log.Warningf("ignoring the %s entry %q, it is not an IP address; fix the field in redis, it holds a comma-separated list of addresses", fieldDNS, part)
 			continue
 		}
 		if addr = addr.Unmap(); addr.Is4() != want4 {
@@ -596,7 +601,7 @@ func leaseTime(fields map[string]string) (time.Duration, bool) {
 	}
 	d, err := time.ParseDuration(value)
 	if err != nil || d <= 0 {
-		log.Warningf("ignoring invalid %s %q", fieldLeaseTime, value)
+		log.Warningf("ignoring %s %q, it is not a duration above zero; set it in redis to a Go duration such as 12h", fieldLeaseTime, value)
 		return 0, false
 	}
 	return d, true
@@ -613,7 +618,8 @@ func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 	}
 	fields, err := p.lookup(ident)
 	if err != nil {
-		log.Warningf("looking up %s failed, dropping the request: %v", ident, err)
+		log.Warningf("looking up %s failed, dropping the request: %v; check redis at %s is reachable and the password is right",
+			ident, err, p.client.cfg.addr)
 		return nil, true
 	}
 	value, ok := p.addressField(fields, fieldIPv4, ident)
@@ -622,7 +628,7 @@ func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 	}
 	addr, mask, err := parseIPv4(value)
 	if err != nil {
-		log.Warningf("dropping the request from %s: %v", ident, err)
+		log.Warningf("dropping the request from %s, its redis hash is unusable: %v", ident, err)
 		return nil, true
 	}
 	resp.YourIPAddr = addr
@@ -669,11 +675,11 @@ func addOptions4(req, resp *dhcpv4.DHCPv4, fields map[string]string) {
 func addRouter(resp *dhcpv4.DHCPv4, value string) {
 	addr, err := netip.ParseAddr(value)
 	if err != nil {
-		log.Warningf("ignoring invalid %s %q", fieldRouter, value)
+		log.Warningf("ignoring %s %q, it is not an IP address; set it in redis to the IPv4 default gateway, such as 10.0.0.1", fieldRouter, value)
 		return
 	}
 	if addr = addr.Unmap(); !addr.Is4() {
-		log.Warningf("ignoring %s %q, it is not an IPv4 address", fieldRouter, value)
+		log.Warningf("ignoring %s %q, option 3 carries an IPv4 gateway; set it in redis to an IPv4 address such as 10.0.0.1", fieldRouter, value)
 		return
 	}
 	resp.Options.Update(dhcpv4.OptRouter(addr.AsSlice()))
@@ -683,7 +689,7 @@ func addRouter(resp *dhcpv4.DHCPv4, value string) {
 func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	decap, err := req.GetInnerMessage()
 	if err != nil {
-		log.Errorf("BUG: could not decapsulate: %v", err)
+		log.Errorf("BUG: could not decapsulate the DHCPv6 request, dropping it: %v; please report this with the log line", err)
 		return nil, true
 	}
 	if skipsLookup6(decap.MessageType) {
@@ -721,7 +727,8 @@ func skipsLookup6(mtype dhcpv6.MessageType) bool {
 func (p *pluginState) answer6(decap *dhcpv6.Message, resp dhcpv6.DHCPv6, iana *dhcpv6.OptIANA, ident string) (dhcpv6.DHCPv6, bool) {
 	fields, err := p.lookup(ident)
 	if err != nil {
-		log.Warningf("looking up %s failed, dropping the request: %v", ident, err)
+		log.Warningf("looking up %s failed, dropping the request: %v; check redis at %s is reachable and the password is right",
+			ident, err, p.client.cfg.addr)
 		return nil, true
 	}
 	value, ok := p.addressField(fields, fieldIPv6, ident)
@@ -730,7 +737,7 @@ func (p *pluginState) answer6(decap *dhcpv6.Message, resp dhcpv6.DHCPv6, iana *d
 	}
 	addr, err := parseIPv6(value)
 	if err != nil {
-		log.Warningf("dropping the request from %s: %v", ident, err)
+		log.Warningf("dropping the request from %s, its redis hash is unusable: %v", ident, err)
 		return nil, true
 	}
 	lifetime := p.lifetime

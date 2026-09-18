@@ -39,7 +39,7 @@ func loadRecords(filename string, v6 bool, mode keyMode) (map[string]netip.Addr,
 	log.Infof("reading IPv%d leases from %s", protoVersion(v6), filename)
 	f, err := os.Open(filename)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cannot open the lease file: %w; check that it exists and that the server's user may read it", err)
 	}
 	defer f.Close() //nolint:errcheck // read-only open()
 
@@ -91,7 +91,7 @@ func parseDHCPRecords(r io.Reader, v6 bool, mode keyMode) (map[string]netip.Addr
 
 		tokens := strings.Fields(line)
 		if len(tokens) != 2 {
-			return nil, fmt.Errorf("line %d: malformed line, want 2 fields, got %d: %s", lineNo, len(tokens), line)
+			return nil, fmt.Errorf("line %d: %q has %d fields; write the line as <identifier> <ip>, for example 00:11:22:33:44:55 10.0.0.1", lineNo, line, len(tokens))
 		}
 
 		key, ipaddr, err := parseRecord(tokens, protVer, check, mode)
@@ -109,7 +109,7 @@ func parseDHCPRecords(r io.Reader, v6 bool, mode keyMode) (map[string]netip.Addr
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("stopped reading the file: %w; check for a line over 64 kB and for a filesystem problem", err)
 	}
 
 	duplicatesWarning(addresses)
@@ -126,10 +126,10 @@ func parseRecord(tokens []string, protVer int, check func(netip.Addr) bool, mode
 	}
 	ipaddr, err := netip.ParseAddr(tokens[1])
 	if err != nil {
-		return "", netip.Addr{}, fmt.Errorf("expected an IPv%d address, got: %s", protVer, tokens[1])
+		return "", netip.Addr{}, fmt.Errorf("%q is not an IP address; write the line as <identifier> <ip>, for example 00:11:22:33:44:55 10.0.0.1", tokens[1])
 	}
 	if !check(ipaddr) {
-		return "", netip.Addr{}, fmt.Errorf("expected an IPv%d address, got: %s", protVer, ipaddr)
+		return "", netip.Addr{}, fmt.Errorf("%s is not an IPv%d address; this section serves IPv%d, use an address of that family", ipaddr, protVer, protVer)
 	}
 	return key, ipaddr, nil
 }
@@ -138,7 +138,7 @@ func duplicatesWarning(ipAddresses map[string]int) {
 	var duplicates []string
 	for ipAddress, count := range ipAddresses {
 		if count > 1 {
-			duplicates = append(duplicates, fmt.Sprintf("Address %s is in %d records", ipAddress, count))
+			duplicates = append(duplicates, fmt.Sprintf("%s is in %d records; the last line wins, remove the ones you did not mean", ipAddress, count))
 		}
 	}
 

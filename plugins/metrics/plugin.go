@@ -173,7 +173,7 @@ func obtain(e endpoint.Endpoint) (*collector, error) {
 	for running := range registry.listeners {
 		// The map holds at most one entry, so this loop reads the address
 		// already bound and returns.
-		return nil, fmt.Errorf("%s: already listening on %s, refusing to also listen on %s", pluginName, running, key)
+		return nil, fmt.Errorf("already listening on %s, so %s cannot also be served; give both server sections the same metrics address, or configure metrics under one of them", running, key)
 	}
 	c, err := newCollector(e)
 	if err != nil {
@@ -214,7 +214,7 @@ func newCollector(e endpoint.Endpoint) (*collector, error) {
 	go func() {
 		defer close(c.done)
 		if err := c.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Errorf("metrics listener on %s stopped: %v", e.Key(), err)
+			log.Errorf("the metrics listener on %s stopped and scrapes will fail from now on: %v; restart coredhcp to serve metrics again", e.Key(), err)
 		}
 	}()
 	// The bound address rather than the configured one: port 0 resolves to

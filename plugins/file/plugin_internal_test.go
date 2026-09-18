@@ -37,7 +37,7 @@ func TestSetupFileWatcherCreateError(t *testing.T) {
 
 	_, _, err := setupFile(false, path, autoRefreshArg)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to create watcher")
+	assert.Contains(t, err.Error(), "cannot create a file watcher for autorefresh")
 }
 
 func TestSetupFileWatcherAddError(t *testing.T) {
@@ -52,7 +52,7 @@ func TestSetupFileWatcherAddError(t *testing.T) {
 
 	_, _, err := setupFile(false, path, autoRefreshArg)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to watch")
+	assert.Contains(t, err.Error(), "for changes: simulated watch failure")
 }
 
 // newWatchLoopHarness uses a bare fsnotify.Watcher rather than a real one: a
@@ -113,7 +113,7 @@ func TestWatchLoop(t *testing.T) {
 
 		require.Eventually(t, func() bool {
 			data, err := os.ReadFile(logPath)
-			return err == nil && strings.Contains(string(data), "watcher error for")
+			return err == nil && strings.Contains(string(data), "reported an error")
 		}, time.Second, 10*time.Millisecond, "expected the watcher error to be logged")
 		require.Eventually(t, func() bool { return s.numRecords() == 1 }, time.Second, 10*time.Millisecond,
 			"an error must also trigger a reload")
@@ -197,8 +197,8 @@ func TestParseArgs(t *testing.T) {
 		wantErr  string
 		wantOpts options
 	}{
-		{name: "no arguments", wantErr: "need a file name"},
-		{name: "empty file name", args: []string{""}, wantErr: "got empty file name"},
+		{name: "no arguments", wantErr: "no lease file given"},
+		{name: "empty file name", args: []string{""}, wantErr: "the lease file name is empty"},
 		{
 			name:     "file name only defaults to mac",
 			args:     []string{"leases.txt"},
@@ -237,8 +237,8 @@ func TestParseArgs(t *testing.T) {
 			args:     []string{"leases.txt", "key:duid", autoRefreshArg},
 			wantOpts: options{filename: "leases.txt", autorefresh: true, mode: keyDUID},
 		},
-		{name: "unknown argument", args: []string{"leases.txt", "bogus"}, wantErr: `unknown argument "bogus"`},
-		{name: "unknown key value", args: []string{"leases.txt", "key:bogus"}, wantErr: `unknown key "bogus"`},
+		{name: "unknown argument", args: []string{"leases.txt", "bogus"}, wantErr: `argument "bogus" is not recognised`},
+		{name: "unknown key value", args: []string{"leases.txt", "key:bogus"}, wantErr: `key "bogus" is not recognised`},
 		{name: "key:duid rejected on server4", args: []string{"leases.txt", "key:duid"}, wantErr: "key:duid"},
 		{
 			name:    "key:client-id rejected on server6",

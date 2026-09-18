@@ -256,9 +256,9 @@ func TestLoadRecordsMalformedRows(t *testing.T) {
 		expiry     any
 		wantErrSub string
 	}{
-		{"malformed MAC", "not-a-mac", "10.0.0.1", 1, "malformed hardware address"},
-		{"malformed IP", "aa:bb:cc:dd:ee:ff", "not-an-ip", 1, "expected an IPv4 address"},
-		{"IPv6 address instead of IPv4", "aa:bb:cc:dd:ee:ff", "2001:db8::1", 1, "expected an IPv4 address"},
+		{"malformed MAC", "not-a-mac", "10.0.0.1", 1, `"not-a-mac" is not a hardware address`},
+		{"malformed IP", "aa:bb:cc:dd:ee:ff", "not-an-ip", 1, `"not-an-ip" is not an IPv4 address`},
+		{"IPv6 address instead of IPv4", "aa:bb:cc:dd:ee:ff", "2001:db8::1", 1, `"2001:db8::1" is not an IPv4 address`},
 		{"non-numeric expiry", "aa:bb:cc:dd:ee:ff", "10.0.0.1", "not-a-number", "failed to scan row"},
 	}
 	for _, tc := range cases {
@@ -357,7 +357,7 @@ func TestRegisterBackingDBDoubleRegistration(t *testing.T) {
 
 	err := pl.registerBackingDB(t.Context(), ":memory:")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cannot swap out a lease database")
+	assert.Contains(t, err.Error(), "this instance already has a lease database open")
 }
 
 func TestValidateDBPath(t *testing.T) {

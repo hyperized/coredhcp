@@ -24,12 +24,12 @@ func TestPluginWiring(t *testing.T) {
 
 func TestSetup4NoArgs(t *testing.T) {
 	_, err := leasetime.Plugin.Setup4()
-	assert.EqualError(t, err, "lease_time failed to initialize")
+	assert.ErrorContains(t, err, "no lease time given")
 }
 
 func TestSetup4InvalidDuration(t *testing.T) {
 	_, err := leasetime.Plugin.Setup4("not-a-duration")
-	assert.EqualError(t, err, "lease_time failed to initialize")
+	assert.ErrorContains(t, err, `lease time "not-a-duration" is not a duration`)
 }
 
 func TestSetup4Valid(t *testing.T) {

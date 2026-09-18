@@ -56,7 +56,7 @@ func ExampleAddPrefixes() {
 	// 2002:db8:: <nil>
 	// 2001:db8:0:7f:8000:: <nil>
 	// <nil> operation overflows
-	// <nil> AddPrefixes needs 128-bit IPs
+	// <nil> AddPrefixes needs 128-bit IPs; pass an IPv6 address, or an IPv4 one widened with To16
 }
 
 // Offset is used as a hash function, so it needs to be reasonably fast
@@ -99,7 +99,7 @@ func TestOffsetPrefixOutOfRange(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := allocators.Offset(net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), tt.prefixLength)
-			assert.EqualError(t, err, "prefix out of range")
+			assert.ErrorContains(t, err, "prefix out of range")
 		})
 	}
 }

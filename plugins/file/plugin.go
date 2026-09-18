@@ -138,11 +138,11 @@ type options struct {
 func parseArgs(v6 bool, args []string) (options, error) {
 	var opts options
 	if len(args) < 1 {
-		return opts, errors.New("need a file name")
+		return opts, errors.New("no lease file given; pass the file name as the first argument, for example file: \"leases4.txt\"")
 	}
 	opts.filename = args[0]
 	if opts.filename == "" {
-		return opts, errors.New("got empty file name")
+		return opts, errors.New("the lease file name is empty; pass a path, for example file: \"leases4.txt\"")
 	}
 	for _, arg := range args[1:] {
 		if err := opts.apply(arg); err != nil {
@@ -160,7 +160,7 @@ func (o *options) apply(arg string) error {
 	}
 	raw, ok := strings.CutPrefix(arg, keyArg)
 	if !ok {
-		return fmt.Errorf("unknown argument %q, want %s or %s<mac|duid|client-id>", arg, autoRefreshArg, keyArg)
+		return fmt.Errorf("argument %q is not recognised; use %s or %s<mac|duid|client-id>", arg, autoRefreshArg, keyArg)
 	}
 	mode, err := parseKeyMode(raw)
 	if err != nil {
@@ -199,7 +199,7 @@ func (s *pluginState) numRecords() int {
 func (s *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	m, err := req.GetInnerMessage()
 	if err != nil {
-		log.Errorf("BUG: could not decapsulate: %v", err)
+		log.Errorf("BUG: cannot read the client message inside the relayed request, dropping it: %v; the client will retry, report this with the server log", err)
 		return nil, true
 	}
 
@@ -336,12 +336,12 @@ func setupFile(v6 bool, args ...string) (handler.Handler6, handler.Handler4, err
 func (s *pluginState) watchFile(v6 bool, filename string) error {
 	watcher, err := fsnotifyNewWatcher()
 	if err != nil {
-		return fmt.Errorf("failed to create watcher: %w", err)
+		return fmt.Errorf("cannot create a file watcher for autorefresh: %w; check the inotify limits, or drop the %s argument", err, autoRefreshArg)
 	}
 
 	dir := filepath.Dir(filename)
 	if err := watcherAdd(watcher, dir); err != nil {
-		return fmt.Errorf("failed to watch %s: %w", dir, err)
+		return fmt.Errorf("cannot watch directory %s for changes: %w; check that it exists and the server's user may read it, or drop the %s argument", dir, err, autoRefreshArg)
 	}
 
 	go s.watchLoop(v6, filename, watcher)
@@ -371,7 +371,7 @@ func (s *pluginState) watchLoop(v6 bool, filename string, watcher *fsnotify.Watc
 			// inotify queue being the usual cause, so the mapping may already
 			// be behind the file. The channel has to be drained either way:
 			// fsnotify blocks on it until someone reads.
-			log.Warningf("watcher error for %s: %s", filename, err)
+			log.Warningf("the watch on %s reported an error: %s; events may have been dropped, the file is being reread now", filename, err)
 			s.refresh(v6, filename)
 		}
 	}
@@ -379,7 +379,7 @@ func (s *pluginState) watchLoop(v6 bool, filename string, watcher *fsnotify.Watc
 
 func (s *pluginState) refresh(v6 bool, filename string) {
 	if err := s.loadFromFile(v6, filename); err != nil {
-		log.Warningf("failed to refresh from %s: %s", filename, err)
+		log.Warningf("cannot reread %s: %s; the leases already loaded stay in force, fix the file and save it again", filename, err)
 		return
 	}
 	log.Infof("updated to %d leases from %s", s.numRecords(), filename)
@@ -388,7 +388,7 @@ func (s *pluginState) refresh(v6 bool, filename string) {
 func (s *pluginState) loadFromFile(v6 bool, filename string) error {
 	records, err := loadRecords(filename, v6, s.mode)
 	if err != nil {
-		return fmt.Errorf("failed to load DHCPv%d records: %w", protoVersion(v6), err)
+		return fmt.Errorf("cannot load the DHCPv%d leases: %w", protoVersion(v6), err)
 	}
 
 	s.mu.Lock()

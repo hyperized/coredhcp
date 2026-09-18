@@ -105,17 +105,17 @@ func TestParseArgsAddress(t *testing.T) {
 		{name: "URL with a database", arg: "redis://10.0.0.9:6379/4", wantAddr: "10.0.0.9:6379", wantDB: 4},
 		{name: "URL with a trailing slash", arg: "redis://10.0.0.9:6379/", wantAddr: "10.0.0.9:6379"},
 		{name: "TLS URL", arg: "rediss://redis.example.com/2", wantAddr: "redis.example.com:6379", wantDB: 2, wantTLS: true},
-		{name: "not an address", arg: "10.0.0.9", wantErr: "want host:port"},
-		{name: "no host", arg: ":6379", wantErr: "it has no host"},
-		{name: "port is not a number", arg: "10.0.0.9:redis", wantErr: "invalid redis port"},
-		{name: "port zero", arg: "10.0.0.9:0", wantErr: "invalid redis port"},
-		{name: "port out of range", arg: "10.0.0.9:70000", wantErr: "invalid redis port"},
-		{name: "URL port out of range", arg: "redis://10.0.0.9:70000", wantErr: "invalid redis port"},
+		{name: "not an address", arg: "10.0.0.9", wantErr: "is not host:port"},
+		{name: "no host", arg: ":6379", wantErr: "has no host"},
+		{name: "port is not a number", arg: "10.0.0.9:redis", wantErr: "is not a number from 1 to 65535"},
+		{name: "port zero", arg: "10.0.0.9:0", wantErr: "is not a number from 1 to 65535"},
+		{name: "port out of range", arg: "10.0.0.9:70000", wantErr: "is not a number from 1 to 65535"},
+		{name: "URL port out of range", arg: "redis://10.0.0.9:70000", wantErr: "is not a number from 1 to 65535"},
 		{name: "unsupported scheme", arg: "http://10.0.0.9:6379", wantErr: "unsupported URL scheme"},
 		{name: "URL without a host", arg: "redis:///4", wantErr: "has no host"},
-		{name: "database is not a number", arg: "redis://10.0.0.9:6379/main", wantErr: "invalid database"},
-		{name: "negative database", arg: "redis://10.0.0.9:6379/-1", wantErr: "invalid database"},
-		{name: "database with extra path", arg: "redis://10.0.0.9:6379/4/5", wantErr: "invalid database"},
+		{name: "database is not a number", arg: "redis://10.0.0.9:6379/main", wantErr: "is not a non-negative number"},
+		{name: "negative database", arg: "redis://10.0.0.9:6379/-1", wantErr: "is not a non-negative number"},
+		{name: "database with extra path", arg: "redis://10.0.0.9:6379/4/5", wantErr: "is not a non-negative number"},
 	}
 
 	for _, tc := range cases {
@@ -149,7 +149,7 @@ func TestParseArgsAddress(t *testing.T) {
 func TestParseArgsURLErrorHidesCredentials(t *testing.T) {
 	_, err := parseArgs(false, []string{"redis://coredhcp:hunter2@ho st:6379"})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid redis URL")
+	assert.Contains(t, err.Error(), "the redis URL does not parse")
 	assert.NotContains(t, err.Error(), "hunter2")
 }
 
@@ -238,11 +238,11 @@ func TestParseArgsOptions(t *testing.T) {
 			name: "empty variable", args: []string{"password:env:REDIS_TEST_PASSWORD"},
 			env: map[string]string{"REDIS_TEST_PASSWORD": ""}, wantErr: "is unset or empty",
 		},
-		{name: "malformed timeout", args: []string{"timeout:soon"}, wantErr: "invalid timeout:soon"},
-		{name: "zero timeout", args: []string{"timeout:0s"}, wantErr: "timeout has to be positive"},
-		{name: "negative timeout", args: []string{"timeout:-1s"}, wantErr: "timeout has to be positive"},
-		{name: "malformed lifetime", args: []string{"lifetime:forever"}, wantErr: "invalid lifetime:forever"},
-		{name: "zero lifetime", args: []string{"lifetime:0"}, wantErr: "lifetime has to be positive"},
+		{name: "malformed timeout", args: []string{"timeout:soon"}, wantErr: `timeout "soon" is not a duration`},
+		{name: "zero timeout", args: []string{"timeout:0s"}, wantErr: `timeout "0s" is not positive`},
+		{name: "negative timeout", args: []string{"timeout:-1s"}, wantErr: `timeout "-1s" is not positive`},
+		{name: "malformed lifetime", args: []string{"lifetime:forever"}, wantErr: `lifetime "forever" is not a duration`},
+		{name: "zero lifetime", args: []string{"lifetime:0"}, wantErr: `lifetime "0" is not positive`},
 	}
 
 	for _, tc := range cases {
@@ -266,7 +266,7 @@ func TestParseArgsOptions(t *testing.T) {
 func TestParseArgsNoAddress(t *testing.T) {
 	s, err := parseArgs(false, nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "need a redis address")
+	assert.Contains(t, err.Error(), "no redis address given")
 	assert.Nil(t, s)
 }
 
@@ -318,7 +318,7 @@ func TestParseArgsKeyMode(t *testing.T) {
 			v6:   true,
 			args: []string{"key:client-id"}, wantErr: "key:client-id works under server4 only",
 		},
-		{name: "key:bogus", args: []string{"key:bogus"}, wantErr: "unknown key:bogus"},
+		{name: "key:bogus", args: []string{"key:bogus"}, wantErr: `"key:bogus" is not a key mode`},
 		{name: "unknown argument still fails by name", args: []string{"nope:1"}, wantErr: `unknown argument "nope:1"`},
 	}
 
@@ -437,9 +437,9 @@ func TestParseIPv4(t *testing.T) {
 		{name: "CIDR", value: "10.0.0.5/24", wantAddr: "10.0.0.5", wantMask: net.CIDRMask(24, 32)},
 		{name: "host route", value: "10.0.0.5/32", wantAddr: "10.0.0.5", wantMask: net.CIDRMask(32, 32)},
 		{name: "IPv4 mapped", value: "::ffff:10.0.0.5", wantAddr: "10.0.0.5"},
-		{name: "empty", value: "", wantErr: "invalid address"},
-		{name: "not an address", value: "printer", wantErr: "invalid address"},
-		{name: "not a CIDR", value: "10.0.0.5/", wantErr: "invalid CIDR"},
+		{name: "empty", value: "", wantErr: "is not an IP address"},
+		{name: "not an address", value: "printer", wantErr: "is not an IP address"},
+		{name: "not a CIDR", value: "10.0.0.5/", wantErr: "is not a CIDR address"},
 		{name: "IPv6 address", value: "2001:db8::1", wantErr: "not an IPv4 address"},
 		{name: "IPv6 CIDR", value: "2001:db8::1/64", wantErr: "not an IPv4 address"},
 	}
@@ -468,7 +468,7 @@ func TestParseIPv6(t *testing.T) {
 	}{
 		{name: "bare address", value: "2001:db8::10:1", wantAddr: "2001:db8::10:1"},
 		{name: "CIDR keeps the address", value: "2001:db8::10:1/64", wantAddr: "2001:db8::10:1"},
-		{name: "not an address", value: "printer", wantErr: "invalid address"},
+		{name: "not an address", value: "printer", wantErr: "is not an IP address"},
 		{name: "IPv4 address", value: "10.0.0.5", wantErr: "not an IPv6 address"},
 		{name: "IPv4 mapped", value: "::ffff:10.0.0.5", wantErr: "not an IPv6 address"},
 		{name: "IPv4 mapped CIDR", value: "::ffff:10.0.0.5/120", wantErr: "not an IPv6 address"},

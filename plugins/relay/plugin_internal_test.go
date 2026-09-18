@@ -150,22 +150,22 @@ func TestSetupState(t *testing.T) {
 		{
 			name:        "invalid release-check value",
 			args:        []string{"allow", "10.0.1.1", "release-check:maybe"},
-			wantErrText: `invalid release-check value "maybe"`,
+			wantErrText: `release-check value "maybe" is neither`,
 		},
 		{
 			name:        "invalid address",
 			args:        []string{"allow", "not-an-address"},
-			wantErrText: `invalid address "not-an-address"`,
+			wantErrText: `allow list entry "not-an-address" does not parse`,
 		},
 		{
 			name:        "invalid prefix",
 			args:        []string{"allow", "10.0.0.0/99"},
-			wantErrText: `invalid prefix "10.0.0.0/99"`,
+			wantErrText: `allow list prefix "10.0.0.0/99" does not parse`,
 		},
 		{
 			name:        "zoned prefix",
 			args:        []string{"allow", "fe80::1%eth0/64"},
-			wantErrText: `invalid prefix "fe80::1%eth0/64"`,
+			wantErrText: `allow list prefix "fe80::1%eth0/64" does not parse`,
 		},
 		{
 			name:        "IPv4-mapped address",

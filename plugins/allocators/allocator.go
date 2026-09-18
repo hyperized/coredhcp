@@ -43,8 +43,9 @@ type ErrDoubleFree struct {
 
 // String returns a human-readable error message for a DoubleFree error
 func (err *ErrDoubleFree) Error() string {
-	return fmt.Sprint("Attempted to free unallocated block at ", err.Loc.String())
+	return fmt.Sprint("attempted to free the unallocated block at ", err.Loc.String(),
+		"; nothing was freed, and the pool is rebuilt from the lease records at the next restart")
 }
 
 // ErrNoAddrAvail is returned when we can't allocate an IP because there's no unallocated space left
-var ErrNoAddrAvail = errors.New("no address available to allocate")
+var ErrNoAddrAvail = errors.New("no address available to allocate, every address in the pool is leased; widen the pool's range, or shorten the lease time so addresses come back sooner")

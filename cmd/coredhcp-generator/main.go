@@ -60,11 +60,11 @@ func main() {
 func run() error {
 	data, err := os.ReadFile(*flagTemplate)
 	if err != nil {
-		return fmt.Errorf("failed to read template file '%s': %w", *flagTemplate, err)
+		return fmt.Errorf("failed to read template file %q: %w; check the path given to -t, or leave it out for %s in the working directory", *flagTemplate, err, defaultTemplateFile)
 	}
 	t, err := template.New("coredhcp").Funcs(funcMap).Parse(string(data))
 	if err != nil {
-		return fmt.Errorf("template parsing failed: %w", err)
+		return fmt.Errorf("template parsing failed for %q: %w; fix the template, or leave -t out to use %s", *flagTemplate, err, defaultTemplateFile)
 	}
 
 	pluginList, err := collectPlugins()
@@ -114,7 +114,7 @@ func collectPlugins() ([]string, error) {
 		}
 	}
 	if len(plugins) == 0 {
-		return nil, errors.New("no plugin specified")
+		return nil, errors.New("no plugin specified; name the plugins as arguments, or point -f at a file holding one plugin import path per line")
 	}
 	pluginList := make([]string, 0, len(plugins))
 	for pl := range plugins {
@@ -129,7 +129,7 @@ func collectPlugins() ([]string, error) {
 func pluginsFromFile(fname string, plugins map[string]bool) error {
 	fd, err := os.Open(fname)
 	if err != nil {
-		return fmt.Errorf("failed to read file '%s': %w", fname, err)
+		return fmt.Errorf("failed to read file %q: %w; check the path given to -f, the file holds one plugin import path per line", fname, err)
 	}
 	defer func() {
 		if err := fd.Close(); err != nil {
@@ -145,7 +145,7 @@ func pluginsFromFile(fname string, plugins map[string]bool) error {
 		plugins[pl] = true
 	}
 	if err := sc.Err(); err != nil {
-		return fmt.Errorf("error reading file '%s': %w", fname, err)
+		return fmt.Errorf("error reading file %q: %w; the plugin list could not be read to the end, check it for a line longer than 64KiB", fname, err)
 	}
 	return nil
 }
@@ -158,7 +158,7 @@ func resolveOutfile() (string, error) {
 	}
 	tmpdir, err := os.MkdirTemp("", "coredhcp")
 	if err != nil {
-		return "", fmt.Errorf("cannot create temporary directory: %w", err)
+		return "", fmt.Errorf("cannot create temporary directory: %w; check TMPDIR, or pass -o to name the output file yourself", err)
 	}
 	return path.Join(tmpdir, "coredhcp.go"), nil
 }
@@ -167,7 +167,7 @@ func resolveOutfile() (string, error) {
 func render(t *template.Template, outfile string, pluginList []string) error {
 	outFD, err := os.OpenFile(outfile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
-		return fmt.Errorf("failed to create output file '%s': %w", outfile, err)
+		return fmt.Errorf("failed to create output file %q: %w; check that the directory given to -o exists and is writable", outfile, err)
 	}
 	defer func() {
 		if err := outFD.Close(); err != nil {
@@ -176,7 +176,7 @@ func render(t *template.Template, outfile string, pluginList []string) error {
 	}()
 	// WARNING: no escaping of the provided strings is done
 	if err := t.Execute(outFD, pluginList); err != nil {
-		return fmt.Errorf("template execution failed: %w", err)
+		return fmt.Errorf("template execution failed for %q: %w; check the template's actions against the plugin list it is given, which is a []string", *flagTemplate, err)
 	}
 	return nil
 }

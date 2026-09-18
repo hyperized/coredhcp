@@ -9,6 +9,7 @@ import (
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSetup4(t *testing.T) {
@@ -16,27 +17,19 @@ func TestSetup4(t *testing.T) {
 
 	// no args
 	_, err = setup4()
-	if assert.Error(t, err) {
-		assert.Equal(t, "need at least one static route", err.Error())
-	}
+	require.ErrorContains(t, err, "no static route given")
 
 	// invalid arg
 	_, err = setup4("foo")
-	if assert.Error(t, err) {
-		assert.Equal(t, "expected a destination/gateway pair, got: foo", err.Error())
-	}
+	require.ErrorContains(t, err, `route "foo" is not a destination and gateway pair`)
 
 	// invalid destination
 	_, err = setup4("foo,")
-	if assert.Error(t, err) {
-		assert.Equal(t, "expected a destination subnet, got: foo", err.Error())
-	}
+	require.ErrorContains(t, err, `destination "foo" is not a CIDR subnet`)
 
 	// invalid gateway
 	_, err = setup4("10.0.0.0/8,foo")
-	if assert.Error(t, err) {
-		assert.Equal(t, "expected a gateway address, got: foo", err.Error())
-	}
+	require.ErrorContains(t, err, `gateway "foo" is not an IP address`)
 
 	// valid route
 	h, err := setup4("10.0.0.0/8,192.168.1.1")

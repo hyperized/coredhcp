@@ -6,6 +6,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -240,7 +241,19 @@ func (u *UI) Run(ctx context.Context) error {
 	<-watcher
 	draws.Wait()
 
-	return err
+	return screenErr(err)
+}
+
+func screenErr(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"cannot open the terminal screen: %w; run coredhcp-tui from a real terminal, "+
+			"or use the plain coredhcp binary when there is none",
+		err,
+	)
 }
 
 // watch runs the shutdown in one place and in one order: wait for the first

@@ -115,12 +115,12 @@ func TestIPv6BoundaryAddresses(t *testing.T) {
 	t.Run("below start", func(t *testing.T) {
 		belowStart := net.IPNet{IP: net.ParseIP("2001:db8::f"), Mask: net.CIDRMask(128, 128)}
 		freeErr := alloc.Free(belowStart)
-		require.EqualError(t, freeErr, "IPv6 address outside of allowed range")
+		require.ErrorContains(t, freeErr, "IPv6 address outside of allowed range")
 	})
 
 	aboveEnd := net.IPNet{IP: net.ParseIP("2001:db8::21"), Mask: net.CIDRMask(128, 128)}
 	err = alloc.Free(aboveEnd)
-	assert.EqualError(t, err, "IPv6 address outside of allowed range")
+	assert.ErrorContains(t, err, "IPv6 address outside of allowed range")
 }
 
 func TestIPv6AllocateAcrossWordBoundary(t *testing.T) {
@@ -157,7 +157,7 @@ func TestIPv6FreeInvalidAddress(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := alloc.Free(net.IPNet{IP: tt.ip, Mask: net.CIDRMask(128, 128)})
-			assert.EqualError(t, err, "invalid IPv6 address passed as input")
+			assert.ErrorContains(t, err, "not an IPv6 address")
 		})
 	}
 }
@@ -201,7 +201,7 @@ func TestNewIPv6AllocatorInvalidAddresses(t *testing.T) {
 
 func TestNewIPv6AllocatorStartAfterEnd(t *testing.T) {
 	_, err := bitmap.NewIPv6Allocator(net.ParseIP("2001:db8::ff"), net.ParseIP("2001:db8::"))
-	assert.EqualError(t, err, "no IPs in the given range to allocate")
+	assert.ErrorContains(t, err, "no IPs in the given range to allocate")
 }
 
 func TestNewIPv6AllocatorRangeTooWide(t *testing.T) {

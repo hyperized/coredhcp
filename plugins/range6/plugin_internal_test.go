@@ -661,7 +661,7 @@ func TestRestoreRefusesToSwapRunningDB(t *testing.T) {
 	err = p.restore(t.Context(), "irrelevant.db")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "could not setup lease storage")
-	assert.Contains(t, err.Error(), "cannot swap out a lease database while running")
+	assert.Contains(t, err.Error(), "this instance already has a lease database open")
 }
 
 // TestNewPluginStateAllocatorCreationError substitutes the newIPv6Allocator
@@ -678,7 +678,7 @@ func TestNewPluginStateAllocatorCreationError(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "leases6.sqlite3")
 	_, err := newPluginState(dbPath, poolFirst, poolLast, "1h")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "could not create an allocator")
+	assert.Contains(t, err.Error(), "could not build the address allocator")
 }
 
 // TestSetup6ReturnsAWorkingHandler is the happy path setup6 itself adds on
@@ -817,7 +817,7 @@ func TestRestoreFailsWhenReallocationExhaustsThePool(t *testing.T) {
 
 	_, err = newPluginState(dbPath, sameIP, sameIP, "1h")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to re-allocate leased ip")
+	assert.Contains(t, err.Error(), "does not fit the configured pool")
 }
 
 func TestSaveIPAddressExecFailure(t *testing.T) {
@@ -849,7 +849,7 @@ func TestRegisterBackingDBDoubleRegistration(t *testing.T) {
 
 	err := p.registerBackingDB(t.Context(), ":memory:")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cannot swap out a lease database")
+	assert.Contains(t, err.Error(), "this instance already has a lease database open")
 }
 
 // TestRecordFromRow covers every one of recordFromRow's rejections, plus the
@@ -869,8 +869,8 @@ func TestRecordFromRow(t *testing.T) {
 		{"DUID over the limit", make([]byte, maxDUIDLen+1), 1, "2001:db8:1::1", "stored client DUID is"},
 		{"negative IAID", validDUID, -1, "2001:db8:1::1", "outside the 32-bit range"},
 		{"IAID past 32 bits", validDUID, int64(math.MaxUint32) + 1, "2001:db8:1::1", "outside the 32-bit range"},
-		{"malformed IP", validDUID, 1, "not-an-ip", "expected an IPv6 address"},
-		{"IPv4 address", validDUID, 1, "10.0.0.1", "expected an IPv6 address"},
+		{"malformed IP", validDUID, 1, "not-an-ip", "is not an IPv6 address"},
+		{"IPv4 address", validDUID, 1, "10.0.0.1", "is not an IPv6 address"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := recordFromRow(tc.duid, tc.iaid, tc.ip, 0, "host")
@@ -1074,17 +1074,17 @@ func TestParseOptions(t *testing.T) {
 		{
 			name:       "a negative max-leases is rejected",
 			extra:      []string{"max-leases:-1"},
-			wantErrSub: "cannot be negative",
+			wantErrSub: "max-leases:-1 is negative",
 		},
 		{
 			name:       "a non-numeric max-leases is rejected",
 			extra:      []string{"max-leases:lots"},
-			wantErrSub: "invalid lease maximum",
+			wantErrSub: "max-leases:lots is not a number",
 		},
 		{
 			name:       "max-leases given twice is rejected",
 			extra:      []string{"max-leases:10", "max-leases:20"},
-			wantErrSub: "max-leases given more than once",
+			wantErrSub: "argument max-leases is given more than once",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

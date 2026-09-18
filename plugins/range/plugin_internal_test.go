@@ -91,7 +91,7 @@ func TestSetupRangeAllocatorCreationError(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "leases.db")
 	_, err := setupRange(dbPath, "10.0.0.1", "10.0.0.5", "1h")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "could not create an allocator")
+	assert.Contains(t, err.Error(), "could not build the address allocator")
 }
 
 func TestHandler4Inform(t *testing.T) {
@@ -849,23 +849,23 @@ func TestParseOptions(t *testing.T) {
 		{name: "all three, in reverse", extra: []string{"decline-max:2", "decline-probation:15m", "sweep:90s"}, wantSweep: 90 * time.Second, wantProbation: 15 * time.Minute, wantMax: 2, wantMaxLeases: defaultMaxLeases},
 		{name: "max-leases override", extra: []string{"max-leases:4096"}, wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation, wantMax: 10, wantMaxLeases: 4096},
 		{name: "max-leases disabled", extra: []string{"max-leases:0"}, wantSweep: 30 * time.Minute, wantProbation: defaultDeclineProbation, wantMax: 10},
-		{name: "bare duration left over from the positional args", extra: []string{"90s"}, wantErrSub: "unexpected argument"},
-		{name: "a key with no value", extra: []string{"sweep"}, wantErrSub: "unexpected argument"},
-		{name: "unknown key", extra: []string{"reap:90s"}, wantErrSub: "unexpected argument"},
-		{name: "sweep given twice", extra: []string{"sweep:90s", "sweep:2m"}, wantErrSub: "sweep given more than once"},
-		{name: "probation given twice", extra: []string{"decline-probation:1h", "decline-probation:2h"}, wantErrSub: "decline-probation given more than once"},
-		{name: "quarantine given twice", extra: []string{"decline-max:2", "decline-max:3"}, wantErrSub: "decline-max given more than once"},
-		{name: "max-leases given twice", extra: []string{"max-leases:100", "max-leases:200"}, wantErrSub: "max-leases given more than once"},
-		{name: "malformed sweep duration", extra: []string{"sweep:soon"}, wantErrSub: "invalid sweep interval"},
-		{name: "zero sweep", extra: []string{"sweep:0s"}, wantErrSub: "has to be positive"},
-		{name: "negative sweep", extra: []string{"sweep:-1m"}, wantErrSub: "has to be positive"},
-		{name: "malformed probation duration", extra: []string{"decline-probation:never"}, wantErrSub: "invalid decline probation"},
-		{name: "negative probation", extra: []string{"decline-probation:-1h"}, wantErrSub: "cannot be negative"},
-		{name: "malformed quarantine size", extra: []string{"decline-max:lots"}, wantErrSub: "invalid decline maximum"},
-		{name: "fractional quarantine size", extra: []string{"decline-max:1.5"}, wantErrSub: "invalid decline maximum"},
-		{name: "negative quarantine size", extra: []string{"decline-max:-1"}, wantErrSub: "cannot be negative"},
-		{name: "malformed lease maximum", extra: []string{"max-leases:many"}, wantErrSub: "invalid lease maximum"},
-		{name: "negative lease maximum", extra: []string{"max-leases:-1"}, wantErrSub: "cannot be negative"},
+		{name: "bare duration left over from the positional args", extra: []string{"90s"}, wantErrSub: `argument "90s" is not one this plugin takes`},
+		{name: "a key with no value", extra: []string{"sweep"}, wantErrSub: `argument "sweep" is not one this plugin takes`},
+		{name: "unknown key", extra: []string{"reap:90s"}, wantErrSub: `argument "reap:90s" is not one this plugin takes`},
+		{name: "sweep given twice", extra: []string{"sweep:90s", "sweep:2m"}, wantErrSub: "argument sweep is given more than once"},
+		{name: "probation given twice", extra: []string{"decline-probation:1h", "decline-probation:2h"}, wantErrSub: "argument decline-probation is given more than once"},
+		{name: "quarantine given twice", extra: []string{"decline-max:2", "decline-max:3"}, wantErrSub: "argument decline-max is given more than once"},
+		{name: "max-leases given twice", extra: []string{"max-leases:100", "max-leases:200"}, wantErrSub: "argument max-leases is given more than once"},
+		{name: "malformed sweep duration", extra: []string{"sweep:soon"}, wantErrSub: "sweep:soon is not a duration"},
+		{name: "zero sweep", extra: []string{"sweep:0s"}, wantErrSub: "sweep:0s is not above zero"},
+		{name: "negative sweep", extra: []string{"sweep:-1m"}, wantErrSub: "sweep:-1m is not above zero"},
+		{name: "malformed probation duration", extra: []string{"decline-probation:never"}, wantErrSub: "decline-probation:never is not a duration"},
+		{name: "negative probation", extra: []string{"decline-probation:-1h"}, wantErrSub: "decline-probation:-1h is negative"},
+		{name: "malformed quarantine size", extra: []string{"decline-max:lots"}, wantErrSub: "decline-max:lots is not a number"},
+		{name: "fractional quarantine size", extra: []string{"decline-max:1.5"}, wantErrSub: "decline-max:1.5 is not a number"},
+		{name: "negative quarantine size", extra: []string{"decline-max:-1"}, wantErrSub: "decline-max:-1 is negative"},
+		{name: "malformed lease maximum", extra: []string{"max-leases:many"}, wantErrSub: "max-leases:many is not a number"},
+		{name: "negative lease maximum", extra: []string{"max-leases:-1"}, wantErrSub: "max-leases:-1 is negative"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			size := tc.poolSize

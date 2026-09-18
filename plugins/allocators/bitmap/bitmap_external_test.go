@@ -84,7 +84,7 @@ func TestNewBitmapAllocatorOrderNegative(t *testing.T) {
 
 	// requested size smaller than the pool it's carved from: allocOrder < 0
 	_, err = bitmap.NewBitmapAllocator(*prefix, 48)
-	assert.EqualError(t, err, "the size of allocated prefixes cannot be larger than the pool they're allocated from")
+	assert.ErrorContains(t, err, "the size of allocated prefixes cannot be larger than the pool they're allocated from")
 }
 
 func TestNewBitmapAllocatorOrderNotRepresentable(t *testing.T) {

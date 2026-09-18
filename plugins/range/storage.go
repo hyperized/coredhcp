@@ -102,7 +102,7 @@ func validateDBPath(path string) error {
 	if i < 0 {
 		return nil
 	}
-	return fmt.Errorf("lease database path %q may not contain %q", path, path[i:i+1])
+	return fmt.Errorf("lease database path %q may not contain %q; sqlite reads the name as a URI, so move the file to a path without it", path, path[i:i+1])
 }
 
 // isBusy reports whether err is sqlite saying the database is locked. The
@@ -167,11 +167,11 @@ func loadRecords(ctx context.Context, db *sql.DB) (map[string]*Record, error) {
 		}
 		hwaddr, err := net.ParseMAC(mac)
 		if err != nil {
-			return nil, fmt.Errorf("%w: malformed hardware address: %s", ErrCorruptRecord, mac)
+			return nil, fmt.Errorf("%w: %q is not a hardware address; fix or delete that row in the lease database", ErrCorruptRecord, mac)
 		}
 		ipaddr := net.ParseIP(ip)
 		if ipaddr.To4() == nil {
-			return nil, fmt.Errorf("%w: expected an IPv4 address, got: %v", ErrCorruptRecord, ipaddr)
+			return nil, fmt.Errorf("%w: %q is not an IPv4 address; fix or delete that row in the lease database", ErrCorruptRecord, ip)
 		}
 		records[hwaddr.String()] = &Record{IP: ipaddr, expires: expiry, hostname: hostname}
 	}
@@ -273,7 +273,7 @@ func (p *pluginState) enqueue(w leaseWrite, undo func()) error {
 		return nil
 	default:
 		w.cancel()
-		return fmt.Errorf("could not %s: %w", w.describe(), ErrWriteQueueFull)
+		return fmt.Errorf("could not %s: %w; the database is not keeping up with the clients, check the disk it is on", w.describe(), ErrWriteQueueFull)
 	}
 }
 
@@ -461,12 +461,12 @@ func (p *pluginState) stopWriter() {
 // registerBackingDB installs a database connection string as the backing store for leases
 func (p *pluginState) registerBackingDB(ctx context.Context, filename string) error {
 	if p.leasedb != nil {
-		return errors.New("cannot swap out a lease database while running")
+		return errors.New("this instance already has a lease database open; list the range plugin once per lease file")
 	}
 	// We never close this, but that's ok because plugins are never stopped/unregistered
 	newLeaseDB, err := loadDB(ctx, filename)
 	if err != nil {
-		return fmt.Errorf("failed to open lease database %s: %w", filename, err)
+		return fmt.Errorf("could not open lease database %s: %w; check that the directory exists, that the server's user may write to it, and that no other process holds the file", filename, err)
 	}
 	p.leasedb = newLeaseDB
 	return nil

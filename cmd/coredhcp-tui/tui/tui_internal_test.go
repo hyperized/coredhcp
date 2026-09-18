@@ -6,6 +6,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"strings"
@@ -2901,6 +2902,32 @@ func TestNewFallsBackOnBadOptions(t *testing.T) {
 	assert.Equal(t, defaultHistory, u.history)
 	assert.Equal(t, defaultMaxLeases, u.maxLeases)
 	assert.Equal(t, defaultLogLines, u.logLines)
+}
+
+// TestScreenErr pins that a run which could not open the screen keeps tcell's
+// cause and gains the two things the operator can act on, and that a clean run
+// still returns nil.
+func TestScreenErr(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a clean run returns nil", func(t *testing.T) {
+		t.Parallel()
+
+		require.NoError(t, screenErr(nil))
+	})
+
+	t.Run("a failed run keeps the cause and says where to go", func(t *testing.T) {
+		t.Parallel()
+
+		cause := errors.New("terminfo entry not found")
+
+		err := screenErr(cause)
+
+		require.ErrorIs(t, err, cause)
+		require.ErrorContains(t, err, "cannot open the terminal screen")
+		require.ErrorContains(t, err, "run coredhcp-tui from a real terminal")
+		require.ErrorContains(t, err, "use the plain coredhcp binary when there is none")
+	})
 }
 
 // watchTimeout bounds how long the watch tests wait for the watcher goroutine
