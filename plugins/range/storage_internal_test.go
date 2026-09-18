@@ -401,11 +401,9 @@ func TestLoadDBRejectsURIPathBeforeOpen(t *testing.T) {
 	assert.Contains(t, err.Error(), "may not contain")
 }
 
-// holdWriteLock opens its own connection to the database at path, starts a
-// write transaction and leaves it open, so any other connection's write
-// against the same file fails with SQLITE_BUSY for as long as the calling
-// test runs. The transaction is rolled back and the connection closed in
-// t.Cleanup.
+// holdWriteLock leaves a write transaction open on path so any other
+// connection's write against the same file fails with SQLITE_BUSY for the
+// life of the calling test.
 func holdWriteLock(t *testing.T, path string) {
 	t.Helper()
 	db, err := loadDB(t.Context(), path)
@@ -422,9 +420,6 @@ func holdWriteLock(t *testing.T, path string) {
 	})
 }
 
-// TestIsBusy pins telling a locked database apart from every other kind of
-// failure: a plain error and a non-busy sqlite error both read as not busy,
-// only SQLITE_BUSY or SQLITE_LOCKED does.
 func TestIsBusy(t *testing.T) {
 	t.Run("a plain error is never busy", func(t *testing.T) {
 		assert.False(t, isBusy(errors.New("boom")))
@@ -473,8 +468,6 @@ func TestIsBusy(t *testing.T) {
 	})
 }
 
-// TestStoreErrorBusy pins that storeError wraps a locked-database failure in
-// ErrBusy, which is what lets a caller retry that and only that.
 func TestStoreErrorBusy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "leases.db")
 	holdWriteLock(t, path)
@@ -490,9 +483,8 @@ func TestStoreErrorBusy(t *testing.T) {
 	assert.ErrorIs(t, storeError("op", err), ErrBusy)
 }
 
-// TestEnqueueQueueFull pins that a lease change is refused rather than
-// waited on when the writer is too far behind to keep up: the caller has the
-// plugin lock in hand, so blocking on the channel is not an option.
+// The caller holds the plugin lock here, so blocking on the channel is not
+// an option.
 func TestEnqueueQueueFull(t *testing.T) {
 	pl := &pluginState{writes: make(chan leaseWrite, 1)}
 	// Nothing ever drains this, so one write is enough to fill it; its
@@ -505,9 +497,8 @@ func TestEnqueueQueueFull(t *testing.T) {
 	assert.ErrorIs(t, err, ErrWriteQueueFull)
 }
 
-// TestApplyWriteNotFound pins the ErrNotFound sentinel applyWrite returns for
-// a delete that matched no row. enqueue's inline path treats this as
-// success, so this calls applyWrite directly to reach the sentinel itself.
+// enqueue's inline path treats a not-found delete as success, so this calls
+// applyWrite directly to reach the ErrNotFound sentinel.
 func TestApplyWriteNotFound(t *testing.T) {
 	pl := &pluginState{}
 	require.NoError(t, pl.registerBackingDB(t.Context(), ":memory:"))
@@ -524,11 +515,9 @@ func TestApplyWriteNotFound(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNotFound)
 }
 
-// TestWriterAppliesQueuedWritesInOrder pins the invariant startWriter exists
-// for: queued changes are applied in the order they were made. Queuing the
-// delete after the insert and finding the row gone once the writer has
-// drained is what proves the order held; applied the other way around, the
-// row would still be there.
+// Queuing the delete after the insert and finding the row gone once the
+// writer has drained is what proves the order held; the other way around,
+// the row would still be there.
 func TestWriterAppliesQueuedWritesInOrder(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "leases.db")
 	pl := &pluginState{}
@@ -546,11 +535,8 @@ func TestWriterAppliesQueuedWritesInOrder(t *testing.T) {
 	assert.Empty(t, recs, "the delete queued after the insert must win")
 }
 
-// TestDrainWritesAppliesEverythingQueued pins that shutting the writer down
-// does not throw away whatever is still queued: every row handed to it must
-// be on disk once it returns. Calling drainWrites directly, rather than
-// racing it against the writer goroutine, is what makes the queued items
-// still be there deterministically.
+// Calling drainWrites directly, rather than racing it against the writer
+// goroutine, keeps the queued items deterministic.
 func TestDrainWritesAppliesEverythingQueued(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "leases.db")
 	pl := &pluginState{}
@@ -573,9 +559,6 @@ func TestDrainWritesAppliesEverythingQueued(t *testing.T) {
 	}
 }
 
-// TestWriteSwallowsNotFound pins that a queued delete for a row that is
-// already gone does not upset the writer: it is logged at debug level and
-// the writer shuts down cleanly, same as for any other change.
 func TestWriteSwallowsNotFound(t *testing.T) {
 	pl := &pluginState{}
 	require.NoError(t, pl.registerBackingDB(t.Context(), ":memory:"))
@@ -589,9 +572,6 @@ func TestWriteSwallowsNotFound(t *testing.T) {
 	assert.Empty(t, recs, "nothing was there to begin with, and nothing must appear")
 }
 
-// TestWriteFailureIsLoggedNotFatal pins that a write the database itself
-// cannot take is logged rather than treated as fatal: nothing is waiting on
-// the result, so the writer's only job is to say so and move on.
 func TestWriteFailureIsLoggedNotFatal(t *testing.T) {
 	pl := &pluginState{}
 	require.NoError(t, pl.registerBackingDB(t.Context(), ":memory:"))
@@ -606,11 +586,8 @@ func TestWriteFailureIsLoggedNotFatal(t *testing.T) {
 	pl.stopWriter()
 }
 
-// TestWriteBusyRetry pins that write's busy-retry loop gives up after
-// busyRetries attempts instead of blocking the writer forever: with the
-// write lock held by another transaction for the whole test, the queued
-// write exhausts its retries and stopWriter still returns quickly.
-// busyRetries is 3 and busyBackoff 20ms, so this comfortably finishes well
+// The write lock is held for the whole test, so the queued write exhausts
+// its retries; busyRetries is 3 and busyBackoff 20ms, so this finishes well
 // under a second.
 func TestWriteBusyRetry(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "leases.db")
@@ -627,10 +604,8 @@ func TestWriteBusyRetry(t *testing.T) {
 	assert.Less(t, time.Since(start), 500*time.Millisecond, "the retries must not hang past their backoff budget")
 }
 
-// TestSaveIPAddressSurvives2038 is the regression test for a 32-bit build
-// storing the lease expiry as a 32-bit value: a lease expiring after the
-// 2038 Unix-time rollover must round-trip through storage exactly and must
-// not read as already expired.
+// Regression test for the 2038 Unix-time rollover: expiry must round-trip
+// through storage exactly and must not read as already expired.
 func TestSaveIPAddressSurvives2038(t *testing.T) {
 	pl := &pluginState{}
 	require.NoError(t, pl.registerBackingDB(t.Context(), ":memory:"))
@@ -649,10 +624,8 @@ func TestSaveIPAddressSurvives2038(t *testing.T) {
 	assert.False(t, got.expired(at2099), "a lease this far out must not read as already expired")
 }
 
-// blockInserts stops the lease table taking new rows, which is how a test
-// makes a queued write fail while the plugin carries on running. The trigger
-// is dropped again by dropBlock, for a test that wants to see the pool work
-// afterwards.
+// blockInserts fails inserts via a trigger, rather than closing the
+// database, so the rest of the plugin keeps running.
 func blockInserts(t *testing.T, db *sql.DB) {
 	t.Helper()
 	_, err := db.Exec(`CREATE TRIGGER block_insert BEFORE INSERT ON leases4
@@ -660,18 +633,15 @@ func blockInserts(t *testing.T, db *sql.DB) {
 	require.NoError(t, err)
 }
 
-// dropBlock takes the trigger back off.
 func dropBlock(t *testing.T, db *sql.DB) {
 	t.Helper()
 	_, err := db.Exec(`DROP TRIGGER block_insert`)
 	require.NoError(t, err)
 }
 
-// TestQueuedWriteFailureTakesTheLeaseBack pins the rule the waiting exists
-// for: a client is not told it holds an address until the row is on disk, so
-// a write that fails after it was queued costs the lease rather than leaving
-// one only this process knows about. The address has to come back with it,
-// or the pool leaks one per failure.
+// A write that fails after being queued must not leave a lease only this
+// process knows about, and the address must go back to the pool or it
+// leaks one per failure.
 func TestQueuedWriteFailureTakesTheLeaseBack(t *testing.T) {
 	pl, _ := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2))
 	blockInserts(t, pl.leasedb)
@@ -691,9 +661,6 @@ func TestQueuedWriteFailureTakesTheLeaseBack(t *testing.T) {
 		"the address the failed lease held is back in the pool")
 }
 
-// TestQueuedRenewalFailureKeepsTheOldExpiry is the same rule for an
-// extension: the client is answered with nothing and the record keeps the
-// expiry the lease file still has.
 func TestQueuedRenewalFailureKeepsTheOldExpiry(t *testing.T) {
 	pl, clock := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2))
 
@@ -712,9 +679,6 @@ func TestQueuedRenewalFailureKeepsTheOldExpiry(t *testing.T) {
 	assert.Same(t, rec, pl.Recordsv4[mac], "and the client keeps its record")
 }
 
-// TestSettleTakesTheResultThatIsAlreadyThere covers the fast path in the
-// wait: by the time a stopped writer has drained, every result is sitting in
-// its channel and nothing has to block.
 func TestSettleTakesTheResultThatIsAlreadyThere(t *testing.T) {
 	pl, _ := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2))
 	pl.startWriter()
@@ -729,10 +693,8 @@ func TestSettleTakesTheResultThatIsAlreadyThere(t *testing.T) {
 	assert.NoError(t, pl.settle(pending))
 }
 
-// TestSettleWaitsForAWriteInFlight covers the other half: the writer is
-// still busy with the change when the handler gets here, so the wait blocks
-// until it has an answer. Another connection holds the write lock, which
-// makes the writer retry and lose, deterministically.
+// Another connection holds the write lock, so the writer retries and loses
+// deterministically.
 func TestSettleWaitsForAWriteInFlight(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "leases.db")
 	pl := &pluginState{}
@@ -751,9 +713,6 @@ func TestSettleWaitsForAWriteInFlight(t *testing.T) {
 	assert.ErrorIs(t, pl.settle(pending), ErrBusy)
 }
 
-// TestSettleReportsAStoppedWriter pins that a change queued after the writer
-// has gone comes back as a failure rather than as a handler that never
-// answers. Only a stopped plugin can do this, which is to say only a test.
 func TestSettleReportsAStoppedWriter(t *testing.T) {
 	pl, _ := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2))
 	pl.startWriter()
@@ -768,8 +727,7 @@ func TestSettleReportsAStoppedWriter(t *testing.T) {
 	assert.ErrorIs(t, pl.settle(pending), ErrWriterStopped)
 }
 
-// TestDropUnwrittenLeavesALaterLeaseAlone covers the guard on the undo: by
-// the time a failed write is put back, the client may hold a different
+// By the time a failed write is put back, the client may hold a different
 // lease, and taking that one apart would free an address somebody else has.
 func TestDropUnwrittenLeavesALaterLeaseAlone(t *testing.T) {
 	pl, _ := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2))
@@ -791,15 +749,10 @@ func blockDeletes(t *testing.T, db *sql.DB) {
 	require.NoError(t, err)
 }
 
-// TestExpiredLeaseIsRenewedWhenItsRowWillNotGo covers the fallback in
-// reallocateExpired with only the delete failing: the address cannot be
-// reclaimed, so the client is left where it is and its lease extended in
-// place, which is a lease the disk does agree with.
-//
-// No writer runs here on purpose. The delete has to fail before the code
-// decides what to do next, which is what the inline path does; with the
-// writer in between, the failure arrives after the answer is built and the
-// whole exchange is refused instead.
+// No writer runs here on purpose: the delete must fail before the code
+// decides what to do next, which is what the inline path does. With a
+// writer in between, the failure would arrive after the answer is built and
+// the whole exchange would be refused instead.
 func TestExpiredLeaseIsRenewedWhenItsRowWillNotGo(t *testing.T) {
 	pl, clock := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2))
 
@@ -814,10 +767,8 @@ func TestExpiredLeaseIsRenewedWhenItsRowWillNotGo(t *testing.T) {
 	assert.Equal(t, clock.Now().Add(testLeaseTime).Unix(), pl.Recordsv4[mac].expires)
 }
 
-// TestReleaseWriteFailureIsLogged pins what a release does when the row will
-// not go: the client is sent nothing either way, so the failure is logged
-// and the record stays gone from memory. The row it leaves behind reads as a
-// lease for the same client at the next start, which is the safe way round.
+// The row left behind reads as a lease for the same client at the next
+// start, which is the safe way round.
 func TestReleaseWriteFailureIsLogged(t *testing.T) {
 	pl, _ := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2))
 
@@ -836,8 +787,6 @@ func TestReleaseWriteFailureIsLogged(t *testing.T) {
 	assert.Equal(t, 1, leaseRowCount(pl.leasedb, mac), "the row nobody could delete is still there")
 }
 
-// TestDeclineWriteFailureIsLogged is the same for a decline, which also
-// answers nothing and also has no way back once the address is quarantined.
 func TestDeclineWriteFailureIsLogged(t *testing.T) {
 	pl, _ := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2))
 
@@ -853,9 +802,8 @@ func TestDeclineWriteFailureIsLogged(t *testing.T) {
 	assert.Equal(t, 1, leaseRowCount(pl.leasedb, mac))
 }
 
-// TestSweepWriteFailureIsLogged covers the sweeper waiting for its own
-// deletes: one that fails is logged rather than carried silently, because
-// nothing else is watching the sweeper.
+// Nothing else is watching the sweeper, so a failed delete here is logged
+// rather than carried anywhere.
 func TestSweepWriteFailureIsLogged(t *testing.T) {
 	pl, clock := newTestPlugin(t, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2))
 

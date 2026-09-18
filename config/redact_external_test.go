@@ -39,9 +39,6 @@ func TestRedactArgs(t *testing.T) {
 			[]string{"key:ddns-key:***"},
 		},
 		{"key env marker left alone", []string{"key:ddns-key:env:TSIG_KEY"}, []string{"key:ddns-key:env:TSIG_KEY"}},
-		// Same case-sensitivity rule as password:ENV:FOO: applyKey in the
-		// ddns plugin cuts "env:" case-sensitively, so "ENV:FOO" here is a
-		// literal secret rather than an environment variable reference.
 		{"key env marker in the wrong case is a literal", []string{"key:ddns-key:ENV:FOO"}, []string{"key:ddns-key:***"}},
 		{"key with empty secret redacted to the marker", []string{"key:ddns-key:"}, []string{"key:ddns-key:***"}},
 		{"mixed case key prefix redacted, name and casing kept", []string{"Key:ddns-key:secretvalue"}, []string{"Key:ddns-key:***"}},

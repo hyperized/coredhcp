@@ -330,12 +330,9 @@ func setupFile(v6 bool, args ...string) (handler.Handler6, handler.Handler4, err
 // leases that were already loaded: a lease file caught half written is a poor
 // reason to stop answering the clients that are already in it.
 //
-// The directory holding the file is watched rather than the file itself, so
-// that a config management tool or an editor replacing the file with a
-// rename (write a new inode, then rename it over the old name) is still
-// caught. Watching the file directly would leave the watch on the old,
-// now-unlinked inode after such a rename, and every later update would go
-// unnoticed.
+// The directory is watched rather than the file, since a watch on the file
+// follows the inode a rename unlinked and would miss every update after the
+// first.
 func (s *pluginState) watchFile(v6 bool, filename string) error {
 	watcher, err := fsnotifyNewWatcher()
 	if err != nil {
@@ -351,10 +348,8 @@ func (s *pluginState) watchFile(v6 bool, filename string) error {
 	return nil
 }
 
-// watchLoop is watchFile's event loop, split out so a test can drive it with
-// a watcher it controls instead of real filesystem events. It reads both of
-// the watcher's channels until either is closed by fsnotify shutting the
-// watcher down.
+// watchLoop is split out of watchFile so a test can drive it with a watcher
+// it controls instead of real filesystem events.
 func (s *pluginState) watchLoop(v6 bool, filename string, watcher *fsnotify.Watcher) {
 	base := filepath.Base(filename)
 	for {
@@ -372,21 +367,16 @@ func (s *pluginState) watchLoop(v6 bool, filename string, watcher *fsnotify.Watc
 			if !ok {
 				return
 			}
-			// The only errors fsnotify raises on a live watch mean events
-			// were dropped, not that nothing happened: a full inotify queue
-			// is what produces one. The in-memory mapping may already be
-			// behind what's on disk, and a reload is the cheap way back to
-			// being in sync. The channel has to be drained regardless of
-			// what we do with the value, since fsnotify blocks on it until
-			// someone reads.
+			// An error on a live watch means events were dropped, a full
+			// inotify queue being the usual cause, so the mapping may already
+			// be behind the file. The channel has to be drained either way:
+			// fsnotify blocks on it until someone reads.
 			log.Warningf("watcher error for %s: %s", filename, err)
 			s.refresh(v6, filename)
 		}
 	}
 }
 
-// refresh rereads the lease mapping from filename, logging the outcome
-// either way. A failed reload keeps the leases already in memory.
 func (s *pluginState) refresh(v6 bool, filename string) {
 	if err := s.loadFromFile(v6, filename); err != nil {
 		log.Warningf("failed to refresh from %s: %s", filename, err)

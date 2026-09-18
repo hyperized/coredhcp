@@ -451,12 +451,9 @@ func TestAutorefresh(t *testing.T) {
 		"autorefresh did not recover after a bad reload")
 }
 
-// TestAutorefreshAcrossRename is the regression test for defect (b): a
-// config management tool or an editor commonly replaces a file by writing
-// the new content to a sibling file and renaming it over the original, which
-// leaves the original name attached to a new inode. Watching the file
-// itself would stay on the old, now-unlinked inode and never see this
-// update; watching its directory does not.
+// TestAutorefreshAcrossRename pins the directory watch: a tool that replaces
+// the file by renaming a sibling over it leaves the name on a new inode, and
+// a watch on the file itself would stay on the old one.
 func TestAutorefreshAcrossRename(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "leases.txt")

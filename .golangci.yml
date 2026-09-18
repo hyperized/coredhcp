@@ -51,16 +51,10 @@ linters:
   settings:
     exhaustive:
       # A switch that handles the constants it cares about and sends the rest
-      # to a default is complete as written. The key: and per: modes fall back
-      # to their zero value that way on purpose, and tcell.Key runs to a couple
-      # of hundred constants that the terminal UI's key handlers have no reason
-      # to name one by one.
+      # to a default is complete as written.
       default-signifies-exhaustive: true
       # DHCP message types are an open IANA registry, not a closed enum: the
       # dhcp library gains a constant whenever a new message type is assigned.
-      # A handler names the few types it acts on and lets the rest fall
-      # through to the code after the switch, which is the point of dispatching
-      # on the type at all.
       ignore-enum-types: '^github\.com/insomniacslk/dhcp/dhcpv[46]\.MessageType$'
     govet:
       enable:
@@ -74,22 +68,20 @@ linters:
       - path: _test\.go$
         linters:
           - gosec
-      # A table case holding the context under test, and a stub recording the
-      # context it was called with, are fixtures rather than a request-scoped
-      # context smuggled into a long-lived struct.
+      # A context held by a table case or recorded by a stub is a fixture, not
+      # a request-scoped context smuggled into a long-lived struct.
       - path: _test\.go$
         linters:
           - containedctx
       # A stub that exists only to be compared by func identity returns
-      # nil, nil because nothing ever calls it.
+      # nil, nil because nothing calls it.
       - path: _test\.go$
         linters:
           - nilnil
 
 issues:
-  # Report everything. The defaults stop at 50 per linter and 3 per distinct
-  # message, which turns one lint run into several and hides how much of a
-  # finding there really is.
+  # The defaults stop at 50 per linter and 3 per distinct message, which
+  # turns one lint run into several and hides the size of a finding.
   max-issues-per-linter: 0
   max-same-issues: 0
 

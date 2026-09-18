@@ -96,9 +96,8 @@ func TestHandler6ParamsRequestedAndConfigured(t *testing.T) {
 }
 
 // TestHandler6RepeatedORODoesNotDuplicateOptions pins a regression: the ORO
-// is written by the client, and a Solicit that repeated a requested code
-// thousands of times used to add that many copies of the option to the
-// response, turning a small request into a multi-megabyte reply.
+// is client-written, and a Solicit repeating a code thousands of times used
+// to add that many copies of the option to the response.
 func TestHandler6RepeatedORODoesNotDuplicateOptions(t *testing.T) {
 	handler, err := nbp.Plugin.Setup6("http://[2001:db8::1]/nbp?params=console=ttyS0")
 	require.NoError(t, err)

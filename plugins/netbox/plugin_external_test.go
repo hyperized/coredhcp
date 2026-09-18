@@ -25,11 +25,9 @@ func TestPluginIsRegisteredForBothFamilies(t *testing.T) {
 	assert.Equal(t, "netbox", netbox.Plugin.Name)
 	assert.NotNil(t, netbox.Plugin.Setup4Ctx)
 	assert.NotNil(t, netbox.Plugin.Setup6Ctx)
-	// Unlike a plugin that only reads the packets, this one makes an HTTP
-	// call on the request path, and that call needs the caller's deadline
-	// and its ability to be cancelled at shutdown. Both come from the
-	// context, so the plain setup functions stay nil and the server always
-	// builds one for a chain holding this plugin.
+	// This plugin makes an HTTP call per request, which needs the caller's
+	// deadline and cancellation from the context, so only the Ctx setup
+	// functions are wired.
 	assert.Nil(t, netbox.Plugin.Setup4)
 	assert.Nil(t, netbox.Plugin.Setup6)
 }

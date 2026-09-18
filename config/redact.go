@@ -27,9 +27,7 @@ import (
 var secretPrefixes = []string{"password:", "token:", "secret:"}
 
 // keyPrefix marks the ddns plugin's TSIG argument, key:<name>:<secret>. See
-// applyKey in plugins/ddns/plugin.go: it reads the name up to the first colon
-// and treats everything after that as the secret, so "key:something" with no
-// second colon is just a key name and not a secret at all.
+// applyKey in plugins/ddns/plugin.go for the parse this has to mirror.
 const keyPrefix = "key:"
 
 // redacted is what replaces a secret. Short enough not to disturb a log line,
@@ -61,10 +59,9 @@ func RedactArgs(args []string) []string {
 	return out
 }
 
-// redactArg applies the prefix rule first because it matches on the
-// argument's own syntax, then the "key:" rule, then the NetBox token shapes,
-// and only then tries reading the argument as a URL with a password in its
-// userinfo.
+// redactArg applies the prefix rules first because they match on the
+// argument's own syntax, and falls back to reading the argument as a URL
+// only when none of them matched.
 func redactArg(arg string) string {
 	if r, ok := redactPrefixed(arg); ok {
 		return r
@@ -113,14 +110,10 @@ func redactPrefixed(arg string) (string, bool) {
 	return "", false
 }
 
-// redactKey handles the "key:" prefix used by the ddns plugin's TSIG
-// argument, key:<name>:<secret>. Only the part after the key name is a
-// secret, so unlike redactPrefixed this has to find the second colon rather
-// than blanking everything after the prefix. A name with no secret after it
-// ("key:something", or "key:" on its own) is left alone, and so is
-// "key:<name>:env:SOME_VAR": that names an environment variable rather than
-// carrying the secret, matched case-sensitively because applyKey parses it
-// the same way.
+// redactKey handles the ddns plugin's TSIG argument, key:<name>:<secret>.
+// Only what follows the key name is secret, and "key:<name>:env:VAR" names an
+// environment variable rather than carrying one, matched case-sensitively
+// because applyKey reads it that way.
 func redactKey(arg string) (string, bool) {
 	lower := strings.ToLower(arg)
 	if !strings.HasPrefix(lower, keyPrefix) {

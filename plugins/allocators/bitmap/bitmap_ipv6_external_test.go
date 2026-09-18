@@ -112,8 +112,6 @@ func TestIPv6BoundaryAddresses(t *testing.T) {
 	assert.True(t, end.Equal(res.IP))
 	require.NoError(t, alloc.Free(lastNet))
 
-	// Below-start and above-end are independent boundary cases, so each runs
-	// as its own subtest: a require inside one must not skip the other.
 	t.Run("below start", func(t *testing.T) {
 		belowStart := net.IPNet{IP: net.ParseIP("2001:db8::f"), Mask: net.CIDRMask(128, 128)}
 		freeErr := alloc.Free(belowStart)

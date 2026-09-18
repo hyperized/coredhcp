@@ -1138,8 +1138,6 @@ func TestParseArgsEverything(t *testing.T) {
 	require.Len(t, s.reverse, 2)
 	assert.Equal(t, "8.b.d.0.1.0.0.2.ip6.arpa.", s.reverse[0].zone)
 	assert.Equal(t, "0.0.10.in-addr.arpa.", s.reverse[1].zone)
-	// protect: takes labels and fully qualified names, in any case and with
-	// whitespace around the commas, and lands as names under the zone.
 	assert.Equal(t, map[string]bool{
 		"gateway.home.lan.": true,
 		"vpn.home.lan.":     true,
@@ -1342,8 +1340,8 @@ func TestHandler4Skips(t *testing.T) {
 	})
 }
 
-// lease4 walks one client through a lease so the register knows the name,
-// which is what a release is later weighed against.
+// lease4 puts a name in the register so a later release has something to be
+// weighed against.
 func lease4(t *testing.T, p *pluginState, host string, addr net.IP, mods ...dhcpv4.Modifier) {
 	t.Helper()
 	req, resp := v4(t, dhcpv4.MessageTypeRequest,
@@ -1607,8 +1605,8 @@ func TestHandler6Skips(t *testing.T) {
 	})
 }
 
-// lease6 walks one DHCPv6 client through a lease so the register knows the
-// name it is about to release.
+// lease6 puts a name in the register so a later release has something to be
+// weighed against.
 func lease6(t *testing.T, p *pluginState, host, addr string) {
 	t.Helper()
 	req, resp := v6(t, withFQDN6(0, host))
@@ -1724,7 +1722,6 @@ func TestInnerMessage(t *testing.T) {
 // Who holds a name
 // -------------------------------------------------------------------------
 
-// rrsetKey names one RRset of the zone the test server keeps.
 type rrsetKey struct {
 	name  string
 	rtype dnsmessage.Type
@@ -1748,7 +1745,6 @@ type zoneServer struct {
 	msgs   int
 }
 
-// startZoneServer listens on a loopback port and serves until the test ends.
 func startZoneServer(t *testing.T, key tsigKey) *zoneServer {
 	t.Helper()
 	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -1763,10 +1759,8 @@ func startZoneServer(t *testing.T, key tsigKey) *zoneServer {
 	return z
 }
 
-// addr is the address to configure the plugin with.
 func (z *zoneServer) addr() string { return z.conn.LocalAddr().String() }
 
-// serve answers until the socket is closed.
 func (z *zoneServer) serve(done chan struct{}) {
 	defer close(done)
 	buf := make([]byte, 4096)
@@ -1783,7 +1777,6 @@ func (z *zoneServer) serve(done chan struct{}) {
 	}
 }
 
-// answer applies one message and signs the reply.
 func (z *zoneServer) answer(req []byte) []byte {
 	rec, err := findTSIG(req)
 	if err != nil {
@@ -1805,8 +1798,7 @@ func (z *zoneServer) answer(req []byte) []byte {
 	return signAs(z.key, msg, rec.mac, id)
 }
 
-// applyUpdate weighs the prerequisites and, if they all hold, applies the
-// changes. It runs under z.mu.
+// applyUpdate runs under z.mu.
 func (z *zoneServer) applyUpdate(req []byte) dnsmessage.RCode {
 	prereqs, changes, err := readUpdate(req)
 	if err != nil {
@@ -1821,8 +1813,6 @@ func (z *zoneServer) applyUpdate(req []byte) dnsmessage.RCode {
 	return dnsmessage.RCodeSuccess
 }
 
-// weigh checks the two prerequisite forms this plugin sends: an RRset that
-// has to be absent, and one that has to be exactly what is given.
 func (z *zoneServer) weigh(prereqs []change) dnsmessage.RCode {
 	want := map[rrsetKey][]string{}
 	for _, c := range prereqs {
@@ -1843,7 +1833,6 @@ func (z *zoneServer) weigh(prereqs []change) dnsmessage.RCode {
 	return dnsmessage.RCodeSuccess
 }
 
-// sameRRset reports whether two RRsets hold the same records.
 func sameRRset(a, b []string) bool {
 	x, y := slices.Clone(a), slices.Clone(b)
 	slices.Sort(x)
@@ -1851,9 +1840,6 @@ func sameRRset(a, b []string) bool {
 	return slices.Equal(x, y)
 }
 
-// applyChange applies one record of the update section: an add, an RRset
-// delete, or the delete of a single record out of an RRset.
-//
 // An add of a record that is already there changes nothing, which is what
 // RFC 2136 section 3.4.2.2 says and what matters here: the second attempt
 // at a name writes the same DHCID again and must not end up with two.
@@ -1870,7 +1856,6 @@ func (z *zoneServer) applyChange(c change) {
 	}
 }
 
-// rrset returns the RDATA at a name, as hex and in a stable order.
 func (z *zoneServer) rrset(name string, rtype dnsmessage.Type) []string {
 	z.mu.Lock()
 	defer z.mu.Unlock()
@@ -1879,8 +1864,7 @@ func (z *zoneServer) rrset(name string, rtype dnsmessage.Type) []string {
 	return out
 }
 
-// put writes an RRset straight into the zone, standing in for whatever was
-// there before this plugin ever saw it.
+// put stands in for whatever was in the zone before this plugin ever saw it.
 func (z *zoneServer) put(name string, rtype dnsmessage.Type, rdata ...[]byte) {
 	z.mu.Lock()
 	defer z.mu.Unlock()
@@ -1891,15 +1875,12 @@ func (z *zoneServer) put(name string, rtype dnsmessage.Type, rdata ...[]byte) {
 	}
 }
 
-// messages is how many updates have reached the server.
 func (z *zoneServer) messages() int {
 	z.mu.Lock()
 	defer z.mu.Unlock()
 	return z.msgs
 }
 
-// readUpdate reads the prerequisite and update sections of a message back
-// into the shape this package builds them from.
 func readUpdate(req []byte) (prereqs, changes []change, err error) {
 	var p dnsmessage.Parser
 	if _, startErr := p.Start(req); startErr != nil {
@@ -1915,7 +1896,6 @@ func readUpdate(req []byte) (prereqs, changes []change, err error) {
 	return prereqs, changes, err
 }
 
-// readSection reads one section to its end.
 func readSection(
 	header func() (dnsmessage.ResourceHeader, error),
 	body func() (dnsmessage.UnknownResource, error),
@@ -1964,11 +1944,8 @@ func newZonePlugin(t *testing.T, z *zoneServer, extra ...string) *pluginState {
 	return p
 }
 
-// hexOf is a record's RDATA in the form the zone keeps it.
 func hexOf(b []byte) []string { return []string{hex.EncodeToString(b)} }
 
-// dhcidFor is the DHCID a DHCPv4 client with this hardware address gets for
-// this name.
 func dhcidFor(t *testing.T, mac net.HardwareAddr, fqdn string) []byte {
 	t.Helper()
 	req, err := dhcpv4.New(dhcpv4.WithHwAddr(mac), dhcpv4.WithMessageType(dhcpv4.MessageTypeRequest))
@@ -2015,7 +1992,6 @@ func TestANameHeldByAnotherClientIsLeftAlone(t *testing.T) {
 	lease4(t, p, "laptop", net.IP{10, 0, 0, 5})
 	before := z.messages()
 
-	// A second client on the segment asks for the same name.
 	other := net.HardwareAddr{0x02, 0, 0, 0, 0, 9}
 	lease4(t, p, "laptop", net.IP{10, 0, 0, 7}, dhcpv4.WithHwAddr(other))
 
@@ -2092,7 +2068,6 @@ func TestReleaseByANonHolderChangesNothing(t *testing.T) {
 	lease4(t, p, "laptop", net.IP{10, 0, 0, 5})
 	before := z.messages()
 
-	// Same name, same address, another client: nothing leaves the process.
 	req, resp := v4(t, dhcpv4.MessageTypeRelease, dhcpv4.WithOption(dhcpv4.OptHostName("laptop")))
 	req.ClientHWAddr = net.HardwareAddr{0x02, 0, 0, 0, 0, 9}
 	req.ClientIPAddr = net.IP{10, 0, 0, 5}
@@ -2254,7 +2229,6 @@ func TestOwners(t *testing.T) {
 		o.record("host.home.lan.", mine, []netip.Addr{a})
 		o.forget("host.home.lan.")
 		assert.False(t, o.holds("host.home.lan.", mine, []netip.Addr{a}))
-		// Forgetting one that is not there is not an error.
 		assert.NotPanics(t, func() { o.forget("host.home.lan.") })
 	})
 	t.Run("writing a name again replaces what is held", func(t *testing.T) {

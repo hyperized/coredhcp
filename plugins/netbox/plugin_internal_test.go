@@ -28,7 +28,7 @@ import (
 type pluginStubBackend struct {
 	calls  int
 	gotMAC string
-	gotCtx context.Context // the ctx the last call was made with
+	gotCtx context.Context
 	result lookupResult
 	err    error
 }
@@ -280,8 +280,6 @@ func TestPluginStateLookup(t *testing.T) {
 		assert.Equal(t, lookupResult{}, result)
 		assert.Equal(t, 1, stub.calls)
 
-		// A second call inside the negative TTL must be served from the
-		// cache, exactly as a plain "not found" result would be.
 		_, err = p.lookup(context.Background(), mac)
 		require.NoError(t, err)
 		assert.Equal(t, 1, stub.calls, "the cached negative result must keep the second call off the backend")

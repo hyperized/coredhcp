@@ -64,13 +64,12 @@
 //
 // # Storage
 //
-// One writer goroutine owns the lease database and applies changes in the
-// order the packet path made them, so the plugin lock is never held across a
-// disk write. A slow disk costs queue depth instead of blocking every other
-// client, the sweeper and the lease API behind one insert. The queue is
-// bounded, and a lease that cannot be queued is refused rather than handed
-// out with no row behind it: an address nobody can see after a restart is
-// how two clients end up with the same one.
+// The reply to a client waits until its lease has reached the lease
+// database, and a lease that cannot be written is refused rather than handed
+// out: an address nobody can see after a restart is how two clients end up
+// with the same one. Writes are queued to one writer goroutine, so a slow
+// disk costs queue depth rather than blocking every other client, the
+// sweeper and the lease API behind one insert.
 package rangeplugin
 
 import (
@@ -155,9 +154,8 @@ const (
 	maxDeclineQuarantine = 1 << 16
 
 	// defaultMaxLeases bounds the lease table when max-leases says nothing.
-	// Every lease is a map entry and a database row, and both live until the
-	// lease expires, so a pool with more addresses in it than the machine
-	// has memory for needs a bound that is not the pool.
+	// Every lease is a map entry and a database row, so a pool wider than the
+	// machine has memory for needs a bound that is not the pool.
 	defaultMaxLeases = 1 << 16
 
 	// leaseLimitEvery paces the refusal log. Once the table is full every
@@ -194,11 +192,10 @@ func (r *Record) expired(t time.Time) bool {
 	return r.expires <= t.Unix()
 }
 
-// logThrottle paces a log line that one packet can trigger. It holds the
-// moment the last line went out and how many were dropped since.
+// logThrottle paces a log line that one packet can trigger.
 //
-// It is not safe for concurrent use and carries no lock of its own: each
-// instance has one owner, either the plugin lock or the writer goroutine.
+// Not safe for concurrent use and carries no lock of its own: each instance
+// has one owner, either the plugin lock or the writer goroutine.
 type logThrottle struct {
 	last    time.Time
 	skipped uint64
@@ -257,26 +254,24 @@ type pluginState struct {
 	// by the plugin lock, like the table it counts.
 	leaseLimit logThrottle
 
-	// dbCtx is the context every storage call runs under, and dbCancel ends
-	// it once the writer has drained. It is the plugin's own lifetime and
-	// not a request's: the writer outlives the packet that queued a change,
-	// and a handler may not hold on to the context it was called with.
+	// dbCtx is the plugin's own lifetime and not a request's: the writer
+	// outlives the packet that queued a change, and a handler may not hold on
+	// to the context it was called with. dbCancel ends it once the writer has
+	// drained.
 	//nolint:containedctx // the plugin instance's own lifetime, not a request's
 	dbCtx    context.Context
 	dbCancel context.CancelFunc
 
-	// writes carries lease changes to the writer goroutine, stopWrites
-	// closes to shut it down and writerDone closes once it has drained. All
-	// three are nil until startWriter runs, which is what makes a state
-	// built by hand write inline; see storage.go.
+	// writes carries lease changes to the writer goroutine. All three are nil
+	// until startWriter runs, which is what makes a state built by hand write
+	// inline; see storage.go.
 	writes     chan leaseWrite
 	stopWrites chan struct{}
 	writerDone chan struct{}
 
-	// pending holds the changes queued since the lock was taken, for the
-	// caller to wait on once it has let the lock go. Guarded by the plugin
-	// lock, and emptied by withLock before the lock is released, so it only
-	// ever holds one caller's writes.
+	// pending holds the changes queued since the lock was taken. Guarded by
+	// the plugin lock and emptied by withLock before the lock is released, so
+	// it only ever holds one caller's writes.
 	pending []pendingWrite
 
 	// now is the clock seam. It is written once during setup, before the
@@ -305,10 +300,8 @@ func (p *pluginState) timeNow() time.Time {
 // withLock runs fn under the plugin lock and hands back the lease writes it
 // queued, which the caller waits for with settle once the lock is free.
 //
-// Every path that changes lease state goes through here. Taking the queued
-// writes while the lock is still held is what makes them this caller's and
-// nobody else's, and doing it in one place is what stops a path from
-// forgetting to.
+// Taking the queued writes while the lock is still held is what makes them
+// this caller's and nobody else's.
 func (p *pluginState) withLock(fn func()) []pendingWrite {
 	p.Lock()
 	defer p.Unlock()
@@ -346,10 +339,9 @@ func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 		}
 	})
 
-	// The reply waits for the lease to reach the disk. A client told it
-	// holds an address that a crash then forgets would find that address
-	// handed to the next client at the following start, which is the one
-	// thing a lease file exists to prevent.
+	// The reply waits for the lease to reach the disk: a client told it holds
+	// an address that a crash then forgets would find it handed to the next
+	// client at the following start.
 	if err := p.settle(pending); err != nil {
 		log.Errorf("Not leasing to MAC %s: %v", mac, err)
 		return nil, true
@@ -365,14 +357,10 @@ func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 }
 
 // clientHostname reads the name the client asks to be known by, from option
-// 12. It is stored with the lease so an operator can tell which client holds
-// what; nothing in the plugin acts on it, and it is filtered and truncated
-// first because it comes straight off the wire.
-//
-// The bound is the point. RFC 3396 lets a client split an option across
-// several instances that the decoder joins back together, so option 12 can
-// arrive as tens of kilobytes, and without this that goes into the lease row
-// and back out through the lease API.
+// 12. Nothing in the plugin acts on it; it is filtered and truncated because
+// RFC 3396 lets a client split an option across several instances that the
+// decoder joins back together, so option 12 can arrive as tens of kilobytes
+// and go straight into the lease row and back out through the lease API.
 func clientHostname(req *dhcpv4.DHCPv4) string {
 	name := strings.Map(func(r rune) rune {
 		if strings.ContainsRune(hostnameChars, r) {
@@ -425,10 +413,9 @@ func (p *pluginState) allocateLease(mac string, hint net.IPNet, hostname string,
 		expires:  now.Add(p.LeaseTime).Unix(),
 		hostname: hostname,
 	}
-	// Handing out an address we could not record would put a second client
-	// on it after a restart, which is worse than one client waiting for the
-	// next DISCOVER, so the address goes back whether the write is refused
-	// now or fails later.
+	// Handing out an address we could not record would put a second client on
+	// it after a restart, so the address goes back whether the write is
+	// refused now or fails later.
 	if err := p.saveIPAddress(mac, rec, func() { p.dropUnwritten(mac, rec) }); err != nil {
 		log.Errorf("SaveIPAddress for MAC %s failed: %v", mac, err)
 		p.freeUnrecorded(rec)
@@ -440,10 +427,10 @@ func (p *pluginState) allocateLease(mac string, hint net.IPNet, hostname string,
 
 // dropUnwritten takes back a lease whose row did not make it to disk.
 //
-// The record goes only if it is still the one this write was for. A release,
-// or a later lease for the same client, has already dealt with the address
-// by then, and returning it a second time would take it from whoever holds
-// it now. The caller must hold p's lock.
+// Only if the record is still the one this write was for: a release, or a
+// later lease for the same client, has already dealt with the address by
+// then, and returning it a second time would take it from whoever holds it
+// now. The caller must hold p's lock.
 func (p *pluginState) dropUnwritten(mac string, rec *Record) {
 	if p.Recordsv4[mac] != rec {
 		return
@@ -468,11 +455,10 @@ func (p *pluginState) atLeaseLimit(now time.Time) bool {
 	if p.maxLeases == 0 || len(p.Recordsv4) < p.maxLeases {
 		return false
 	}
-	// A table full of leases that have lapsed is a reason to sweep, not a
-	// reason to turn a client away: the background sweeper would return
-	// them, but not for up to half a lease time, and the client is here
-	// now. This is the bargain the allocation path already makes when the
-	// pool looks exhausted.
+	// A table full of lapsed leases is a reason to sweep, not to turn a
+	// client away: the sweeper would return them, but not for up to half a
+	// lease time. Same bargain the allocation path makes when the pool looks
+	// exhausted.
 	p.reclaim(now)
 	if len(p.Recordsv4) < p.maxLeases {
 		return false
@@ -563,12 +549,10 @@ func (p *pluginState) reallocateExpired(mac string, record *Record, hostname str
 
 // renew extends record's lease so it outlives the lease time we are about to
 // advertise, and persists the change. A lease with enough time left is left
-// untouched. It reports whether the client can be answered with this lease.
-//
-// An extension that cannot be written is rolled back and the client is
-// answered with nothing, the same as a fresh lease that cannot be written:
-// the reply it would otherwise get names a lease time the lease file does
-// not know about. The caller must hold p's lock.
+// untouched. It reports whether the client can be answered with this lease:
+// an extension that cannot be written is rolled back, because the reply
+// would otherwise name a lease time the lease file does not know about. The
+// caller must hold p's lock.
 func (p *pluginState) renew(mac string, record *Record, hostname string, now time.Time) bool {
 	// Ensure we extend the existing lease at least past when the one we're giving expires
 	if !time.Unix(record.expires, 0).Before(now.Add(p.LeaseTime)) {
@@ -809,15 +793,13 @@ func (p *pluginState) stopSweeper() {
 }
 
 // Close stops this instance's background goroutines and flushes the lease
-// writes it still has queued.
+// writes it still has queued. Call it once, and only on an instance setup
+// built.
 //
-// Nothing in the server calls it: plugins are set up once and live as long as
-// the process, which is why setup registers the instance and hands back only
-// a handler. It is here for a program that embeds the plugin and for the
-// black-box tests. Both hold the leases.Source the registry gave them, and
-// both would otherwise leave a sweeper and a writer running over a lease file
-// they are about to delete. Call it once, and only on an instance setup
-// built, which is the only kind a caller can get hold of.
+// Nothing in the server calls it: plugins are set up once and live as long
+// as the process. It is here for an embedding program and for the black-box
+// tests, which would otherwise leave a sweeper and a writer running over a
+// lease file they are about to delete.
 func (p *pluginState) Close() {
 	p.stopSweeper()
 	p.stopWriter()
@@ -953,10 +935,9 @@ func parseDeclineMax(opts *pluginOptions, raw string) error {
 	return nil
 }
 
-// parseMaxLeases reads the value of a "max-leases:" argument. Zero is allowed
-// and turns the bound off, for an operator who would rather run a pool wider
-// than the default against however much memory the machine has; a negative
-// count is not, because it would read as a limit and act as none at all.
+// parseMaxLeases reads the value of a "max-leases:" argument. Zero turns the
+// bound off; a negative count is refused because it would read as a limit
+// and act as none at all.
 func parseMaxLeases(opts *pluginOptions, raw string) error {
 	count, err := strconv.Atoi(raw)
 	if err != nil {
@@ -1006,8 +987,6 @@ func newPluginState(args ...string) (*pluginState, error) {
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 	}
-	// Rooted at Background rather than at a request: this is how long the
-	// lease database is open for, which is the life of the process.
 	p.dbCtx, p.dbCancel = context.WithCancel(context.Background())
 
 	if len(args) < 4 {
@@ -1054,9 +1033,8 @@ func newPluginState(args ...string) (*pluginState, error) {
 	if err = p.registerBackingDB(p.dbCtx, filename); err != nil {
 		return nil, fmt.Errorf("could not setup lease storage: %w", err)
 	}
-	// The leases already on disk count against max-leases: a table that is
-	// over the bound at startup hands out nothing new until it shrinks,
-	// which is the point of counting them.
+	// The leases already on disk count against max-leases: a table over the
+	// bound at startup hands out nothing new until it shrinks.
 	p.Recordsv4, err = loadRecords(p.dbCtx, p.leasedb)
 	if err != nil {
 		return nil, fmt.Errorf("could not load records from file: %w", err)

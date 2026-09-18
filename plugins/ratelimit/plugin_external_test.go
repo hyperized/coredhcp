@@ -121,8 +121,7 @@ func TestPluginDeclaresOnlyTheContextAwareSetups(t *testing.T) {
 	assert.Nil(t, ratelimit.Plugin.Setup4)
 	assert.Nil(t, ratelimit.Plugin.Setup6)
 	// The registry is a package global and a second registration under the
-	// same name panics, so put the entry back the way it was found. Without
-	// this, `go test -count=2` takes the whole binary down on the second run.
+	// same name panics, so `go test -count=2` needs the entry put back.
 	t.Cleanup(func() { delete(plugins.RegisteredPlugins, ratelimit.Plugin.Name) })
 	require.NoError(t, plugins.RegisterPlugin(&ratelimit.Plugin))
 }

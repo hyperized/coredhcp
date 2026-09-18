@@ -214,9 +214,8 @@ func closedUDPConn(t *testing.T, network string, addr *net.UDPAddr) *net.UDPConn
 	return c
 }
 
-// asListener4 unwraps a listener into its *listener4 concrete type. A few
-// fields (observer, gate, relayChecked) are only reachable this way, since
-// Servers.listeners holds the listener interface.
+// asListener4 unwraps a listener: Servers.listeners holds the interface, and
+// fields like observer and gate are only reachable on the concrete type.
 func asListener4(t *testing.T, l listener) *listener4 {
 	t.Helper()
 	l4, ok := l.(*listener4)
@@ -224,7 +223,6 @@ func asListener4(t *testing.T, l listener) *listener4 {
 	return l4
 }
 
-// asListener6 mirrors asListener4 for the DHCPv6 side.
 func asListener6(t *testing.T, l listener) *listener6 {
 	t.Helper()
 	l6, ok := l.(*listener6)
@@ -259,10 +257,8 @@ func (c *countingConn) Close() error {
 func TestNewUDPConnWrappersReturnANilInterfaceOnFailure(t *testing.T) {
 	const zone = "nonexistent-zzz-iface"
 
-	// assert.Nil is not the check to use here: it reaches through the
-	// interface with reflection and passes for a typed nil pointer too,
-	// which is the very thing these wrappers exist to prevent. Comparing
-	// against a bare nil looks at the interface value itself.
+	// assert.Nil reaches through the interface and passes for a typed nil
+	// pointer too, which is the very thing these wrappers exist to prevent.
 	t.Run("v4", func(t *testing.T) {
 		c, err := newIPv4UDPConn(zone, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0, Zone: zone})
 		require.Error(t, err)
@@ -767,7 +763,6 @@ func TestReportListenerNamesTheInterface(t *testing.T) {
 // --- shutdown: handlers first, sockets after ---
 
 // closeRecorder is a listener double that only records that it was closed.
-// Serve is never called on it: these tests drive shutdown, not traffic.
 type closeRecorder struct {
 	onClose func()
 }
@@ -779,9 +774,6 @@ func (c *closeRecorder) Close() error {
 
 func (c *closeRecorder) Serve() error { return nil }
 
-// A handler can sit in the plugin chain for as long as the chain takes, and
-// it writes its reply to the socket when it comes back. Close therefore
-// waits for the handlers before it closes the sockets under them.
 func TestCloseWaitsForHandlersBeforeClosingSockets(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var mu sync.Mutex
@@ -826,9 +818,6 @@ func TestCloseWaitsForHandlersBeforeClosingSockets(t *testing.T) {
 	})
 }
 
-// A plugin that never returns delays shutdown by the drain timeout instead
-// of holding the process open. The sockets close under it and the log says
-// so.
 func TestCloseGivesUpAtTheDrainTimeout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		buf := captureLog(t)
@@ -857,8 +846,6 @@ func TestCloseGivesUpAtTheDrainTimeout(t *testing.T) {
 	})
 }
 
-// Close is reached from a signal handler and from Wait. The second call
-// must not sit out the drain timeout again.
 func TestCloseDrainsOnlyOnce(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		captureLog(t)
@@ -887,8 +874,6 @@ func TestCloseDrainsOnlyOnce(t *testing.T) {
 	})
 }
 
-// A Servers a caller built rather than started has no gate: Close must not
-// panic on it and Drops has nothing to report.
 func TestZeroValueServersShutsDownQuietly(t *testing.T) {
 	s := &Servers{}
 	assert.NotPanics(t, s.Close)
@@ -933,8 +918,6 @@ func TestWithDrainTimeout(t *testing.T) {
 	}
 }
 
-// Start hands every listener the same gate: the limit is about the machine,
-// not about one socket, and Close has one set of handlers to wait for.
 func TestStartSharesOneGateAcrossListeners(t *testing.T) {
 	cfg := testConfig(t,
 		[]net.UDPAddr{{IP: net.ParseIP("::1"), Port: 0}},
@@ -954,9 +937,6 @@ func TestStartSharesOneGateAcrossListeners(t *testing.T) {
 
 // --- relay allow list at startup ---
 
-// Without the relay plugin, each family says once at startup that it will
-// refuse relayed requests, however many sockets it binds, and the listeners
-// carry that decision.
 func TestStartWarnsOncePerFamilyWithoutRelayPlugin(t *testing.T) {
 	buf := captureLog(t)
 	cfg := testConfig(t,
@@ -975,8 +955,6 @@ func TestStartWarnsOncePerFamilyWithoutRelayPlugin(t *testing.T) {
 	assert.False(t, asListener4(t, srv.listeners[2]).relayChecked)
 }
 
-// With the plugin in the chain there is nothing to warn about: the plugin
-// decides which relays are answered, and the server stays out of it.
 func TestStartWithRelayPluginLeavesRelayedRequestsToIt(t *testing.T) {
 	registerTestPlugin(t, &plugins.Plugin{
 		Name: relayPluginName,
@@ -1009,8 +987,6 @@ func TestStartWithRelayPluginLeavesRelayedRequestsToIt(t *testing.T) {
 	assert.True(t, asListener4(t, srv.listeners[1]).relayChecked)
 }
 
-// hasRelay4 and hasRelay6 look for the plugin by name anywhere in the
-// chain, not just at its head.
 func TestHasRelayPlugin(t *testing.T) {
 	assert.False(t, hasRelay4(nil))
 	assert.False(t, hasRelay4([]plugins.Link4{{Name: "server_id"}, {Name: "range"}}))

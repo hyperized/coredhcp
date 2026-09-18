@@ -96,9 +96,8 @@ func TestStartLoadPluginsFailure(t *testing.T) {
 	assert.Nil(t, srv)
 }
 
-// addressObserver keeps the addresses the server reports binding to, which
-// is how a caller outside the package learns the port a listener on port 0
-// ended up with.
+// addressObserver keeps the addresses the server reports binding to: how a
+// caller outside the package learns which port a listener on port 0 got.
 type addressObserver struct {
 	mu        sync.Mutex
 	addresses []string
@@ -121,9 +120,6 @@ func (o *addressObserver) only(t *testing.T) string {
 	return o.addresses[0]
 }
 
-// The in-flight limit and the drain timeout are constructor options, and a
-// server started with them shuts down the way one started without them
-// does.
 func TestStartWithLimitsAndDrops(t *testing.T) {
 	cfg := &config.Config{
 		Server4: &config.ServerConfig{Addresses: []net.UDPAddr{loopbackUDPAddr4(t)}},
@@ -137,10 +133,8 @@ func TestStartWithLimitsAndDrops(t *testing.T) {
 	assert.NoError(t, srv.Wait())
 }
 
-// A DHCPv4 reply goes to giaddr, and the sender writes giaddr. This sends a
-// DISCOVER naming the test's own socket as the relay: with no relay plugin
-// configured the server must not answer it, which is the whole point of the
-// default. Without the check the reply lands in the socket below.
+// The DISCOVER names the test's own socket as the relay, so without the
+// refusal the reply lands in that socket.
 func TestRelayedRequestIsDroppedWithoutRelayPlugin(t *testing.T) {
 	obs := &addressObserver{}
 	cfg := &config.Config{

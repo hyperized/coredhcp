@@ -95,17 +95,11 @@ func withinRange(t *testing.T, ip net.IP, start, end string) {
 		"%s is not within %s-%s", ip, start, end)
 }
 
-// TestEndToEndDHCPv4TwoSubnets proves that each configured subnet gets its
-// own range instance rather than sharing one: a request relayed through each
-// subnet's gateway must be allocated from that subnet's own pool.
-// closeDelegates shuts down the pool instances the subnet plugin built, at
-// the end of the test.
-//
-// Setup hands back a handler and nothing else, so a test reaches the
-// delegates the way any consumer does, through the leases registry. Each one
-// runs a sweeper and a writer over a lease file in the test's temp
-// directory, and the framework fails the test if anything is still touching
-// that directory when it removes it.
+// closeDelegates reaches the pool instances through the leases registry,
+// because Setup hands back a handler and nothing else. Each one runs a
+// sweeper and a writer over a lease file in the test's temp directory, and
+// the framework fails the test if anything is still touching that directory
+// when it removes it.
 func closeDelegates(t *testing.T, names ...string) {
 	t.Helper()
 	for _, s := range leases.Sources() {
@@ -121,6 +115,9 @@ func closeDelegates(t *testing.T, names ...string) {
 	}
 }
 
+// TestEndToEndDHCPv4TwoSubnets proves that each configured subnet gets its
+// own range instance rather than sharing one: a request relayed through each
+// subnet's gateway must be allocated from that subnet's own pool.
 func TestEndToEndDHCPv4TwoSubnets(t *testing.T) {
 	officeDB := filepath.Join(t.TempDir(), "office.sqlite3")
 	guestDB := filepath.Join(t.TempDir(), "guest.sqlite3")

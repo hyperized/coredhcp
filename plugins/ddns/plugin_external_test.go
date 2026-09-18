@@ -36,19 +36,16 @@ const (
 	keyName   = "ddns-key"
 	keySecret = "Y29yZWRoY3AtZGRucy1nb2xkZW4tdGVzdC1rZXkhISE="
 
-	// typeTSIG and typeDHCID are the record types this file reads off the
-	// wire. They are written out rather than imported: these tests are
-	// meant to check the package against the RFCs, not against itself.
+	// Written out rather than imported: these tests check the package
+	// against the RFCs, not against itself.
 	typeTSIG  = dnsmessage.Type(250)
 	typeDHCID = dnsmessage.Type(49)
 
-	// headerLen is the size of a DNS message header, and arcountOff where
-	// its ARCOUNT field starts.
 	headerLen  = 12
 	arcountOff = 10
 
-	// signedAt is the time every signature in this file carries. The plugin
-	// does not check the time on an answer beyond letting the MAC cover it.
+	// The plugin never checks the time on an answer beyond letting the MAC
+	// cover it, so any fixed timestamp works here.
 	signedAt = 1788589641
 
 	// updateResponseFlags is QR set with opcode 5 and RCODE 0.
@@ -57,9 +54,8 @@ const (
 
 var clientMAC = net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}
 
-// secret is the key material behind every signature here. Decoding a
-// constant of this file cannot fail, and a panic in a test binary is a
-// clearer failure than a silently empty key.
+// Decoding a constant of this file cannot fail; a panic in a test binary is
+// a clearer failure than a silently empty key.
 var secret = mustDecode(keySecret)
 
 func mustDecode(s string) []byte {
@@ -70,8 +66,8 @@ func mustDecode(s string) []byte {
 	return b
 }
 
-// recorder is a name server that keeps every datagram it is sent and answers
-// each one with a signed NOERROR.
+// recorder is a name server that answers every request with a signed
+// NOERROR.
 //
 // Answering matters now: the plugin only writes a PTR once the forward zone
 // has taken the address, and it only remembers holding a name once the
@@ -97,7 +93,6 @@ func startRecorder(t *testing.T) *recorder {
 	return r
 }
 
-// serve answers until the socket is closed.
 func (r *recorder) serve(done chan struct{}) {
 	defer close(done)
 	buf := make([]byte, 4096)
@@ -133,16 +128,15 @@ func (r *recorder) next(t *testing.T) []byte {
 	}
 }
 
-// answerTo builds the reply the plugin is waiting for: an empty NOERROR
-// response, signed the way RFC 8945 section 5.4 has a server sign one, with
-// the MAC of the request digested in front of the message.
+// answerTo signs an empty NOERROR the way RFC 8945 section 5.4 has a server
+// sign one, with the MAC of the request digested in front of the message.
 func answerTo(req []byte) []byte {
 	reqMAC, ok := tsigMAC(req)
 	if !ok {
 		return nil
 	}
-	resp := make([]byte, 0, headerLen) // the header, built up below, then the record
-	resp = append(resp, req[:2]...)    // the same ID
+	resp := make([]byte, 0, headerLen)
+	resp = append(resp, req[:2]...) // the same ID
 	resp = binary.BigEndian.AppendUint16(resp, updateResponseFlags)
 	resp = binary.BigEndian.AppendUint16(resp, 0) // QDCOUNT
 	resp = binary.BigEndian.AppendUint16(resp, 0) // ANCOUNT
@@ -181,8 +175,6 @@ func tsigRDATA(mac []byte, origID uint16) []byte {
 	return binary.BigEndian.AppendUint16(out, 0)
 }
 
-// tsigMAC returns the MAC of a message's TSIG record, which is what a server
-// has to digest in front of its answer.
 func tsigMAC(msg []byte) ([]byte, bool) {
 	var p dnsmessage.Parser
 	if _, err := p.Start(msg); err != nil {
@@ -428,8 +420,7 @@ func TestSetupRefusesASecretThatIsNotThere(t *testing.T) {
 	assert.NotContains(t, err.Error(), keySecret, "no error may carry key material")
 }
 
-// ack4 is the request and the response a previous plugin would have built
-// for a client taking a lease.
+// ack4 stands in for the ACK a previous plugin in the chain would have built.
 func ack4(t *testing.T, host string, addr net.IP) (*dhcpv4.DHCPv4, *dhcpv4.DHCPv4) {
 	t.Helper()
 	req, err := dhcpv4.New(
@@ -536,8 +527,6 @@ func TestHandler4IgnoresAReleaseItNeverWrote(t *testing.T) {
 	h, err := ddns.Plugin.Setup4(args(r)...)
 	require.NoError(t, err)
 
-	// Nothing was ever leased through this instance, so this release is
-	// somebody asking the server to delete a name for them.
 	rel, err := dhcpv4.New(
 		dhcpv4.WithHwAddr(clientMAC),
 		dhcpv4.WithMessageType(dhcpv4.MessageTypeRelease),

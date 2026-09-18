@@ -285,10 +285,9 @@ func TestReallocateExpiredReleaseLeaseFailureKeepsClientOnOldRecord(t *testing.T
 	assert.Equal(t, "old-name", rec.hostname)
 }
 
-// TestAllocateLeaseSaveIPAddressFailureRefusesTheBinding covers a storage
-// failure on the new-binding path. The client gets nothing: an address we
-// could not write down reads as free after a restart, and the next client to
-// ask would be handed the one this client thinks it holds.
+// TestAllocateLeaseSaveIPAddressFailureRefusesTheBinding: an address that
+// could not be written down reads as free after a restart, so handing it out
+// anyway risks a second client getting the same one.
 func TestAllocateLeaseSaveIPAddressFailureRefusesTheBinding(t *testing.T) {
 	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
@@ -303,7 +302,6 @@ func TestAllocateLeaseSaveIPAddressFailureRefusesTheBinding(t *testing.T) {
 	assert.Nil(t, p.allocateLease(key, duidA, iaidX, net.IPNet{}, "client-a", time.Now()))
 	assert.Empty(t, p.Records6, "an unrecorded binding must not be tracked in memory either")
 
-	// The address went back, so the whole pool is still there to hand out.
 	first, err := alloc.Allocate(net.IPNet{})
 	require.NoError(t, err)
 	assert.Equal(t, poolFirst, first.IP.String())
@@ -614,10 +612,6 @@ func TestDefaultSweepInterval(t *testing.T) {
 	}
 }
 
-// TestSweeperReclaimsInBackground drives the real ticker: without any client
-// asking for an address, an expired binding must disappear from the map on
-// its own.
-//
 // The whole instance is built inside the bubble, ticker and stop channel
 // included, which is what lets the sweep happen on bubble time instead of
 // being waited out on the wall clock.
@@ -896,10 +890,7 @@ func TestRecordFromRow(t *testing.T) {
 	})
 }
 
-// TestLogThrottleReady drives a throttle through a full cycle: the first call
-// always gets through, calls inside the window are suppressed and counted,
-// and the first call past the window gets through again carrying how many
-// were held back. It runs the cycle at two different window lengths, since
+// TestLogThrottleReady runs the cycle at two different window lengths, since
 // the window is whatever the caller chooses and not a fixed constant of the
 // throttle itself.
 func TestLogThrottleReady(t *testing.T) {
@@ -944,8 +935,6 @@ func TestLogThrottleReady(t *testing.T) {
 	})
 }
 
-// TestAtLeaseLimit covers the three shapes of the bound: turned off, exactly
-// full, and still under it.
 func TestAtLeaseLimit(t *testing.T) {
 	now := time.Now()
 	// The bindings have to be live: one that has lapsed is reclaimed rather
@@ -988,10 +977,6 @@ func TestAtLeaseLimit(t *testing.T) {
 	})
 }
 
-// TestAllocateLeaseRefusesAtLeaseLimit covers allocateLease's own refusal
-// branch: once the table already holds max-leases bindings, a new DUID and
-// IAID pair gets nothing, the table does not grow, and the allocator is never
-// even asked.
 func TestAllocateLeaseRefusesAtLeaseLimit(t *testing.T) {
 	existing := &Record{
 		DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::100"),
@@ -1017,10 +1002,6 @@ func TestAllocateLeaseRefusesAtLeaseLimit(t *testing.T) {
 	mockAlloc.AssertNotCalled(t, "Allocate", mock.Anything)
 }
 
-// TestAllocateLeaseSaveFailureAndFreeFailureAreBothLogged covers the doubly
-// unlucky path inside allocateLease: the binding could not be persisted, and
-// returning the freshly allocated address to the pool then fails too. Both
-// failures are logged and the caller still gets nothing.
 func TestAllocateLeaseSaveFailureAndFreeFailureAreBothLogged(t *testing.T) {
 	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
@@ -1038,10 +1019,9 @@ func TestAllocateLeaseSaveFailureAndFreeFailureAreBothLogged(t *testing.T) {
 	mockAlloc.AssertExpectations(t)
 }
 
-// queuedWrite fills in what enqueue normally adds to a change before the
-// writer sees it: the context that bounds it and the channel its result goes
-// back on. A test that calls write or applyWrite directly has to supply
-// both.
+// queuedWrite fills in what enqueue normally adds to a change (the bounding
+// context and the result channel), so a test calling write or applyWrite
+// directly has to supply both itself.
 func queuedWrite(t *testing.T, w bindingWrite) bindingWrite {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), writeTimeout)
@@ -1050,9 +1030,6 @@ func queuedWrite(t *testing.T, w bindingWrite) bindingWrite {
 	return w
 }
 
-// TestWriteLogsNotFoundWithoutTreatingItAsAFailure covers write's ErrNotFound
-// case directly: a delete that matched nothing is not a failure, so the
-// writer logs it at debug and moves on without retrying.
 func TestWriteLogsNotFoundWithoutTreatingItAsAFailure(t *testing.T) {
 	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
@@ -1073,8 +1050,6 @@ func TestWriteLogsNotFoundWithoutTreatingItAsAFailure(t *testing.T) {
 	assert.NoError(t, <-w.done, "a change that matched nothing is reported as done")
 }
 
-// TestParseOptions covers parseOptions and the parsers it dispatches to for
-// max-leases, which nothing else in this file reaches directly.
 func TestParseOptions(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -1126,9 +1101,7 @@ func TestParseOptions(t *testing.T) {
 }
 
 // TestBindingExpiryPast2038 is the regression test for a 32-bit build
-// truncating the expiry: a binding expiring well past 2038 must round-trip
-// through storage unchanged and must not read as expired before it actually
-// is.
+// truncating the expiry.
 func TestBindingExpiryPast2038(t *testing.T) {
 	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
@@ -1150,9 +1123,8 @@ func TestBindingExpiryPast2038(t *testing.T) {
 	assert.False(t, got.expired(clockIn2099), "a binding expiring in 2100 must not read as expired in 2099")
 }
 
-// TestEnqueueQueueFull covers enqueue's queue-full branch: the plugin lock is
-// held by the caller, so a slow writer must be reported back rather than
-// waited on.
+// TestEnqueueQueueFull: the plugin lock is held by the caller here, so a slow
+// writer must be reported back rather than waited on.
 func TestEnqueueQueueFull(t *testing.T) {
 	p := &pluginState{writes: make(chan bindingWrite, 1)}
 	rec := &Record{DUID: duidA, IAID: iaidX, IP: net.ParseIP("2001:db8:1::100")}
@@ -1168,9 +1140,8 @@ func TestEnqueueQueueFull(t *testing.T) {
 	assert.ErrorIs(t, err, ErrWriteQueueFull)
 }
 
-// TestApplyWriteNotFound covers applyWrite's own ErrNotFound branch directly:
-// enqueue's inline path deliberately swallows that sentinel, so the sentinel
-// itself has to be pinned one level down.
+// TestApplyWriteNotFound pins ErrNotFound directly on applyWrite, since
+// enqueue's inline path swallows that sentinel before it is observable there.
 func TestApplyWriteNotFound(t *testing.T) {
 	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
@@ -1192,9 +1163,6 @@ func TestApplyWriteNotFound(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNotFound)
 }
 
-// TestWriterFailureIsLoggedWithoutRetrying covers write's non-busy failure
-// path: a closed database fails every attempt with something other than
-// ErrBusy, so the writer logs it once and moves on instead of retrying.
 func TestWriterFailureIsLoggedWithoutRetrying(t *testing.T) {
 	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
@@ -1209,9 +1177,9 @@ func TestWriterFailureIsLoggedWithoutRetrying(t *testing.T) {
 	p.stopWriter()
 }
 
-// TestWriterRetriesOnBusyThenGivesUp holds the write lock on a file through a
-// second connection so the writer's own write gets a real SQLITE_BUSY, and
-// checks it retries busyRetries times before giving up rather than hanging.
+// TestWriterRetriesOnBusyThenGivesUp holds the file's write lock through a
+// second connection so the writer's own write hits a real SQLITE_BUSY,
+// rather than a mocked one.
 func TestWriterRetriesOnBusyThenGivesUp(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "leases6.db")
 	db1, err := loadDB(t.Context(), path) // holds the write lock
@@ -1240,8 +1208,6 @@ func TestWriterRetriesOnBusyThenGivesUp(t *testing.T) {
 	p.stopWriter()
 }
 
-// blockInserts stops the binding table taking new rows, which is how a test
-// makes a queued write fail while the plugin carries on running.
 func blockInserts(t *testing.T, db *sql.DB) {
 	t.Helper()
 	_, err := db.Exec(`CREATE TRIGGER block_insert BEFORE INSERT ON leases6
@@ -1249,8 +1215,6 @@ func blockInserts(t *testing.T, db *sql.DB) {
 	require.NoError(t, err)
 }
 
-// blockDeletes stops it losing rows, so a queued delete fails while inserts
-// carry on working.
 func blockDeletes(t *testing.T, db *sql.DB) {
 	t.Helper()
 	_, err := db.Exec(`CREATE TRIGGER block_delete BEFORE DELETE ON leases6
@@ -1258,11 +1222,8 @@ func blockDeletes(t *testing.T, db *sql.DB) {
 	require.NoError(t, err)
 }
 
-// oneIANA drives one message carrying a single IA_NA through the handler
-// for its message type, and returns the answer that came back for it.
-//
-// It calls the per-message handler rather than Handler6, so a test can name
-// the DUID it wants without encoding one into a client ID option first.
+// oneIANA calls the per-message handler rather than Handler6, so a test can
+// name the DUID it wants without encoding one into a client ID option first.
 func oneIANA(t *testing.T, handle func(*dhcpv6.Message, dhcpv6.DHCPv6, []byte), duid []byte, addrs ...net.IP) *dhcpv6.OptIANA {
 	t.Helper()
 	msg, err := dhcpv6.NewMessage()
@@ -1283,8 +1244,6 @@ func oneIANA(t *testing.T, handle func(*dhcpv6.Message, dhcpv6.DHCPv6, []byte), 
 	return nil
 }
 
-// statusOf returns the status code of an answered IA_NA, or 0 when it
-// carries an address instead.
 func statusOf(ia *dhcpv6.OptIANA) dhcpIana.StatusCode {
 	if status := ia.Options.Status(); status != nil {
 		return status.StatusCode
@@ -1292,11 +1251,9 @@ func statusOf(ia *dhcpv6.OptIANA) dhcpIana.StatusCode {
 	return 0
 }
 
-// TestQueuedWriteFailureRefusesTheBinding pins the rule the waiting exists
-// for: a client is not told it holds an address until the row is on disk, so
-// a write that fails after it was queued costs the binding rather than
-// leaving one only this process knows about. The address has to come back
-// with it, or the pool leaks one per failure.
+// TestQueuedWriteFailureRefusesTheBinding pins the rule the async write
+// exists for: a client is not told it holds an address until the row is on
+// disk, and the address must go back to the pool or a failed write leaks it.
 func TestQueuedWriteFailureRefusesTheBinding(t *testing.T) {
 	p, _ := newTestPluginState(t, net.ParseIP(poolFirst), net.ParseIP(poolLast))
 	blockInserts(t, p.leasedb)
@@ -1311,15 +1268,14 @@ func TestQueuedWriteFailureRefusesTheBinding(t *testing.T) {
 	assert.Empty(t, p.Records6, "a binding that never reached the disk is not kept")
 	p.Unlock()
 
-	// The address went back, so the pool still starts where it did.
 	first, err := p.allocator.Allocate(net.IPNet{})
 	require.NoError(t, err)
 	assert.Equal(t, poolFirst, first.IP.String())
 }
 
-// TestQueuedReleaseFailureIsAnsweredAsAFailure pins the other half: a client
-// that asked us to forget something is told we did not manage to, rather
-// than getting a Success the lease file does not back up.
+// TestQueuedReleaseFailureIsAnsweredAsAFailure pins the other half: a
+// release that could not be written is answered as a failure rather than a
+// Success the lease file does not back up.
 func TestQueuedReleaseFailureIsAnsweredAsAFailure(t *testing.T) {
 	p, _ := newTestPluginState(t, net.ParseIP(poolFirst), net.ParseIP(poolLast))
 
@@ -1337,9 +1293,6 @@ func TestQueuedReleaseFailureIsAnsweredAsAFailure(t *testing.T) {
 	assert.Equal(t, dhcpIana.StatusUnspecFail, statusOf(answer))
 }
 
-// TestSettleTakesTheResultThatIsAlreadyThere covers the fast path in the
-// wait: by the time a stopped writer has drained, every result is sitting in
-// its channel and nothing has to block.
 func TestSettleTakesTheResultThatIsAlreadyThere(t *testing.T) {
 	p, _ := newTestPluginState(t, net.ParseIP(poolFirst), net.ParseIP(poolLast))
 	p.startWriter()
@@ -1404,10 +1357,6 @@ func TestSweepWriteFailureIsLogged(t *testing.T) {
 	p.Unlock()
 }
 
-// TestRenewKnownRefusesWhenTheExtensionWillNotWrite covers renewKnown's
-// found-but-nothing-to-give branch for a write that fails: the client is
-// known, its binding is live, and the extension it asked for could not be
-// recorded, so the caller answers with a status instead of a lifetime.
 func TestRenewKnownRefusesWhenTheExtensionWillNotWrite(t *testing.T) {
 	p, clock := newTestPluginState(t, net.ParseIP(poolFirst), net.ParseIP(poolLast))
 	key := leaseKey(duidA, iaidX)
@@ -1422,15 +1371,10 @@ func TestRenewKnownRefusesWhenTheExtensionWillNotWrite(t *testing.T) {
 	assert.Equal(t, "old-name", p.Records6[key].hostname, "the extension was rolled back")
 }
 
-// TestExpiredBindingIsRenewedWhenItsRowWillNotGo covers the fallback in
-// reallocateExpired with only the delete failing: the address cannot be
-// reclaimed, so the client is left where it is and its binding extended in
-// place, which is a binding the disk does agree with.
-//
-// No writer runs here on purpose. The delete has to fail before the code
-// decides what to do next, which is what the inline path does; with the
-// writer in between, the failure arrives after the answer is built and the
-// whole exchange is refused instead.
+// No writer runs here on purpose: the delete must fail synchronously, inline,
+// before the code decides what to do next; with a writer in between, the
+// failure would arrive after the answer is already built, refusing the whole
+// exchange instead.
 func TestExpiredBindingIsRenewedWhenItsRowWillNotGo(t *testing.T) {
 	p, clock := newTestPluginState(t, net.ParseIP(poolFirst), net.ParseIP(poolLast))
 	key := leaseKey(duidA, iaidX)
@@ -1446,11 +1390,8 @@ func TestExpiredBindingIsRenewedWhenItsRowWillNotGo(t *testing.T) {
 	assert.Equal(t, clock.Now().Add(testLeaseTime).Unix(), rec.expires)
 }
 
-// TestDrainWritesAppliesEverythingQueued pins that shutting the writer down
-// does not throw away whatever is still queued: every row handed to it must
-// be on disk once it returns. Calling drainWrites directly, rather than
-// racing it against the writer goroutine, is what makes the queued changes
-// still be there to drain.
+// Calling drainWrites directly here, rather than racing it against the
+// writer goroutine, is what keeps the queued changes there to drain.
 func TestDrainWritesAppliesEverythingQueued(t *testing.T) {
 	p, _ := newTestPluginState(t, net.ParseIP(poolFirst), net.ParseIP(poolLast))
 	p.writes = make(chan bindingWrite, 8)

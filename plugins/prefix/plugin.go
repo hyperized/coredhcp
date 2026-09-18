@@ -41,10 +41,9 @@
 // datagram, at which point the reply grew too large to send and the sender
 // paid nothing at all.
 //
-// The same cap applies inside one IA_PD, to the IAPrefix hints it carries.
-// A hint that matches a lease the client already holds is renewed and
-// answered with a prefix, so one IA_PD repeating the same hint enough times
-// grew the reply the same way, one level down.
+// The same cap applies to the IAPrefix hints inside one IA_PD, since a hint
+// matching a lease the client already holds is renewed and answered with a
+// prefix.
 //
 // One client, meaning one DUID, holds at most max-prefixes delegations. An
 // IA_PD that would take it past that is answered with NoPrefixAvail rather
@@ -117,11 +116,9 @@ const (
 	// low enough that the reply still fits in a datagram.
 	maxIAPDsPerMessage = 8
 
-	// maxHintsPerIAPD caps how many IAPrefix hints inside one IA_PD are
-	// considered. It is deliberately the same number as maxIAPDsPerMessage:
-	// a hint matching a lease the client already holds gets renewed and
-	// added to the reply, so an uncapped IA_PD could be made to grow the
-	// reply the same way an uncapped message could, just one option deeper.
+	// maxHintsPerIAPD is deliberately maxIAPDsPerMessage: an uncapped IA_PD
+	// grows the reply the same way an uncapped message does, one option
+	// deeper.
 	maxHintsPerIAPD = maxIAPDsPerMessage
 
 	// maxDUIDLength is the longest client DUID this plugin will key its lease

@@ -58,9 +58,9 @@ type listener6 struct {
 	// reads the request context. Answering it per packet would mean walking
 	// the whole chain before running any of it.
 	wantsCtx bool
-	// relayChecked records whether the chain holds the relay plugin, which
-	// is what decides which relays this server answers. Without it the
-	// server refuses relayed requests itself, see HandleMsg6.
+	// relayChecked records whether the chain holds the relay plugin.
+	// Without it the server refuses relayed requests itself, see
+	// listener6.relayDropped.
 	relayChecked bool
 }
 
@@ -99,7 +99,6 @@ func (c *ifaceCache) name(idx int) string {
 		return ""
 	}
 	if cached, ok := c.names.Load(idx); ok {
-		// The one Store below is the only writer and it writes a string.
 		return cached.(string) //nolint:forcetypeassert // c.names only ever holds strings
 	}
 	var name string
@@ -159,15 +158,14 @@ type Servers struct {
 	// running counts the Serve goroutines that have been started, so a
 	// failed Start can wait for the ones it already launched.
 	running sync.WaitGroup
-	// gate bounds the handler goroutines the read loops start and is what
-	// Close waits on. One for the whole server: the limit is about the
-	// machine, not about one socket.
+	// gate is shared by every listener: the limit is about the machine, not
+	// about one socket.
 	gate         *gate
 	maxInFlight  int
 	drainTimeout time.Duration
-	// drainOnce keeps the wait for in-flight handlers to one shutdown.
-	// Close is reached both from a signal handler and from Wait, and the
-	// second call must not sit out the timeout again.
+	// drainOnce keeps the wait for in-flight handlers to one shutdown: Close
+	// is reached both from a signal handler and from Wait, and the second
+	// call must not sit out the timeout again.
 	drainOnce sync.Once
 }
 
@@ -189,11 +187,6 @@ func WithObserver(o events.Observer) Option {
 // across every socket the server binds. A datagram that arrives while the
 // limit is reached is dropped and counted, see Drops.
 //
-// Dropping is the right answer for DHCP: a client retransmits, so a shed
-// packet costs a retry, while queueing it would cost memory the server does
-// not get to bound. The limit also caps what the handlers hold, a 64 KiB
-// buffer each and one AF_PACKET descriptor per layer-2 reply in flight.
-//
 // The default is 8 per GOMAXPROCS. A limit below 1 leaves it in place.
 func WithMaxInFlight(n int) Option {
 	return func(s *Servers) {
@@ -205,8 +198,7 @@ func WithMaxInFlight(n int) Option {
 }
 
 // WithDrainTimeout bounds how long Close waits for the handlers that are
-// still running before it closes the sockets under them. A handler stuck in
-// a plugin delays shutdown by at most d instead of holding it open.
+// still running before it closes the sockets under them.
 //
 // The default is 5 seconds. A timeout of zero or less leaves it in place.
 func WithDrainTimeout(d time.Duration) Option {
@@ -447,25 +439,22 @@ func (s *Servers) start4(c *config.Config, chains *plugins.Chains) error {
 }
 
 // relayPluginName is the plugin that says which relays this server answers.
-// Its absence from a chain is what turns on the server's own refusal of
-// relayed requests for that family, see listener4.relayDropped.
+// Its absence from a chain turns on the server's own refusal of relayed
+// requests for that family, see listener4.relayDropped.
 const relayPluginName = "relay"
 
-// hasRelay4 reports whether the DHCPv4 chain holds the relay plugin.
 func hasRelay4(chain []plugins.Link4) bool {
 	return slices.ContainsFunc(chain, func(l plugins.Link4) bool { return l.Name == relayPluginName })
 }
 
-// hasRelay6 reports whether the DHCPv6 chain holds the relay plugin.
 func hasRelay6(chain []plugins.Link6) bool {
 	return slices.ContainsFunc(chain, func(l plugins.Link6) bool { return l.Name == relayPluginName })
 }
 
 // warnNoRelayPlugin says once, at startup, that this family will refuse
-// relayed requests. The server replies where a relayed request tells it to,
-// so a deployment that has relays and no allow list answers wherever any
-// host on the segment points it; the refusal is the safe default and the
-// plugin is how an operator lifts it.
+// relayed requests: the server replies where a relayed request tells it to,
+// so with relays and no allow list it answers wherever any host on the
+// segment points it.
 func warnNoRelayPlugin(family events.Family, relayChecked bool) {
 	if relayChecked {
 		return
@@ -522,14 +511,12 @@ func (s *Servers) Drops() Drops {
 	return s.gate.drops()
 }
 
-// Close stops the server. It first refuses new datagrams and waits for the
+// Close stops the server: it refuses new datagrams and waits for the
 // handlers that are still running, then closes the listening sockets.
 //
-// The order is what keeps a reply from being written to a socket that has
-// already gone: a handler sits in the plugin chain for as long as the chain
-// takes, and the sleep plugin alone makes that arbitrarily long. The wait is
-// bounded by the drain timeout (see WithDrainTimeout), so a plugin that
-// never returns delays shutdown rather than preventing it.
+// That order keeps a reply from being written to a socket that has already
+// gone, since a handler sits in the plugin chain for as long as the chain
+// takes. The wait is bounded by the drain timeout (see WithDrainTimeout).
 //
 // It is safe to call more than once: a shutdown signal and Wait both close
 // the listeners, the wait for handlers happens on the first call only, and
@@ -545,9 +532,6 @@ func (s *Servers) Close() {
 	}
 }
 
-// drain stops the gate and waits for the handlers that were already
-// running, so the sockets stay open for as long as anything is still
-// writing replies to them.
 func (s *Servers) drain() {
 	s.gate.stop()
 	if !s.gate.wait(s.drainTimeout) {

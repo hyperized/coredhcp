@@ -245,20 +245,14 @@ func respond[T any](w http.ResponseWriter, field string, items []T) {
 	})
 }
 
-// writeJSON renders a body into a buffer and sends it with status.
-//
-// Buffering first is what lets a failed encode still become a 500. Once a
-// byte of the body is on the wire the status line is spent, and a client
-// reading a truncated lease list has no way to tell it from a short one. That
-// is also why the encode error is not simply logged: a monitor polling this
-// API would go on reporting healthy while every answer it got was half an
-// object.
+// writeJSON buffers first so that a failed encode can still become a 500:
+// once a byte of the body is on the wire the status line is spent, and a
+// client reading a truncated lease list cannot tell it from a short one.
 func writeJSON(w http.ResponseWriter, status int, encode func(io.Writer) error) {
 	var buf bytes.Buffer
 	if err := encode(&buf); err != nil {
-		// Nothing this package encodes has a field encoding/json can refuse
-		// and a bytes.Buffer never fails a write, so reaching this is a bug
-		// rather than a bad request.
+		// Nothing this package encodes has a field encoding/json can refuse,
+		// so reaching this is a bug rather than a bad request.
 		log.Errorf("BUG: encoding a %d response: %v", status, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return

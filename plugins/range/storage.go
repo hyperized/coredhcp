@@ -25,9 +25,8 @@ import (
 // Callers can tell these apart with errors.Is. Every error this file returns
 // wraps one of them or comes straight from database/sql.
 var (
-	// ErrNotFound reports a write that matched no row. The lease the caller
-	// wanted gone is already gone, which is not a failure, but it is worth
-	// telling apart from a write that actually did something.
+	// ErrNotFound reports a write that matched no row: the lease the caller
+	// wanted gone is already gone, which is not a failure.
 	ErrNotFound = errors.New("range: no such lease in storage")
 
 	// ErrBusy reports sqlite refusing the operation because another writer
@@ -47,9 +46,8 @@ var (
 	ErrWriteQueueFull = errors.New("range: lease write queue is full")
 
 	// ErrWriterStopped reports a change queued after the writer had been
-	// shut down, which nothing will apply. Only a stopped plugin does that,
-	// so in the server it never happens: it is here so a caller waiting for
-	// a write gets an answer instead of waiting forever.
+	// shut down. Only a stopped plugin does that; it exists so a caller
+	// waiting for a write gets an answer instead of waiting forever.
 	ErrWriterStopped = errors.New("range: lease writer has stopped")
 )
 
@@ -67,12 +65,11 @@ const (
 	// produces and costs a few tens of kilobytes.
 	writeQueueLen = 1024
 
-	// writeTimeout bounds how long a client waits for its lease to reach
-	// the disk. The context is made when the change is queued, so it covers
-	// the wait in the queue and every attempt at the statement together. A
-	// write to a local sqlite file takes microseconds; one that takes
-	// seconds is one the client has already retransmitted past, so the
-	// lease is refused rather than waited on any longer.
+	// writeTimeout bounds how long a client waits for its lease to reach the
+	// disk, counted from when the change was queued so that it covers the
+	// wait in the queue too. A write that takes seconds is one the client has
+	// already retransmitted past, so the lease is refused rather than waited
+	// on any longer.
 	writeTimeout = 2 * time.Second
 
 	// loadTimeout bounds the startup read of the lease table. Long enough
@@ -82,10 +79,9 @@ const (
 
 	// busyRetries is how many extra attempts a write gets when sqlite says
 	// the database is locked, and busyBackoff how long the writer waits
-	// between them. A lock another process held for a moment should not
-	// cost a client its lease, and the retries cost nothing extra in the
-	// worst case: they run inside the same writeTimeout the caller is
-	// already waiting out.
+	// between them. A lock another process held for a moment should not cost
+	// a client its lease, and the retries run inside the same writeTimeout
+	// the caller is already waiting out.
 	busyRetries = 3
 	busyBackoff = 20 * time.Millisecond
 )
@@ -185,10 +181,9 @@ func loadRecords(ctx context.Context, db *sql.DB) (map[string]*Record, error) {
 	return records, nil
 }
 
-// leaseWrite is one queued change to the lease database: the statement, its
-// arguments, and enough of the lease to name it in a log line. The
-// description is put together only when a write fails, which is why the MAC
-// and the address travel alongside the arguments instead of as one string.
+// leaseWrite is one queued change to the lease database. The description is
+// put together only when a write fails, which is why the MAC and the address
+// travel alongside the arguments instead of as one string.
 type leaseWrite struct {
 	op    string
 	mac   string
@@ -196,26 +191,21 @@ type leaseWrite struct {
 	query string
 	args  []any
 
-	// ctx bounds the whole change, from the moment it was queued, and
-	// cancel releases it once the writer is done with it. done carries the
-	// result back to the handler waiting on it, and is buffered so the
-	// writer never blocks on a caller that has already given up.
+	// ctx bounds the whole change, from the moment it was queued. done is
+	// buffered so the writer never blocks on a caller that has already given
+	// up.
 	//nolint:containedctx // travels with the queued change to the writer
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan error
 }
 
-// pendingWrite is a queued change from the point of view of whoever made it:
-// the result to wait for, and how to put the in-memory change back when that
-// result is a failure.
+// pendingWrite is a queued change from the point of view of whoever made it.
 //
 // undo is nil for a change that cannot be undone. Removing a lease is the
 // case: the address went back to the pool under the same lock, another
 // client may hold it by the time the delete fails, and handing the record
-// back would then put two clients on one address. The row stays on disk
-// instead, which a restart reads as a lease for its original owner and the
-// sweeper clears once it expires.
+// back would then put two clients on one address.
 type pendingWrite struct {
 	done chan error
 	undo func()
@@ -259,18 +249,13 @@ func (p *pluginState) freeIPAddress(mac string, record *Record) error {
 // enqueue hands one change to the writer goroutine and remembers it as
 // pending, for the caller to wait on once the lock is free.
 //
-// The plugin lock is held here, so this must not block: the whole point of
-// the writer is that the disk is no longer on the far side of that lock. A
-// queue that has filled up is reported instead of waited on, and the caller
-// abandons the change it was about to make, which is what keeps memory and
-// storage from drifting apart under a backlog.
+// The plugin lock is held here, so this must not block: a queue that has
+// filled up is reported instead of waited on, and the caller abandons the
+// change it was about to make, which is what keeps memory and storage from
+// drifting apart under a backlog.
 //
-// A state with no writer running applies the write inline and reports the
-// result at once, so there is nothing pending to wait for. That is the zero
-// value a test builds by hand, never a plugin that setup produced. It draws
-// the same conclusion from a change that matched nothing as the writer does:
-// the row is already in the state the caller wanted, so there is nothing to
-// report.
+// A state with no writer running applies the write inline. That is the zero
+// value a test builds by hand, never a plugin that setup produced.
 func (p *pluginState) enqueue(w leaseWrite, undo func()) error {
 	w.ctx, w.cancel = context.WithTimeout(p.storeContext(), writeTimeout)
 	w.done = make(chan error, 1)
@@ -293,12 +278,9 @@ func (p *pluginState) enqueue(w leaseWrite, undo func()) error {
 }
 
 // takePending hands the caller the changes queued since the lock was taken
-// and clears the list.
-//
-// One caller at a time: every enqueue happens with the plugin lock held, so
-// the only changes on the list are the ones this caller just made. The
-// caller has to take them before it releases the lock, which is what
-// withLock does for every path that has one.
+// and clears the list. Every enqueue happens with the plugin lock held, so
+// the list only holds the changes this caller just made, and it has to take
+// them before it releases the lock.
 func (p *pluginState) takePending() []pendingWrite {
 	if len(p.pending) == 0 {
 		return nil
@@ -312,14 +294,11 @@ func (p *pluginState) takePending() []pendingWrite {
 // the order they were queued. A change that failed has its in-memory effect
 // undone, under the lock, before this returns.
 //
-// The invariant this exists for: nothing a client is told outlives the write
-// behind it. The handler makes its change in memory under the lock, queues
-// the write, drops the lock, and only answers once the row is on disk. A
-// crash between the two would otherwise leave a client holding an address
-// the next start reads as free, and hands to somebody else.
+// The invariant it exists for: nothing a client is told outlives the write
+// behind it. A crash between the two would leave a client holding an address
+// the next start reads as free and hands to somebody else.
 //
-// The caller must not hold the lock: waiting is the whole point, and an undo
-// takes the lock again.
+// The caller must not hold the lock, because an undo takes it again.
 func (p *pluginState) settleAll(pending []pendingWrite) []error {
 	if len(pending) == 0 {
 		return nil
@@ -355,11 +334,10 @@ func (p *pluginState) settle(pending []pendingWrite) error {
 	return nil
 }
 
-// waitFor blocks for one change's result. A writer that exits without
-// applying it, which only a stopped plugin does, comes back as a failure
-// rather than as a caller that never returns. The result is preferred over
-// the writer having gone, because the drain fills every result it has
-// before it closes writerDone.
+// waitFor blocks for one change's result, or reports ErrWriterStopped if the
+// writer exited without applying it. The result is preferred over the writer
+// having gone, because the drain fills every result it has before it closes
+// writerDone.
 func waitFor(done <-chan error, writerDone <-chan struct{}) error {
 	select {
 	case err := <-done:
@@ -393,10 +371,8 @@ func (p *pluginState) applyWrite(w leaseWrite) error {
 	return nil
 }
 
-// storeContext returns the context storage calls run under. It is the
-// plugin's own and not a request's: the writer outlives the packet that
-// queued a change, and a handler may not hold on to the context it was
-// called with. A zero-valued pluginState, which the tests build, has none.
+// storeContext returns the context storage calls run under. A zero-valued
+// pluginState, which the tests build, has none.
 func (p *pluginState) storeContext() context.Context {
 	if p.dbCtx == nil {
 		return context.Background()
@@ -408,15 +384,9 @@ func (p *pluginState) storeContext() context.Context {
 // database.
 //
 // The invariant it exists for: a change is queued while the plugin lock is
-// held, at the moment the in-memory state changes, and the queue is applied
-// in that same order by this one goroutine. Storage therefore replays the
-// sequence the map went through, and the delete of an address can never land
-// after the insert that hands the same address to the next client.
-//
-// The handler then waits for its own change here, with the lock released, so
-// the reply still stands on a write that finished. What the writer buys is
-// not a shorter wait for that one client, it is that every other client, the
-// sweeper and the lease API are no longer queued behind the disk.
+// held, at the moment the in-memory state changes, and this one goroutine
+// applies the queue in that same order, so the delete of an address can
+// never land after the insert that hands it to the next client.
 //
 // It must run before the plugin is handed anything to serve: it is what
 // installs the queue, and until then writes go to the disk inline.
@@ -451,13 +421,10 @@ func (p *pluginState) drainWrites() {
 	}
 }
 
-// write applies one queued change and reports the result to whoever is
-// waiting for it, retrying while sqlite says the database is locked and the
-// change still has time left on it.
-//
-// A change that matched no row is reported as a success: the row is already
-// in the state the caller wanted. Everything else is the caller's to log and
-// to undo, which is why nothing is logged here.
+// write applies one queued change, retrying while sqlite says the database
+// is locked and the change still has time left on it. A change that matched
+// no row is reported as a success. Everything else is the caller's to log
+// and to undo, which is why nothing is logged here.
 func (p *pluginState) write(w leaseWrite) {
 	defer w.cancel()
 
@@ -480,10 +447,9 @@ func (p *pluginState) write(w leaseWrite) {
 // storage context so nothing reaches the database afterwards.
 //
 // Nothing in the server calls this: plugins are never stopped, so the writer
-// lives as long as the process. It exists so a test does not leave a
-// goroutine behind, and so the queue is on disk before the test asserts on
-// it. A change queued after this point is dropped rather than written, which
-// is why it belongs after the traffic has stopped.
+// lives as long as the process. A change queued after this point is dropped
+// rather than written, which is why it belongs after the traffic has
+// stopped.
 func (p *pluginState) stopWriter() {
 	close(p.stopWrites)
 	<-p.writerDone

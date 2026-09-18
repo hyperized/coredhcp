@@ -24,9 +24,6 @@ func tempSocket(t *testing.T) string {
 }
 
 func TestParseRefusesARoutableAddress(t *testing.T) {
-	// The whole point of the package: a plugin serving something
-	// unauthenticated may not be talked into binding an address the rest of
-	// the network can reach, whichever plugin asks.
 	for _, tc := range []struct {
 		name string
 		args []string

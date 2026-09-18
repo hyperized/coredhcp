@@ -53,10 +53,8 @@
 //     records again. It defaults to on.
 //   - protect:<name>[,<name>...] names hosts this plugin will never write,
 //     in either direction. A bare label is taken as a name under the zone; a
-//     fully qualified one has to sit under it. Use it for the names that
-//     have to keep meaning what they mean, such as gateway, vpn or ns: a
-//     record an operator wrote by hand carries no DHCID, and the next
-//     section is about what happens to names that carry no DHCID.
+//     fully qualified one has to sit under it. Use it for names that have to
+//     keep meaning what they mean, such as gateway, vpn or ns.
 //
 // # Behaviour
 //
@@ -81,27 +79,11 @@
 //
 // # Who holds a name
 //
-// Host names come out of DHCP packets, and whoever is on the segment can put
-// any name in one. Checking that a name is well formed says nothing about
-// whose it is: a laptop that calls itself vpn would take vpn.<zone> away from
-// whatever was there. What stops that is the DHCID record of RFC 4701 and the
-// conflict resolution of RFC 4703.
-//
-// A DHCID holds a name against one client. It is SHA-256 taken over an
-// identifier for the client followed by the name itself, and the identifier
-// is the client identifier of option 61 where a DHCPv4 client sends one, the
-// hardware type and address where it does not, and the DUID over DHCPv6 or
-// from inside an RFC 4361 option 61. The same client asking for the same
-// name produces the same DHCID, and nothing else does.
-//
-// The message that claims a name carries the prerequisite that no DHCID is
-// there yet. A server that answers YXRRSET is saying something already holds
-// the name, and a second message goes out carrying the prerequisite that
-// what holds it is this client's own DHCID. That one succeeds for the client
-// the name belongs to and fails for every other, and a name that fails both
-// is left exactly as it was, with a line in the log. The prerequisites are
-// weighed by the name server inside the same transaction as the changes, so
-// two clients racing for one name cannot both be told it is free.
+// Every name this plugin writes carries a DHCID record (RFC 4701) that
+// identifies the client it was written for, and every update is sent under
+// the prerequisites of RFC 4703 section 5.3, so a laptop calling itself vpn
+// is refused by the name server instead of taking vpn.<zone> from whatever
+// was there.
 //
 // A name that carries no DHCID is held by nobody, and the first client to
 // ask for it gets it. That covers records an operator wrote by hand and
@@ -109,34 +91,26 @@
 // is worth knowing when upgrading. protect: is how a name is kept out of
 // reach of that.
 //
+// A DHCID is not a secret either: it is a digest of a hardware address or a
+// DUID, both of which travel in the clear, so anyone watching the segment
+// can put another client's identity in a packet. What this rules out is a
+// client taking a name under its own identity; a forged one is a link-layer
+// problem, for port security or DHCP snooping.
+//
 // # Releases
 //
-// A DHCPRELEASE is not authenticated and is never answered, so the name, the
-// address and the identity in one are whatever the sender chose to put
-// there. Two things have to agree before any of it is acted on. This
-// instance keeps a register in memory of the names it wrote, for which
-// client and at which addresses, and a release that does not match it is
-// dropped on the packet path with nothing sent. What gets past that is sent
-// as a delete under the prerequisite that the DHCID at the name is still the
-// releasing client's.
+// A DHCPRELEASE is not authenticated and is never answered. This instance
+// keeps a register in memory of the names it wrote, for which client and at
+// which addresses, and a release that does not match it is dropped on the
+// packet path with nothing sent. What gets past that is sent as a delete
+// under the prerequisite that the DHCID at the name is still the releasing
+// client's.
 //
 // The register does not survive a restart, and it is bounded, so it forgets
 // the oldest names once it is full. A release naming a name it has forgotten
-// is ignored until the client renews and the name is written again, which
-// leaves a record standing for at most one lease time. That is the
-// deliberate direction to fail in: a record that lingers costs less than a
-// name anyone can delete by asking.
-//
-// # What none of this stops
-//
-// A DHCID is not a secret. It is a digest of a hardware address or a DUID,
-// and both of those travel in the clear on the segment, so anyone who can
-// watch the segment can compute another client's DHCID and put that
-// client's identity in a packet. What the checks above rule out is a client
-// taking or deleting a name under its own identity, which is the accident
-// and the casual case. They cannot tell a forged identity from the real
-// one, because at the DHCP layer nothing can: the answer to that is at the
-// link layer, with port security or DHCP snooping.
+// is ignored until the client renews, which leaves a record standing for at
+// most one lease time. That is the deliberate direction to fail in: a record
+// that lingers costs less than a name anyone can delete by asking.
 //
 // # Placement
 //
@@ -300,11 +274,10 @@ type pluginState struct {
 	done     chan struct{}
 	stopOnce sync.Once
 
-	// ctx is this instance's lifetime rather than one update's. It is
-	// cancelled when the worker stops, which lets a dial or a retry already
-	// in flight give up instead of running its own timeout out first. There
-	// is no call to hang it off: the plugin API hands a handler no context of
-	// the instance's lifetime, only one per request.
+	// ctx is this instance's lifetime rather than one update's, because the
+	// plugin API hands a handler no context of the instance's lifetime, only
+	// one per request. Cancelling it lets a dial or a retry in flight give up
+	// instead of running its own timeout out first.
 	//nolint:containedctx // scoped to the instance, not to a request
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -604,12 +577,9 @@ func applyQueue(s *settings, raw string) error {
 	return nil
 }
 
-// applyProtect adds names this plugin will never write.
-//
-// The names are checked against the zone in finish, once it is known, so
-// that a label is only accepted if it really lands under the zone. Here
-// they are only split and emptiness-checked: a stray comma is a typo worth
-// refusing rather than a name worth guessing at.
+// applyProtect adds names this plugin will never write. They are checked
+// against the zone in finish, once it is known; here a stray comma is a typo
+// worth refusing rather than a name worth guessing at.
 func applyProtect(s *settings, raw string) error {
 	for name := range strings.SplitSeq(raw, ",") {
 		name = strings.TrimSpace(name)
@@ -696,12 +666,8 @@ func (p *pluginState) claim(name string, addrs []netip.Addr, id identity) {
 // withdraw queues the removal of a lease's records, and only for the client
 // this instance wrote them for.
 //
-// Nothing in a DHCPRELEASE is authenticated: the name, the address and the
-// identity in it are whatever the sender put there. So the register decides,
-// not the packet. A release naming a name this instance did not write, or
-// writing it for a different client, or at a different address, is dropped
-// here and never reaches the name server. See the owners type for what a
-// restart does to that.
+// Nothing in a DHCPRELEASE is authenticated, so the register decides and not
+// the packet. See the owners type for what a restart does to that.
 func (p *pluginState) withdraw(name string, addrs []netip.Addr, id identity) {
 	dhcid, err := id.record(name)
 	if err != nil {
@@ -728,9 +694,8 @@ func (p *pluginState) nameFor4(req *dhcpv4.DHCPv4) (string, bool) {
 // hostFor turns a name a client sent into the name to write, or says in the
 // debug log why nothing will be written.
 //
-// This is where protect: is enforced, and it is the one funnel both families
-// and both directions go through, so a protected name is out of reach of a
-// lease and of a release alike.
+// protect: is enforced here because both families and both directions funnel
+// through it.
 func (p *pluginState) hostFor(raw string) (string, bool) {
 	name, err := hostFQDN(raw, p.zone)
 	if err != nil {

@@ -98,12 +98,10 @@ func (l *listener4) requestContext(oob *ipv4.ControlMessage, src *net.UDPAddr) c
 // relayDropped reports whether this request came through a relay while
 // nothing in the chain vets relays, and counts the drop when it did.
 //
-// A DHCPv4 reply goes to giaddr, and giaddr is picked by whoever sent the
-// packet, so with no allow list any host that can reach the server makes it
-// send a full reply to any address it names. The relay plugin is what holds
-// that list; without it in the chain the server answers no relay at all.
-// Configured deployments are unaffected: with relay loaded this check is
-// off and the plugin decides, allow list and all.
+// A DHCPv4 reply goes to giaddr and the sender picks giaddr, so with no
+// allow list any host that can reach the server makes it reply to any
+// address it names. The relay plugin holds that list; without it in the
+// chain the server answers no relay at all.
 func (l *listener4) relayDropped(req *dhcpv4.DHCPv4) bool {
 	if l.relayChecked || !isRelayed4(req) {
 		return false
@@ -112,10 +110,9 @@ func (l *listener4) relayDropped(req *dhcpv4.DHCPv4) bool {
 	return true
 }
 
-// relayDropped is the DHCPv6 half. There is no giaddr here: a relay wraps
-// the client's message in a Relay-forward and the reply goes back to the
-// datagram's source, so the message being relayed at all is what this
-// refuses when no plugin is there to say which relays are legitimate.
+// relayDropped is the DHCPv6 half. There is no giaddr: a relay wraps the
+// client's message in a Relay-forward, so being relayed at all is what this
+// refuses while no plugin says which relays are legitimate.
 func (l *listener6) relayDropped(req dhcpv6.DHCPv6) bool {
 	if l.relayChecked || !req.IsRelay() {
 		return false
@@ -310,16 +307,10 @@ const MaxDatagram = 1 << 16
 // XXX: investigate using RecvMsgs to batch messages and reduce syscalls
 
 // serve is the shared read loop: hand each datagram to handle on its own
-// goroutine until the connection closes.
-//
-// The gate bounds how many of those goroutines exist at once, so a flood of
-// datagrams cannot become a flood of goroutines. A datagram it turns away is
-// dropped here, buffer and all, and counted.
+// goroutine, bounded by the gate, until the connection closes.
 func serve[M any](localAddr net.Addr, g *gate, readFrom func([]byte) (int, M, net.Addr, error), handle func([]byte, M, *net.UDPAddr)) error {
 	log.Printf("Listen %s", localAddr)
 	for {
-		// bufpool's New and every Put in this package store a *[]byte and
-		// nothing else.
 		b := *bufpool.Get().(*[]byte) //nolint:forcetypeassert // bufpool only ever holds *[]byte
 		b = b[:MaxDatagram]           // Reslice to max capacity in case the buffer in pool was resliced smaller
 
@@ -334,11 +325,9 @@ func serve[M any](localAddr net.Addr, g *gate, readFrom func([]byte) (int, M, ne
 		datagram := b[:n]
 		src, ok := peer.(*net.UDPAddr)
 		if !ok {
-			// readFrom is injected, so the address it reports is whatever
-			// the socket underneath it hands back. A UDP socket always says
-			// *net.UDPAddr; anything else has no port to answer on, so it is
-			// dropped like any other datagram this loop cannot use rather
-			// than taking the read loop down with a failed assertion.
+			// readFrom is injected, so the peer is whatever the socket
+			// underneath it reports. Anything without a port to answer on is
+			// dropped rather than taking the read loop down with it.
 			log.Printf("Received datagram from a peer that is not a *net.UDPAddr (%T), dropping", peer)
 			bufpool.Put(&b)
 			continue
@@ -350,13 +339,12 @@ func serve[M any](localAddr net.Addr, g *gate, readFrom func([]byte) (int, M, ne
 	}
 }
 
-// gateFor is the listener's gate, or a fresh one with the defaults when it
-// came without. Only a listener built outside Start has none, and the bound
-// on handler goroutines has to hold for that one too.
+// gateFor is the listener's gate, or a fresh default one for a listener
+// built outside Start, which has none.
 //
-// The gate it hands back stays local to the read loop and is not written
-// back onto the listener: the handler goroutines read that field while they
-// run, so writing it here would be a race.
+// It is deliberately not written back onto the listener: the handler
+// goroutines read that field while they run, so assigning it here would be
+// a race.
 func gateFor(g *gate) *gate {
 	if g == nil {
 		return newGate(0)

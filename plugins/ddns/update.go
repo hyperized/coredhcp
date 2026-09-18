@@ -27,14 +27,12 @@ const (
 )
 
 // change is one record of a prerequisite or an update section. Both are
-// written the same way, and the class is what says which meaning applies.
-//
-// In the update section, IN adds the record; ANY with no RDATA and a TTL of
-// zero deletes every record of that type at that name, the "Delete an RRset"
-// form of RFC 2136 section 2.5.2; NONE with RDATA deletes that one record,
-// section 2.5.4. In the prerequisite section, NONE with no RDATA requires
-// that the RRset is absent, section 2.4.3, and IN with RDATA requires that
-// it is exactly what is given, section 2.4.2.
+// written the same way and the class says which meaning applies: in an
+// update, IN adds, ANY with no RDATA and a TTL of zero deletes the whole
+// RRset (RFC 2136 section 2.5.2) and NONE with RDATA deletes that one record
+// (2.5.4); in a prerequisite, NONE with no RDATA requires the RRset to be
+// absent (2.4.3) and IN with RDATA requires it to be exactly what is given
+// (2.4.2).
 type change struct {
 	name  string
 	rtype dnsmessage.Type
@@ -48,8 +46,7 @@ func deleteRRset(name string, rtype dnsmessage.Type) change {
 	return change{name: name, rtype: rtype, class: dnsmessage.ClassANY}
 }
 
-// deleteRecord returns the change that removes one record from an RRset,
-// leaving anything else of that type at the name standing.
+// deleteRecord returns the change that removes one record from an RRset.
 func deleteRecord(name string, rtype dnsmessage.Type, data []byte) change {
 	return change{name: name, rtype: rtype, class: classNone, data: data}
 }
@@ -66,21 +63,16 @@ func noRRset(name string, rtype dnsmessage.Type) change {
 
 // rrsetEquals returns the prerequisite that the RRset of rtype at name is
 // exactly the one record data holds. The name server does the comparing, so
-// a name held by another client fails here, at the server, rather than being
-// read and then overwritten in a second message that races the first.
+// a name held by another client fails there rather than in a read that a
+// second message then races.
 func rrsetEquals(name string, rtype dnsmessage.Type, data []byte) change {
 	return change{name: name, rtype: rtype, class: dnsmessage.ClassINET, data: data}
 }
 
 // freshPrereqs is what a first claim on a name asks for: that no DHCID is
-// there yet.
-//
-// A name with no DHCID is either one nobody has claimed or one an operator
-// wrote by hand, and RFC 4703 section 5.3.1 has the server take it. That is
-// worth knowing about when upgrading: records this plugin wrote before it
-// started sending DHCIDs are unclaimed, and the first client to ask for one
-// of those names gets it. The protect: argument is how a name is kept out of
-// reach of that.
+// there yet. A name with no DHCID is unclaimed and RFC 4703 section 5.3.1
+// has the server hand it over, which covers records an operator wrote by
+// hand; protect: is how one is kept out of reach of that.
 func freshPrereqs(j job) []change {
 	return []change{noRRset(j.name, typeDHCID)}
 }
@@ -100,16 +92,13 @@ func addressType(addr netip.Addr) dnsmessage.Type {
 	return dnsmessage.TypeAAAA
 }
 
-// forwardChanges returns the update section that claims a name: drop
-// whatever addresses are there today, put the lease there, and write the
-// DHCID that says whose name it now is.
+// forwardChanges returns the update section that claims a name.
 //
 // The delete comes first and covers the whole RRset rather than one record,
 // because a client that moved to a new address would otherwise end up with
 // both, and a resolver would hand out the stale one half the time. RFC 2136
 // applies the update section in order and as one transaction, so all of it
-// travels in a single message and no resolver ever sees the name without an
-// address.
+// travels in a single message.
 func forwardChanges(j job, ttl uint32) []change {
 	rtype := addressType(j.addrs[0])
 	changes := make([]change, 0, len(j.addrs)+2)
@@ -121,9 +110,9 @@ func forwardChanges(j job, ttl uint32) []change {
 }
 
 // withdrawChanges returns the update section that takes a name back out of
-// the zone: the addresses, and the DHCID that held it.
+// the zone.
 //
-// The DHCID goes as a single-record delete rather than an RRset delete. The
+// The DHCID goes as a single-record delete rather than an RRset delete: the
 // prerequisite has already held the server to our own record, and deleting
 // exactly that one leaves anything else at the name alone.
 func withdrawChanges(j job) []change {
@@ -208,8 +197,7 @@ func (u *updateBuilder) zone(zone string) error {
 	})
 }
 
-// record writes one record into whichever section is open, which is how the
-// same shape serves a prerequisite and a change.
+// record writes one record into whichever section is open.
 //
 // Every record goes on the wire as an opaque resource. dnsmessage has typed
 // bodies for A, AAAA and PTR, but none of them can hold the empty RDATA an

@@ -212,9 +212,8 @@ type subnet struct {
 	handler6 handler.Handler6
 
 	// delegate is the instance behind that handler, as the leases registry
-	// knows it, for Close to shut down again. It is nil for a subnet that
-	// allocates nothing, and for a delegate whose plugin offers no way to
-	// stop it.
+	// knows it. Nil for a subnet that allocates nothing, and for a delegate
+	// whose plugin offers no way to stop it.
 	delegate leases.Source
 }
 
@@ -288,12 +287,10 @@ func newSelector(v4 bool, args []string) (*selector, error) {
 // Close shuts down the delegates this selector built and takes them out of
 // the leases registry.
 //
-// A pool plugin hands back a handler and registers the instance behind it,
-// so the subnet that asked for one owns its lifetime. Nothing in the server
-// calls this, because plugins are set up once and live as long as the
-// process; it is here for a program that embeds the plugin, and for tests,
-// which would otherwise leave a sweeper and a writer running over a lease
-// file they are about to delete.
+// Nothing in the server calls it: plugins are set up once and live as long
+// as the process. It is here for an embedding program, and for tests, which
+// would otherwise leave a sweeper and a writer running over a lease file
+// they are about to delete.
 func (s *selector) Close() {
 	for _, sub := range s.subnets {
 		if sub.delegate == nil {
@@ -308,10 +305,10 @@ func (s *selector) Close() {
 }
 
 // registeredDelegate returns the instance a pool plugin registered under
-// name a moment ago, or nil when it registered none.
+// name, or nil when it registered none.
 //
-// Newest first: two subnets can share a lease file, and it is this subnet's
-// delegate we are after.
+// Newest first, because two subnets can share a lease file and it is this
+// subnet's delegate we are after.
 func registeredDelegate(name string) leases.Source {
 	sources := leases.Sources()
 	for _, source := range slices.Backward(sources) {

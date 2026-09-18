@@ -17,7 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testPlugin stands in for the plugin name every error is prefixed with.
 const testPlugin = "someplugin"
 
 // socketPath returns a path for a unix socket in a directory of its own.
@@ -264,8 +263,7 @@ func TestListenUnixFailures(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot set mode 0660")
 
-		// The listener is closed rather than left serving on a socket with
-		// permissions nobody asked for, so the path is free again.
+		// The failed Listen closed its listener, so the path is free again.
 		ln, err := net.Listen("unix", path)
 		require.NoError(t, err)
 		require.NoError(t, ln.Close())

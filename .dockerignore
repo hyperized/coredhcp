@@ -1,10 +1,7 @@
-# The build stage does `COPY . .`, so anything left here is uploaded to the
-# builder and lands in a layer. Only what `go build ./cmd/coredhcp` reads has
-# to stay: go.mod, go.sum and the Go packages under cmd/, config/, events/,
-# handler/, leases/, logger/, plugins/ and server/. No package uses go:embed,
-# so nothing that is not a .go file is needed at build time.
+# The build stage does `COPY . .`, so whatever is left here lands in a
+# builder layer. No package uses go:embed, so nothing but go.mod, go.sum and
+# the Go packages is needed to build.
 
-# Version control and editor state.
 .git
 .gitignore
 .github
@@ -13,25 +10,23 @@
 .claude
 .golangci.yml
 
-# Build output and coverage from a local `make`. Copying a host-built binary
-# in would also bust the layer cache on every run.
+# A host-built binary copied in would bust the layer cache on every run.
 bin/
 coverage.out
 coverage.txt
 server6
 
-# Tests never run in the image; the compose and netns harnesses under test/
-# pull in configs and scripts the server itself does not read.
+# The harnesses under test/ pull in configs and scripts the server never
+# reads.
 test/
 
-# Docs and the screenshot the README embeds.
 **/*.md
 tui.png
 LICENSE
 
-# Local runtime state. A config or a lease database baked into the image would
-# shadow whatever is mounted at /etc/coredhcp and /var/lib/coredhcp, and a
-# leaked lease file is customer data.
+# A config or lease database baked into the image would shadow what is
+# mounted at /etc/coredhcp and /var/lib/coredhcp, and a leaked lease file is
+# customer data.
 .env
 .env.*
 **/config.yml

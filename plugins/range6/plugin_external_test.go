@@ -78,14 +78,9 @@ func setupPoolAt(t *testing.T, db, last string, opts ...string) handler.Handler6
 	return h
 }
 
-// closeAfter shuts down the instance setup just registered, at the end of the
-// test.
-//
-// Setup leaves a sweeper and a writer running and nothing in the public API
-// returns the instance, so a test reaches it the way any consumer does,
-// through the leases registry. Without this the writer is still touching the
-// lease file when the framework removes the temp directory around it, which
-// fails the test over a directory that would not empty.
+// closeAfter reaches the instance through the leases registry, since Setup6
+// does not hand it back directly; skipping this leaves the writer still
+// touching the lease file when the temp dir is removed, failing the test.
 func closeAfter(t *testing.T, name string) {
 	t.Helper()
 	sources := leases.Sources()
@@ -268,7 +263,6 @@ func TestSetupAcceptsOptionsInAnyOrder(t *testing.T) {
 	}
 }
 
-// optionNames names a subtest after the arguments it passes.
 func optionNames(args []string) string {
 	if len(args) == 0 {
 		return "no options"
@@ -763,18 +757,13 @@ func TestSetupRestoresAStoredBinding(t *testing.T) {
 	assert.Equal(t, "2001:db8:1::110", solicit(t, h, duid, iaid1).String())
 }
 
-// TestSetupWarnsWhenPoolExceedsMaxLeases drives setup6's over-sized-pool
-// warning: a pool wider than max-leases still has to set up successfully, it
-// simply never hands out more bindings than the bound allows.
 func TestSetupWarnsWhenPoolExceedsMaxLeases(t *testing.T) {
 	h := setupPool(t, poolLast, "max-leases:4")
 	assert.NotNil(t, h)
 }
 
-// TestMaxLeasesBoundsNewClientsButKeepsRenewing is the regression test for the
-// audit finding that max-leases did nothing: once the bound is reached a
-// fresh DUID gets NoAddrsAvail, while a DUID that already holds a binding
-// keeps renewing it.
+// TestMaxLeasesBoundsNewClientsButKeepsRenewing is the regression test for
+// the audit finding that max-leases did nothing.
 func TestMaxLeasesBoundsNewClientsButKeepsRenewing(t *testing.T) {
 	h := setupPool(t, poolLast, "max-leases:2")
 

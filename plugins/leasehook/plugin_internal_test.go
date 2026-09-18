@@ -669,10 +669,8 @@ func TestTimeNowFallsBackToTheWallClock(t *testing.T) {
 	assert.WithinDuration(t, time.Now(), (&pluginState{}).timeNow(), time.Minute)
 }
 
-// TestWorker runs inside a synctest bubble: the worker goroutine, the queue
-// and fakeTarget's buffered channel are all fake-clock, real-I/O-free
-// participants, so synctest.Wait can stand in for the timeout a real clock
-// would otherwise need.
+// TestWorker runs in a synctest bubble, so synctest.Wait stands in for the
+// timeout a real clock would otherwise need.
 func TestWorker(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		p := newTestPlugin(t, "exec:/bin/true")
@@ -688,9 +686,8 @@ func TestWorker(t *testing.T) {
 		assert.Same(t, resp, got)
 		assert.False(t, stop, "the plugin never ends the chain")
 
-		// Every goroutine in the bubble is durably blocked once the worker
-		// has delivered the event and gone back to waiting on the queue, so
-		// the channel already holds it by the time Wait returns.
+		// The worker is back to waiting on the queue by the time Wait returns,
+		// so the channel already holds the event.
 		synctest.Wait()
 		d := <-fake.delivered
 		assert.Equal(t, eventAck, d.ev.Event)
@@ -846,9 +843,6 @@ func TestWebhookDeliver(t *testing.T) {
 	})
 }
 
-// TestWebhookDeliverRefusesRedirects proves a redirect is reported as a
-// failure rather than followed: the second server, standing in for wherever
-// the redirect points, must never see a request at all.
 func TestWebhookDeliverRefusesRedirects(t *testing.T) {
 	var hits atomic.Int32
 	moved := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -869,11 +863,8 @@ func TestWebhookDeliverRefusesRedirects(t *testing.T) {
 	assert.Equal(t, int32(0), hits.Load(), "the endpoint the redirect pointed at must never be reached")
 }
 
-// helperCommand builds a command pointing at the re-executed test binary,
-// steered into the given helper mode. mode and out reach the child through
-// extraEnv rather than the process environment: childEnv no longer copies
-// that wholesale, so setting them with t.Setenv, as before the allow list
-// existed, would no longer reach the child at all.
+// helperCommand passes mode and out via extraEnv because childEnv does not
+// copy the parent environment, so t.Setenv would never reach the child.
 func helperCommand(t *testing.T, mode, out string) *command {
 	t.Helper()
 	self, err := os.Executable()
@@ -928,10 +919,6 @@ func TestCommandDeliver(t *testing.T) {
 	})
 }
 
-// TestCommandDeliverDropsSecretsFromTheParentEnvironment proves the exec
-// target no longer hands a hook program the whole server environment. The
-// probe variable is set the same way a real secret would be, with
-// t.Setenv, and helperMain reports back whether it ever saw it.
 func TestCommandDeliverDropsSecretsFromTheParentEnvironment(t *testing.T) {
 	t.Setenv(probeEnv, "hunter2")
 
@@ -965,9 +952,8 @@ func TestChildEnv(t *testing.T) {
 
 	t.Run("an allow-listed variable the parent does not have is left out", func(t *testing.T) {
 		if old, had := os.LookupEnv("LANG"); had {
-			// t.Setenv already restores whatever was there before the test,
-			// so piggybacking on it here means the unset below only lasts
-			// for this subtest.
+			// t.Setenv restores the old value afterwards, so the unset below
+			// only lasts for this subtest.
 			t.Setenv("LANG", old)
 		}
 		require.NoError(t, os.Unsetenv("LANG"))

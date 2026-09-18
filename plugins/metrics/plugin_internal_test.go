@@ -69,8 +69,6 @@ func TestSanitizeLabelValue(t *testing.T) {
 	}
 }
 
-// testEndpoint parses an address the way setup does, for the tests that drive
-// obtain and newCollector directly.
 func testEndpoint(t *testing.T, addr string) endpoint.Endpoint {
 	t.Helper()
 	e, err := endpoint.Parse(pluginName, []string{addr}, endpoint.AllowBareTCP())

@@ -5,13 +5,13 @@
 // Package relayinfo hands out addresses by the port a request came in on
 // instead of by the client that sent it.
 //
-// A switch or BNG that relays DHCP stamps every request with the port it
-// arrived on: circuit-id, remote-id or subscriber-id inside the DHCPv4 relay
-// agent information option (option 82, RFC 3046 and RFC 3993), interface-id
-// or remote-id among the DHCPv6 relay options (RFC 8415 section 21.18 and
-// RFC 4649). This plugin maps those values to fixed addresses read from a
-// text file, so a subscriber's address follows the wire they are plugged
-// into and survives the modem being swapped for one with a different MAC.
+// A relay stamps every request with the port it arrived on: circuit-id,
+// remote-id or subscriber-id inside the DHCPv4 relay agent information option
+// (option 82, RFC 3046 and RFC 3993), interface-id or remote-id among the
+// DHCPv6 relay options (RFC 8415 section 21.18 and RFC 4649). This plugin
+// maps those values to fixed addresses read from a text file, so a
+// subscriber's address follows the wire they are plugged into and survives
+// the modem being swapped for one with a different MAC.
 //
 // # Configuration
 //
@@ -29,13 +29,12 @@
 //   - key:<name> is the piece of relay information to match on, required.
 //     server4 accepts circuit-id, remote-id and subscriber-id (option 82
 //     sub-options 1, 2 and 6); server6 accepts interface-id and remote-id
-//     (options 18 and 37). The two lists are separate, and a name from the
-//     other family fails setup.
+//     (options 18 and 37). A name from the other family fails setup.
 //   - allow <addr|cidr>... names the relays whose relay information this
 //     instance will act on, and is required. It is spelled the way the relay
-//     plugin spells it, so the two read alike in a config file. At least one
-//     entry has to be of the family the section serves, since an allow list
-//     that cannot match anything admits nothing.
+//     plugin spells it. At least one entry has to be of the family the
+//     section serves, since an allow list that cannot match anything admits
+//     nothing.
 //   - autorefresh reloads the file whenever it changes on disk. Without it
 //     the file is read once, at startup.
 //
@@ -72,70 +71,47 @@
 //
 // # Behaviour
 //
-// The plugin answers a request whose key is in the file with the address
-// mapped to it. On DHCPv4 it sets yiaddr and the lease time and ends the
-// chain, the way the file plugin does, so plugins that add options belong
-// before it. On DHCPv6 it adds an IA_NA for the IAID the client asked with
-// and lets the chain continue, since option order in the response is up to
-// the plugins that follow.
+// A request whose key is in the file is answered with the address mapped to
+// it. On DHCPv4 the plugin sets yiaddr and the lease time and ends the chain,
+// the way the file plugin does, so plugins that add options belong before it.
+// On DHCPv6 it adds an IA_NA for the IAID the client asked with and lets the
+// chain continue.
 //
 // Anything else is passed on untouched: a request with no relay information,
-// one whose key is not in the file, and one whose key is longer than 255
-// bytes. That bound is what an option 82 sub-option can hold anyway (its
-// length is one byte), and it keeps a relay that stuffs a 64KB interface-id
-// into every packet from turning each request into a large map lookup.
-// DHCPv4 RELEASE, DECLINE and INFORM, and DHCPv6 Release and Decline, are
-// passed on as well. The mapping is static, so there is nothing to reclaim
-// when a client gives an address up, and INFORM asks for options only.
+// one whose key is not in the file, one whose key is longer than 255 bytes,
+// and DHCPv4 RELEASE, DECLINE and INFORM along with DHCPv6 Release and
+// Decline.
 //
 // The enterprise number of a DHCPv6 remote-id is not part of the key, only
-// the identifier bytes after it. A relay fleet uses one enterprise number
-// throughout, and carrying it in the file would make every line quote a
-// vendor code that never varies.
+// the identifier bytes after it.
 //
 // # Trusting the relay
 //
 // Nothing in the protocol authenticates relay information. On a segment where
-// an untrusted device can reach the server directly, every byte of it is
-// under the client's control: a client can send an option 82 of its own
-// making, and a server that believes it hands that client whichever address
-// it asked for.
+// an untrusted device can reach the server directly, a client can send an
+// option 82 of its own making, and a server that believes it hands that
+// client whichever address it asked for.
 //
 // The allow list is what closes that. A request presenting relay information
-// has the source address of its datagram matched against the configured
-// prefixes before the mapping is read, and is dropped when it came from
-// anywhere else. On DHCPv4 that means a request carrying option 82 or a
-// giaddr, on DHCPv6 a Relay-forward. The check is on the UDP source the
-// server saw rather than on anything the packet claims about itself, so the
-// forgery this is here to stop, an on-link client inventing an option 82 of
-// its own, is refused on the one thing it could not fake. A relayed request
-// the server could not attribute at all is dropped too, since the source
-// address is all the check has to go on.
+// (option 82 or a giaddr on DHCPv4, a Relay-forward on DHCPv6) has the source
+// address of its datagram matched against the configured prefixes before the
+// mapping is read, and is dropped when it came from anywhere else. A relayed
+// request the server could not attribute at all is dropped too.
 //
 // A request presenting no relay information is passed to the next plugin
-// untouched, the way it was before the list existed. There is nothing in it
-// for this plugin to map and nothing in it to forge, and dropping it would
-// stop a section serving on-link clients alongside relayed ones from
-// answering the on-link ones at all: their source is the client itself, or
-// 0.0.0.0 for a DHCPv4 client that has no address yet.
+// untouched, so a section serving on-link clients alongside relayed ones
+// keeps answering the on-link ones.
 //
-// That is a filter and not authentication, and it is worth being plain about
-// what it does not buy. A host sharing a segment with a trusted relay can
-// still source packets from the relay's address if nothing on the switch
-// stops it. Port security, DHCP snooping and IP source guard are what hold
-// that ground. RFC 3046 section 2.1 has a relay agent discard a request that
-// already carries an option 82 from a downstream port, and most switches do
-// that by default, but it only helps for requests that pass through the relay
-// at all.
+// That is a filter and not authentication. A host sharing a segment with a
+// trusted relay can still source packets from the relay's address if nothing
+// on the switch stops it; port security, DHCP snooping and IP source guard
+// are what hold that ground.
 //
 // # Placement
 //
 // A dropped request ends the chain, so no later plugin answers it either.
-// Only a request carrying relay information is ever dropped, so a section
-// serving on-link clients alongside relayed ones keeps working with just the
-// relays in the list. Drops are logged at Info with the source address, at
-// most one line per second per reason, so a flood of rejected packets does
-// not become a flood of log lines.
+// Only a request carrying relay information is ever dropped. Drops are logged
+// at Info with the source address, at most one line per second per reason.
 package relayinfo
 
 import (
@@ -165,16 +141,14 @@ const (
 	fileArgPrefix  = "file:"
 	keyArgPrefix   = "key:"
 
-	// allowArg introduces the relay allow list. The relay plugin uses the
-	// same keyword and the same entry syntax.
+	// allowArg is spelled the way the relay plugin spells it, so the two read
+	// alike in a config file.
 	allowArg = "allow"
 
 	// maxKeyLen bounds the key taken off the wire. An option 82 sub-option
-	// cannot exceed this anyway, and a DHCPv6 interface-id that does is not
-	// something an operator writes down in a mapping file.
+	// cannot exceed it, its length being a single byte.
 	maxKeyLen = 255
 
-	// logInterval is how often one drop reason may produce a log line.
 	logInterval = time.Second
 )
 
@@ -182,17 +156,17 @@ var log = logger.GetLogger("plugins/relayinfo")
 
 // Plugin wraps the relayinfo plugin information.
 //
-// Both families use the context-aware setup functions: the source address of
-// the datagram decides whether the relay information in the packet is worth
-// reading at all, and it exists nowhere in the DHCP payload.
+// Both families use the context-aware setup functions because the allow list
+// matches on the datagram's source address, which exists nowhere in the DHCP
+// payload.
 var Plugin = plugins.Plugin{
 	Name:      "relayinfo",
 	Setup6Ctx: setup6,
 	Setup4Ctx: setup4,
 }
 
-// Setup errors that callers and tests can match with errors.Is. Errors that
-// have to quote the offending argument are built with fmt.Errorf instead.
+// Setup errors callers and tests can match with errors.Is. Errors that quote
+// the offending argument are built with fmt.Errorf instead.
 var (
 	errNoFile         = errors.New("need a mapping file, as file:<path>")
 	errNoKey          = errors.New("need a key to match on, as key:<name>")
@@ -202,27 +176,21 @@ var (
 	errZonedEntry     = errors.New("zoned address never matches, the interface is matched separately")
 )
 
-// fsnotifyNewWatcher and watcherAdd are indirections over the two fsnotify
-// calls autorefresh needs. Production code always uses the real
-// implementations assigned here; tests substitute them to simulate the
-// watcher failing to initialize or attach, which real filesystem operations
-// cannot trigger deterministically.
+// fsnotifyNewWatcher and watcherAdd are indirections tests substitute to
+// simulate a watcher that fails to initialize or attach, which no real
+// filesystem operation triggers deterministically.
 var (
 	fsnotifyNewWatcher = fsnotify.NewWatcher
 	watcherAdd         = (*fsnotify.Watcher).Add
 )
 
-// keyFunc4 pulls the configured relay option out of a DHCPv4 request. It
-// returns nil when the request does not carry it, which is distinct from an
-// option that is present and empty.
+// keyFunc4 returns nil when the request does not carry the configured relay
+// option, which is distinct from one that is present and empty.
 type keyFunc4 func(*dhcpv4.DHCPv4) []byte
 
 // keyFunc6 is keyFunc4 for the outermost relay of a DHCPv6 request.
 type keyFunc6 func(*dhcpv6.RelayMessage) []byte
 
-// keys4 and keys6 are the allow-lists behind the key: argument. They differ
-// per family because the two protocols carry different relay options, and a
-// name is only ever looked up in the list for the family being set up.
 var (
 	keys4 = map[string]keyFunc4{
 		"circuit-id":    relaySubOption(dhcpv4.AgentCircuitIDSubOption),
@@ -243,7 +211,6 @@ var (
 	}
 )
 
-// relaySubOption builds the extractor for one option 82 sub-option.
 func relaySubOption(code dhcpv4.OptionCode) keyFunc4 {
 	return func(req *dhcpv4.DHCPv4) []byte {
 		info := req.RelayAgentInfo()
@@ -265,24 +232,20 @@ const (
 )
 
 // dropLimiter holds back repeated drop log lines, one per reason per
-// logInterval. The relay plugin carries the same thing for the same reason.
+// logInterval.
 type dropLimiter struct {
-	// now reads the clock. It is a field so tests can step over the interval
-	// instead of sleeping through it.
+	// now is a field so tests can step over the interval instead of sleeping
+	// through it.
 	now func() time.Time
 
 	mu   sync.Mutex
 	last map[reason]time.Time
 }
 
-// newDropLimiter returns a limiter that permits one line per reason per
-// logInterval, reading the clock through now.
 func newDropLimiter(now func() time.Time) *dropLimiter {
 	return &dropLimiter{now: now, last: make(map[reason]time.Time)}
 }
 
-// allow reports whether a line for r may be logged, and if so records when it
-// was. A reason not seen before is always allowed.
 func (l *dropLimiter) allow(r reason) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -295,14 +258,11 @@ func (l *dropLimiter) allow(r reason) bool {
 }
 
 // pluginState holds the key -> address mapping backing one instance of the
-// plugin, and the lock protecting it against the autorefresh goroutine.
-// setupState creates one instance per call, so the server4 and server6
-// entries of a dual-stack configuration keep their mappings apart.
+// plugin. setupState creates one per call, so the server4 and server6 entries
+// of a dual-stack configuration keep their mappings apart.
 //
-// Exactly one of extract4 and extract6 is set, the one for the family this
-// instance was set up for. That, keyName and allow are fixed at setup time
-// and read without the lock, which only guards recs. The limiter carries a
-// lock of its own.
+// Exactly one of extract4 and extract6 is set. That, keyName and allow are
+// fixed at setup time and read without the lock, which only guards recs.
 type pluginState struct {
 	mu   sync.RWMutex
 	recs map[string]record
@@ -314,15 +274,12 @@ type pluginState struct {
 	limiter  *dropLimiter
 }
 
-// numRecords returns the number of currently loaded mappings.
 func (s *pluginState) numRecords() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.recs)
 }
 
-// logDrop reports a dropped request at Info, at most once per interval per
-// reason.
 func (s *pluginState) logDrop(r reason, format string, args ...any) {
 	if !s.limiter.allow(r) {
 		return
@@ -330,21 +287,16 @@ func (s *pluginState) logDrop(r reason, format string, args ...any) {
 	log.Infof("dropping request (%s): %s", r, fmt.Sprintf(format, args...))
 }
 
-// fromAllowedRelay reports whether the datagram came from one of the relays
-// named in the allow list.
-//
-// It fails closed. A request that arrives without the server's description of
-// it cannot be attributed to anything, and the whole point of the check is
-// that relay information is only believed when it comes from a relay.
+// fromAllowedRelay fails closed: a request that arrives without the server's
+// description of it cannot be attributed to a relay at all.
 func (s *pluginState) fromAllowedRelay(ctx context.Context) bool {
 	info, ok := handler.RequestInfoFrom(ctx)
 	if !ok {
 		s.logDrop(reasonNoRequestInfo, "cannot tell where the request came from")
 		return false
 	}
-	// The server has already stripped the IPv6 zone; unmapping as well means
-	// an IPv4 peer read off a dual-stack socket compares equal to the same
-	// address written in dotted-quad form in the configuration.
+	// Unmapping means an IPv4 peer read off a dual-stack socket compares equal
+	// to the same address written in dotted-quad form in the configuration.
 	peer := info.Peer.Addr().Unmap()
 	if !slices.ContainsFunc(s.allow, func(p netip.Prefix) bool { return p.Contains(peer) }) {
 		s.logDrop(reasonPeerNotAllowed, "source %s", peer)
@@ -353,10 +305,8 @@ func (s *pluginState) fromAllowedRelay(ctx context.Context) bool {
 	return true
 }
 
-// match looks up a key taken off the wire. It rejects a missing or oversized
-// key before the map is touched, and logs the reason a request is passed on,
-// since from the outside every one of these looks the same: the plugin did
-// nothing.
+// match logs every reason it passes a request on, since from the outside they
+// all look the same: the plugin did nothing.
 func (s *pluginState) match(key []byte) (record, bool) {
 	switch {
 	case key == nil:
@@ -377,10 +327,9 @@ func (s *pluginState) match(key []byte) (record, bool) {
 	return rec, ok
 }
 
-// passthrough4 reports whether a DHCPv4 message has to be left alone. INFORM
-// asks for options only, and a static mapping has nothing to reclaim when a
-// client releases or declines an address. The server sends no reply to the
-// last two at all.
+// passthrough4 leaves a message alone when INFORM asks for options only, or
+// when a client releases or declines an address a static mapping never had to
+// reclaim.
 func passthrough4(mt dhcpv4.MessageType) bool {
 	return mt == dhcpv4.MessageTypeInform ||
 		mt == dhcpv4.MessageTypeRelease ||
@@ -388,16 +337,13 @@ func passthrough4(mt dhcpv4.MessageType) bool {
 }
 
 // relayed4 reports whether a DHCPv4 request presents relay information, by
-// carrying an option 82 or by naming a relay in giaddr. Only those are
-// matched against the allow list; a request with neither has nothing this
-// plugin could map and nothing a client could have forged into it.
+// carrying an option 82 or by naming a relay in giaddr.
 func relayed4(req *dhcpv4.DHCPv4) bool {
 	return req.RelayAgentInfo() != nil || giaddrSet(req.GatewayIPAddr)
 }
 
 // giaddrSet reports whether giaddr names a relay. An unset field reaches us
-// as nil, as four zero bytes, or as 0.0.0.0 in 16-byte form, and all three
-// mean the same thing.
+// as nil, as four zero bytes, or as 0.0.0.0 in 16-byte form.
 func giaddrSet(ip net.IP) bool {
 	addr, ok := netip.AddrFromSlice(ip)
 	return ok && !addr.Unmap().IsUnspecified()
@@ -429,12 +375,9 @@ func (s *pluginState) Handler4(ctx context.Context, req, resp *dhcpv4.DHCPv4) (*
 
 // Handler6 handles DHCPv6 packets for the relayinfo plugin.
 func (s *pluginState) Handler6(ctx context.Context, req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
-	// The plugin reads its key out of the outermost relay, the one closest
-	// to the server. With relays chained, that is the aggregation device
-	// rather than the access switch the client is plugged into, and its
-	// options are the ones the operator provisions against. A message that
-	// came straight from a client carries no relay option at all, so there
-	// is nothing here to match against the allow list and nothing to map.
+	// The key comes out of the outermost relay, the one closest to the server:
+	// with relays chained that is the aggregation device, and its options are
+	// the ones the operator provisions against.
 	relay, isRelay := req.(*dhcpv6.RelayMessage)
 	if !isRelay {
 		log.Debug("request did not come through a relay, passing")
@@ -496,25 +439,21 @@ func setup6(args ...string) (handler.Handler6Ctx, error) {
 	return s.Handler6, nil
 }
 
-// pluginArgs is the parsed argument list.
 type pluginArgs struct {
 	filename string
 	key      string
 	refresh  bool
 
-	// allow4 and allow6 are the allow list split by family, since a handler
-	// only ever matches against the one it serves. sawAllow records that the
-	// keyword itself was given, which is what turns a bare argument from a
-	// typo into an address.
-	allow4   []netip.Prefix
-	allow6   []netip.Prefix
+	allow4 []netip.Prefix
+	allow6 []netip.Prefix
+
+	// sawAllow records that the keyword itself was given, which is what turns
+	// a bare argument from a typo into an allow list entry.
 	sawAllow bool
 }
 
-// parseArgs picks the file, the key, the allow list and the autorefresh flag
-// out of the argument list. An argument that is none of those is an error
-// naming it, so that a typo fails the server at startup instead of quietly
-// disabling autorefresh.
+// parseArgs makes an unrecognised argument an error naming it, so that a typo
+// fails the server at startup instead of quietly disabling autorefresh.
 func parseArgs(args []string) (pluginArgs, error) {
 	var a pluginArgs
 	for _, arg := range args {
@@ -533,9 +472,8 @@ func parseArgs(args []string) (pluginArgs, error) {
 	return a, nil
 }
 
-// apply folds one argument into a. A bare argument is only an allow list
-// entry once the allow keyword has been seen; before that it is the typo it
-// looks like.
+// apply treats a bare argument as an allow list entry only once the allow
+// keyword has been seen; before that it is the typo it looks like.
 func (a *pluginArgs) apply(arg string) error {
 	if a.applyNamed(arg) {
 		return nil
@@ -547,9 +485,7 @@ func (a *pluginArgs) apply(arg string) error {
 		arg, fileArgPrefix, keyArgPrefix, allowArg, autoRefreshArg)
 }
 
-// applyNamed folds one of the named arguments into a and reports whether arg
-// was one of them. They are recognised wherever they appear, which is what
-// keeps the rest of the argument list order independent.
+// applyNamed reports whether arg was one of the named arguments.
 func (a *pluginArgs) applyNamed(arg string) bool {
 	switch {
 	case arg == autoRefreshArg:
@@ -566,7 +502,6 @@ func (a *pluginArgs) applyNamed(arg string) bool {
 	return true
 }
 
-// addAllowEntry parses one allow list entry and files it under its family.
 func (a *pluginArgs) addAllowEntry(arg string) error {
 	prefix, err := parseAllowEntry(arg)
 	if err != nil {
@@ -580,9 +515,9 @@ func (a *pluginArgs) addAllowEntry(arg string) error {
 	return nil
 }
 
-// allowFor returns the allow list entries of the family being set up. The
-// other family's entries are dropped rather than refused, so one line can be
-// copied between the two server sections and still mean what it reads as.
+// allowFor drops the other family's entries rather than refusing them, so one
+// line can be copied between the two server sections and still mean what it
+// reads as.
 func (a *pluginArgs) allowFor(v6 bool) []netip.Prefix {
 	if v6 {
 		return a.allow6
@@ -590,16 +525,13 @@ func (a *pluginArgs) allowFor(v6 bool) []netip.Prefix {
 	return a.allow4
 }
 
-// parseAllowEntry turns one argument into a prefix. A bare address becomes a
-// host prefix, so both forms compare the same way afterwards. This is the
-// relay plugin's parser, kept here rather than imported so neither plugin has
-// to depend on the other.
+// parseAllowEntry turns one argument into a prefix, a bare address becoming a
+// host prefix so that both forms compare the same way afterwards.
 //
-// Two spellings are refused rather than accepted and quietly ignored: an
-// IPv4-mapped IPv6 entry, which netip never matches against an unmapped
-// address, and a zoned address, which never matches because the server strips
-// the zone before a plugin sees the peer. Both would look configured and
-// admit nothing.
+// An IPv4-mapped IPv6 entry and a zoned address are refused rather than
+// quietly ignored: netip never matches the first against an unmapped address,
+// and the server strips the zone before a plugin sees the peer, so both would
+// look configured and admit nothing.
 func parseAllowEntry(arg string) (netip.Prefix, error) {
 	if strings.Contains(arg, "/") {
 		prefix, err := netip.ParsePrefix(arg)
@@ -624,9 +556,7 @@ func parseAllowEntry(arg string) (netip.Prefix, error) {
 	return netip.PrefixFrom(addr, addr.BitLen()), nil
 }
 
-// keySource resolves a configured key name against one family's allow-list.
-// The error lists the names that would have worked, because the two families
-// accept different ones and remote-id is the only name they share.
+// keySource resolves a configured key name against one family's key table.
 func keySource[F any](family, name string, allowed map[string]F) (F, error) {
 	fn, ok := allowed[name]
 	if !ok {
@@ -637,7 +567,6 @@ func keySource[F any](family, name string, allowed map[string]F) (F, error) {
 	return fn, nil
 }
 
-// familyName spells a family out for an error message.
 func familyName(v6 bool) string {
 	if v6 {
 		return "DHCPv6"
@@ -645,9 +574,8 @@ func familyName(v6 bool) string {
 	return "DHCPv4"
 }
 
-// setupState builds one plugin instance: it validates the arguments, loads
-// the mapping file once so a broken file fails startup, and starts the
-// autorefresh watcher if it was asked for.
+// setupState loads the mapping file once during setup, so a broken file fails
+// startup rather than the first request.
 func setupState(v6 bool, args ...string) (*pluginState, error) {
 	a, err := parseArgs(args)
 	if err != nil {
@@ -685,13 +613,10 @@ func setupState(v6 bool, args ...string) (*pluginState, error) {
 	return s, nil
 }
 
-// watch starts the autorefresh watcher.
-//
-// The watch goes on the directory rather than on the file. A mapping file is
-// usually replaced by writing a new one and renaming it over the old, and a
-// watch on the file follows the inode that was renamed away, so every update
-// after the first would be missed. The directory keeps reporting under the
-// same name, and watchLoop filters the events down to it.
+// watch goes on the directory rather than on the file: a mapping file is
+// usually replaced by renaming a new one over the old, and a watch on the file
+// follows the inode that was renamed away, so every update after the first
+// would be missed.
 func (s *pluginState) watch(v6 bool, filename string) error {
 	watcher, err := fsnotifyNewWatcher()
 	if err != nil {
@@ -706,19 +631,14 @@ func (s *pluginState) watch(v6 bool, filename string) error {
 	return nil
 }
 
-// watchLoop reloads the mapping file on what fsnotify reports for it, and
-// runs until the watcher is closed. Nothing closes it: a plugin is set up
-// once and lives as long as the process, and the file plugin watches its
-// lease file the same way.
+// watchLoop runs until the watcher is closed, which nothing does: a plugin is
+// set up once and lives as long as the process.
 //
 // Both channels have to be read. fsnotify sends errors on an unbuffered
-// channel and blocks until somebody takes one, so a loop that only ranges
-// over Events parks fsnotify's own reader on the first error and no further
-// event ever arrives: reloads stop for good, with nothing in the log to say
-// so. An error reloads as well, because the errors a live watch produces mean
-// events were dropped rather than that nothing happened, a full inotify queue
-// being the usual one. The mapping in memory may already be behind the file,
-// and rereading it is the cheap way back into step.
+// channel and blocks until somebody takes one, so a loop that only ranges over
+// Events parks fsnotify's own reader on the first error and no further event
+// ever arrives. An error reloads as well, since a live watch reports one when
+// events were dropped, a full inotify queue being the usual cause.
 func (s *pluginState) watchLoop(v6 bool, filename string, watcher *fsnotify.Watcher) {
 	base := filepath.Base(filename)
 	for {
@@ -742,9 +662,9 @@ func (s *pluginState) watchLoop(v6 bool, filename string, watcher *fsnotify.Watc
 	}
 }
 
-// refresh rereads the mapping file. A reload that fails keeps the mapping
-// that was already loaded, so a file caught halfway through being written
-// does not empty the server's idea of the network.
+// refresh keeps the mapping already loaded when the reread fails, so a file
+// caught halfway through being written does not empty the server's idea of the
+// network.
 func (s *pluginState) refresh(v6 bool, filename string) {
 	if err := s.loadFromFile(v6, filename); err != nil {
 		log.Warningf("failed to refresh from %s: %s", filename, err)
@@ -753,8 +673,8 @@ func (s *pluginState) refresh(v6 bool, filename string) {
 	log.Infof("updated to %d mappings from %s", s.numRecords(), filename)
 }
 
-// loadFromFile reads the mapping file and swaps it in under the write lock.
-// The new map is built first, so a failed parse leaves the old one in place.
+// loadFromFile builds the new map before taking the write lock, so a failed
+// parse leaves the old one in place.
 func (s *pluginState) loadFromFile(v6 bool, filename string) error {
 	records, err := loadRecords(filename, v6)
 	if err != nil {

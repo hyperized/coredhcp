@@ -17,10 +17,8 @@ import (
 )
 
 // ErrNoIdentity is a request with nothing in it to tell the client apart
-// from any other: no client identifier and no hardware address for DHCPv4,
-// no DUID for DHCPv6. There is no DHCID to write for such a client, and
-// without one the name could be taken from it by anyone, so nothing is
-// written at all.
+// from any other. Without an identity there is no DHCID, and a name with no
+// DHCID can be taken by anyone, so nothing is written at all.
 var ErrNoIdentity = errors.New("ddns: the client sent nothing that identifies it")
 
 const (
@@ -49,8 +47,7 @@ const (
 	maxChaddr = 16
 
 	// htypeMask keeps the hardware type inside the one octet RFC 4701 gives
-	// it. Every hardware type IANA has assigned is well inside that; a
-	// larger value in a packet is nonsense either way.
+	// it.
 	htypeMask = 0xff
 )
 
@@ -58,10 +55,8 @@ const (
 // for (RFC 4701 section 3.5): a code naming which field of the request was
 // taken, and the octets of that field.
 //
-// It is the thing a name is held against. The same client asking for the
-// same name produces the same DHCID; a different client asking for it
-// produces a different one, and the name server refuses the update on the
-// prerequisite rather than letting the name change hands.
+// The same client asking for the same name produces the same DHCID and
+// nothing else does, which is what holds a name against one client.
 type identity struct {
 	code uint16
 	data []byte
@@ -69,10 +64,9 @@ type identity struct {
 
 // identity4 reads the identity out of a DHCPv4 request.
 //
-// Option 61 is preferred over the hardware address because it is what a
-// client keeps when it moves between interfaces, and because RFC 4361 has a
-// dual-stack client put the same DUID there as it sends over DHCPv6. The
-// hardware address is the fallback for clients that send neither.
+// Option 61 is preferred over the hardware address because a client keeps it
+// across interfaces, and because RFC 4361 has a dual-stack client put the
+// same DUID there as it sends over DHCPv6.
 func identity4(req *dhcpv4.DHCPv4) identity {
 	if raw := req.Options.Get(dhcpv4.OptionClientIdentifier); len(raw) > 0 {
 		return clientID4(raw)
@@ -82,10 +76,9 @@ func identity4(req *dhcpv4.DHCPv4) identity {
 
 // clientID4 is the identity of a client that sent option 61.
 //
-// RFC 4361 has a dual-stack client send its DUID there behind a type octet
-// of 255 and a four octet IAID. RFC 4701 section 3.5 wants that DUID out of
-// its wrapper and under code 0x0002, so a client holding a name over DHCPv6
-// is recognised as the same client when it asks over DHCPv4.
+// RFC 4361 wraps the DUID behind a type octet of 255 and a four octet IAID.
+// RFC 4701 section 3.5 wants it out of that wrapper and under code 0x0002, so
+// a client holding a name over DHCPv6 is recognised over DHCPv4.
 func clientID4(raw []byte) identity {
 	if raw[0] == duidClientIDType && len(raw) > duidClientIDHdr {
 		return identity{code: idDUID, data: raw[duidClientIDHdr:]}
@@ -94,8 +87,7 @@ func clientID4(raw []byte) identity {
 }
 
 // hardwareIdentity is the 0x0000 form: the hardware type in one octet
-// followed by the hardware address. A request with no hardware address at
-// all yields nothing, which record then refuses.
+// followed by the hardware address.
 func hardwareIdentity(req *dhcpv4.DHCPv4) []byte {
 	chaddr := req.ClientHWAddr
 	if len(chaddr) > maxChaddr {
@@ -109,10 +101,9 @@ func hardwareIdentity(req *dhcpv4.DHCPv4) []byte {
 	return append(out, chaddr...)
 }
 
-// identity6 reads the identity out of a DHCPv6 message, which is the DUID of
-// its client identifier option. RFC 8415 section 16 makes that option
-// mandatory in every message a client sends, so one without it is malformed
-// and gets no record.
+// identity6 reads the DUID out of a DHCPv6 message. RFC 8415 section 16 makes
+// the client identifier mandatory, so a message without one is malformed and
+// gets no record.
 func identity6(msg *dhcpv6.Message) identity {
 	duid := msg.Options.ClientID()
 	if duid == nil {
@@ -123,11 +114,7 @@ func identity6(msg *dhcpv6.Message) identity {
 
 // record returns the DHCID RDATA that holds fqdn for this client
 // (RFC 4701 section 3.5): the identifier type code, the digest type, and
-// SHA-256 taken over the identifier followed by the name in canonical wire
-// form.
-//
-// The name is part of the digest, so one client's DHCID differs per name and
-// a record copied from one name to another does not verify at the other.
+// SHA-256 over the identifier followed by the name in canonical wire form.
 func (id identity) record(fqdn string) ([]byte, error) {
 	if len(id.data) == 0 {
 		return nil, fmt.Errorf("%w, so %s is not written", ErrNoIdentity, fqdn)

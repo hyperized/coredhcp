@@ -169,9 +169,8 @@ func targets(answers []dnsmessage.Resource) []string {
 	return out
 }
 
-// dhcids returns the DHCID records of an answer section, as hex. dnsmessage
-// has no body type for type 49, so Knot's answer comes back as opaque RDATA,
-// which is also how this plugin writes it.
+// dnsmessage has no body type for type 49, so Knot's answer comes back as
+// opaque RDATA, which is also how this plugin writes it.
 func dhcids(answers []dnsmessage.Resource) []string {
 	var out []string
 	for _, r := range answers {
@@ -184,8 +183,6 @@ func dhcids(answers []dnsmessage.Resource) []string {
 	return out
 }
 
-// dhcidOf is the DHCID a DHCPv4 client with this hardware address gets for
-// this name.
 func dhcidOf(t *testing.T, mac net.HardwareAddr, fqdn string) string {
 	t.Helper()
 	req, err := dhcpv4.New(dhcpv4.WithHwAddr(mac), dhcpv4.WithMessageType(dhcpv4.MessageTypeRequest))
@@ -195,8 +192,8 @@ func dhcidOf(t *testing.T, mac net.HardwareAddr, fqdn string) string {
 	return hex.EncodeToString(rdata)
 }
 
-// ack4 runs one DHCPv4 client through a lease. What the worker then does
-// with it is read back out of Knot, which is what eventually is for.
+// ack4 hands the worker a lease; what it does with it is read back out of
+// Knot with eventually.
 func ack4(t *testing.T, p *pluginState, mac net.HardwareAddr, host string, addr netip.Addr) {
 	t.Helper()
 	req, err := dhcpv4.New(
@@ -215,7 +212,6 @@ func ack4(t *testing.T, p *pluginState, mac net.HardwareAddr, host string, addr 
 	require.False(t, stop)
 }
 
-// release4 hands Knot a DHCPRELEASE from mac.
 func release4(t *testing.T, p *pluginState, mac net.HardwareAddr, host string, addr netip.Addr) {
 	t.Helper()
 	rel, err := dhcpv4.New(
@@ -239,9 +235,6 @@ func eventually(t *testing.T, server, name string, qtype dnsmessage.Type, extrac
 	}, settle, 200*time.Millisecond, "%s %s: wanted %v, last saw %v", name, qtype, want, got)
 }
 
-// TestIntegrationLease4 walks a DHCPv4 client through a lease and a release,
-// checking with the server after each that the forward and reverse records
-// are what they should be, and that the name is held by a DHCID in between.
 func TestIntegrationLease4(t *testing.T) {
 	p := integrationPlugin(t)
 	server := p.server
@@ -265,7 +258,6 @@ func TestIntegrationLease4(t *testing.T) {
 	eventually(t, server, fqdn, dnsmessage.TypeA, addresses, []string{next.String()})
 	eventually(t, server, fqdn, typeDHCID, dhcids, []string{dhcidOf(t, mac, fqdn)})
 
-	// The same client giving the lease back takes every record with it.
 	release4(t, p, mac, host, next)
 
 	eventually(t, server, fqdn, dnsmessage.TypeA, addresses, nil)
@@ -274,9 +266,7 @@ func TestIntegrationLease4(t *testing.T) {
 }
 
 // TestIntegrationNameHeldByAnotherClient is the finding this plugin was
-// audited for, run against a real name server: a second client asking for a
-// name the first one holds must not get it, and must not be able to delete
-// it either.
+// audited for, run against a real name server.
 func TestIntegrationNameHeldByAnotherClient(t *testing.T) {
 	p := integrationPlugin(t)
 	server := p.server
@@ -289,8 +279,7 @@ func TestIntegrationNameHeldByAnotherClient(t *testing.T) {
 	ack4(t, p, holder, host, addr)
 	eventually(t, server, fqdn, dnsmessage.TypeA, addresses, []string{addr.String()})
 
-	// Another client on the segment claims the same name. Knot refuses both
-	// of the messages that follow, on the prerequisites.
+	// Knot refuses both of the messages that follow, on the prerequisites.
 	other := netip.AddrFrom4([4]byte{addr.As4()[0], addr.As4()[1], addr.As4()[2], addr.As4()[3] + 2})
 	ack4(t, p, intruder, host, other)
 	require.Eventually(t, func() bool { return p.stats.conflicts.Load() == 1 }, settle, 100*time.Millisecond)
@@ -301,8 +290,7 @@ func TestIntegrationNameHeldByAnotherClient(t *testing.T) {
 	assert.Empty(t, targets(ask(t, server, ptrName(other), dnsmessage.TypePTR)),
 		"a refused forward update writes no PTR either")
 
-	// The same client tries to delete the name instead. The register drops
-	// that on the packet path, so nothing even reaches Knot.
+	// The register drops this on the packet path, so nothing even reaches Knot.
 	before := p.stats.sent.Load()
 	release4(t, p, intruder, host, addr)
 	assert.Equal(t, []string{addr.String()}, addresses(ask(t, server, fqdn, dnsmessage.TypeA)))
@@ -312,8 +300,6 @@ func TestIntegrationNameHeldByAnotherClient(t *testing.T) {
 	eventually(t, server, fqdn, dnsmessage.TypeA, addresses, nil)
 }
 
-// TestIntegrationProtectedName checks that a name on the protect: list is
-// left alone even when a client asks for it by that exact name.
 func TestIntegrationProtectedName(t *testing.T) {
 	host := testHost(t)
 	p, err := setupState(

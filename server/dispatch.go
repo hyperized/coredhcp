@@ -144,24 +144,19 @@ func encapsulateRelay6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, error) {
 		log.Warningf("DHCPv6: response is a relayed message, not reencapsulating")
 		return resp, nil
 	}
-	// IsRelay was checked by the caller and *dhcpv6.RelayMessage is the only
-	// type in the dhcp library that answers it with true.
-	//nolint:forcetypeassert // guarded by the IsRelay check on the way in
+	//nolint:forcetypeassert // *dhcpv6.RelayMessage is the only type IsRelay accepts, checked by the caller
 	return dhcpv6.NewRelayReplFromRelayForw(req.(*dhcpv6.RelayMessage), rmsg)
 }
 
 // errRelayedNotAllowed is what the observer is told about a relayed request
-// the server refused. There is no error from the network stack to pass on
-// here: the packet is fine, the configuration is what says nothing about
-// which relays this server answers.
+// the server refused: nothing is wrong with the packet, the configuration
+// says nothing about which relays to answer.
 var errRelayedNotAllowed = errors.New("relayed request and no relay plugin configured")
 
 // isRelayed4 reports whether a DHCPv4 request came through a relay agent.
-// giaddr is what says so (RFC 2131 section 2): a client sends zero there,
-// and the first relay to forward the request writes its own address in. An
-// absent field is not a relay, since a datagram off the wire always carries
-// the four bytes and a request built in memory without them came through
-// nothing.
+// giaddr says so (RFC 2131 section 2): a client sends zero, the first relay
+// to forward the request writes its own address in. A request built in
+// memory may carry no giaddr bytes at all, which is not a relay either.
 func isRelayed4(req *dhcpv4.DHCPv4) bool {
 	return len(req.GatewayIPAddr) != 0 && !req.GatewayIPAddr.IsUnspecified()
 }

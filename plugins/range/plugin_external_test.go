@@ -40,14 +40,12 @@ func seedDB(t *testing.T, path string, rows [][4]any) {
 	}
 }
 
-// closeAfter shuts down the instance setup just registered, at the end of the
-// test.
+// closeAfter shuts down the instance setup just registered.
 //
-// Setup leaves a sweeper and a writer running and nothing in the public API
-// returns the instance, so a test reaches it the way any consumer does,
-// through the leases registry. Without this the writer is still touching the
-// lease file when the framework removes the temp directory around it, which
-// fails the test over a directory that would not empty.
+// Setup leaves a sweeper and a writer running and the public API never
+// returns the instance, so this reaches it through the leases registry
+// instead; otherwise the writer is still touching the lease file when the
+// framework removes the temp directory around it.
 func closeAfter(t *testing.T, name string) {
 	t.Helper()
 	sources := leases.Sources()

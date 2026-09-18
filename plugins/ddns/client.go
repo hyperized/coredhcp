@@ -33,10 +33,9 @@ var (
 	// ErrRCode is an answer the server refused, carrying its reason.
 	ErrRCode = errors.New("ddns: server refused the update")
 
-	// ErrPrereq is a refusal that says a prerequisite did not hold rather
-	// than that anything is wrong with the message. It is a refusal the
-	// claim path asks for on purpose: it is how the server answers "someone
-	// else already has this name".
+	// ErrPrereq is a refusal that says a prerequisite did not hold. The
+	// claim path asks for it on purpose: it is how the server answers
+	// "someone else already has this name".
 	ErrPrereq = fmt.Errorf("%w: a prerequisite did not hold", ErrRCode)
 )
 
@@ -56,16 +55,13 @@ const (
 // exchange sends one signed message to the configured server and returns the
 // answer.
 //
-// ctx is the instance's own lifetime, not one update's. It bounds the dial
-// alongside timeout: and is looked at again between attempts, so a worker
-// that is being shut down gives up rather than sitting out a connect or a
-// retry that no longer has anywhere to report to.
+// ctx is the instance's lifetime, not one update's, so a worker being shut
+// down gives up rather than sitting out a connect or a retry.
 func (p *pluginState) exchange(ctx context.Context, msg []byte) ([]byte, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-	// The address is operator configuration, not user input: applyServer
-	// has already held it to a literal IP address and a port in range, and
-	// nothing out of a DHCP packet reaches it.
+	// The address is operator configuration, not user input: applyServer has
+	// already held it to a literal IP address and a port in range.
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(dialCtx, "udp", p.server)
 	if err != nil {
@@ -149,9 +145,6 @@ const (
 	rcodeNXRRSET = dnsmessage.RCode(8)
 )
 
-// refusal turns a response code into the error for it, marking the two that
-// mean the server found the zone in a different state from the one the
-// message required.
 func refusal(code dnsmessage.RCode) error {
 	if code == rcodeYXRRSET || code == rcodeNXRRSET {
 		return fmt.Errorf("%w: %s", ErrPrereq, rcodeName(code))
@@ -160,8 +153,8 @@ func refusal(code dnsmessage.RCode) error {
 }
 
 // prereqFailed reports whether err is the server saying a prerequisite did
-// not hold. Every other failure, up to and including no answer at all,
-// reads as "we do not know what is at that name" and leaves it alone.
+// not hold. Every other failure, no answer at all included, reads as "we do
+// not know what is at that name" and leaves it alone.
 func prereqFailed(err error) bool {
 	return errors.Is(err, ErrPrereq)
 }

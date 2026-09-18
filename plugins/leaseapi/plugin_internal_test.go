@@ -249,9 +249,8 @@ func TestServeHealthWriteFailure(t *testing.T) {
 }
 
 func TestWriteJSONEncodeFailure(t *testing.T) {
-	// No type this package hands the encoder can be refused, so the failure
-	// is injected. What matters is that the status line is still available
-	// at that point and says 500, rather than a 200 carrying half a body.
+	// No type this package hands the encoder can fail on, so the failure is
+	// injected here instead.
 	w := httptest.NewRecorder()
 
 	writeJSON(w, http.StatusOK, func(out io.Writer) error {

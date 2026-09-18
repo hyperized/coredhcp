@@ -20,9 +20,8 @@ import (
 	"github.com/coredhcp/coredhcp/logger"
 )
 
-// syncBuffer is a log sink a test can read while the server is still
-// writing to it: the read loops log from their own goroutines, and a plain
-// bytes.Buffer is not safe for that.
+// syncBuffer is a log sink a test can read while the read loops are still
+// writing to it from their own goroutines.
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -40,14 +39,13 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// count is how many times s appears in what has been logged so far.
 func (b *syncBuffer) count(s string) int {
 	return strings.Count(b.String(), s)
 }
 
-// captureLog redirects the shared logger to a buffer for the duration of the
-// test. The logger's console writer is process-wide, so a test using this
-// may not run in parallel with another one that logs.
+// captureLog redirects the shared logger to a buffer for the test. The
+// console writer is process-wide, so a test using this may not run in
+// parallel with another one that logs.
 func captureLog(t *testing.T) *syncBuffer {
 	t.Helper()
 	buf := &syncBuffer{}
@@ -56,8 +54,8 @@ func captureLog(t *testing.T) *syncBuffer {
 	return buf
 }
 
-// fakeClock is a clock a test steps by hand, so the drop limiter can be
-// driven over its interval without sleeping through it.
+// fakeClock lets a test drive the drop limiter over its interval without
+// sleeping through it.
 type fakeClock struct {
 	mu sync.Mutex
 	t  time.Time
@@ -75,8 +73,6 @@ func (c *fakeClock) advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// blockingFn returns a function that parks until the returned release is
-// called, plus a channel closed when it has actually returned.
 func blockingFn() (fn func(), release func(), done chan struct{}) {
 	hold := make(chan struct{})
 	done = make(chan struct{})
@@ -104,14 +100,10 @@ func TestNewGateSizesTheLimit(t *testing.T) {
 	}
 }
 
-// The default is a multiple of the processor allowance, read once when the
-// gate is built.
 func TestDefaultMaxInFlight(t *testing.T) {
 	assert.Equal(t, inFlightPerCPU*runtime.GOMAXPROCS(0), defaultMaxInFlight())
 }
 
-// A datagram that finds the gate full is dropped and counted. The handlers
-// holding it are still running, which is what makes the limit a limit.
 func TestGateDropsWhenFull(t *testing.T) {
 	captureLog(t)
 	g := newGate(2)
@@ -130,16 +122,14 @@ func TestGateDropsWhenFull(t *testing.T) {
 	<-firstDone
 	releaseSecond()
 	<-secondDone
-	// A slot is free again once a handler returns, so the next datagram is
-	// served rather than punished for the burst that came before it.
 	assert.True(t, g.wait(time.Minute))
 	assert.True(t, g.run(func() {}))
 	assert.True(t, g.wait(time.Minute))
 	assert.Equal(t, Drops{Overload: 1}, g.drops())
 }
 
-// A stopped gate starts nothing, and gives the slot it took back so a
-// shutdown is not left waiting on a handler that never ran.
+// A stopped gate gives back the slot it took, or a shutdown is left waiting
+// on a handler that never ran.
 func TestGateRefusesAfterStop(t *testing.T) {
 	captureLog(t)
 	g := newGate(1)
@@ -153,8 +143,6 @@ func TestGateRefusesAfterStop(t *testing.T) {
 	assert.True(t, g.wait(time.Minute))
 }
 
-// wait returns as soon as the handlers are done, and it waits for handlers
-// that were started before it.
 func TestGateWaitReturnsWhenHandlersFinish(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		g := newGate(4)
@@ -173,8 +161,6 @@ func TestGateWaitReturnsWhenHandlersFinish(t *testing.T) {
 	})
 }
 
-// A handler that does not come back delays a shutdown by the timeout rather
-// than holding it open.
 func TestGateWaitGivesUpAtTheTimeout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		g := newGate(4)
@@ -185,16 +171,14 @@ func TestGateWaitGivesUpAtTheTimeout(t *testing.T) {
 		assert.False(t, g.wait(50*time.Millisecond))
 		assert.Equal(t, 50*time.Millisecond, time.Since(start))
 
-		// Let the stuck handler go, so the goroutine wait parked on the
-		// WaitGroup ends with it.
+		// Let the stuck handler go, so the goroutine parked on the WaitGroup
+		// ends with it.
 		release()
 		<-done
 		assert.True(t, g.wait(time.Minute))
 	})
 }
 
-// One line per reason per interval: a flood of dropped datagrams is a
-// counter, not a wall of log lines.
 func TestGateLogsOneLinePerReasonPerInterval(t *testing.T) {
 	buf := captureLog(t)
 	clk := &fakeClock{t: time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)}
@@ -206,8 +190,6 @@ func TestGateLogsOneLinePerReasonPerInterval(t *testing.T) {
 	}
 	assert.Equal(t, 1, buf.count("in-flight handler limit reached"))
 
-	// A second reason is held back separately, so one noisy cause cannot
-	// silence another.
 	g.dropped(reasonRelayed)
 	assert.Equal(t, 1, buf.count("no relay plugin configured"))
 
@@ -217,8 +199,6 @@ func TestGateLogsOneLinePerReasonPerInterval(t *testing.T) {
 	assert.Equal(t, Drops{Overload: 6, Relayed: 1}, g.drops())
 }
 
-// The counted line says how many were dropped in total, not just that one
-// was, so a single line still tells an operator the size of the problem.
 func TestGateLogsTheRunningCount(t *testing.T) {
 	buf := captureLog(t)
 	g := newGate(1)
@@ -226,8 +206,6 @@ func TestGateLogsTheRunningCount(t *testing.T) {
 	assert.Contains(t, buf.String(), "dropping datagram (server is shutting down), 1 so far")
 }
 
-// A server built without a gate counts nothing and has nothing to wait for.
-// Only a test double produces one, but none of it may panic.
 func TestNilGateIsSafe(t *testing.T) {
 	var g *gate
 	assert.NotPanics(t, func() {

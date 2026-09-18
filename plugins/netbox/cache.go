@@ -89,9 +89,6 @@ func (c *cache) get(key string, now time.Time) (lookupResult, bool) {
 	if !ok {
 		return lookupResult{}, false
 	}
-	// put is the only thing that ever pushes onto c.order and it always
-	// pushes a *cacheEntry, so the assertion holds by construction. Both are
-	// unexported and in this file.
 	ent := el.Value.(*cacheEntry) //nolint:forcetypeassert // c.order only ever holds *cacheEntry
 	if !now.Before(ent.expires) {
 		c.drop(el)

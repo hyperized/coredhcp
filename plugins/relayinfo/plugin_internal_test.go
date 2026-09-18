@@ -92,8 +92,6 @@ func TestParseArgs(t *testing.T) {
 			errText: "unexpected argument `refresh`",
 		},
 		{
-			// A bare argument before the allow keyword is the same typo it
-			// always was, even with a valid allow list right behind it.
 			name:    "bare argument before allow is still unexpected",
 			args:    []string{"file:ports.txt", "key:circuit-id", "typo", "allow", "10.0.1.1"},
 			errText: "unexpected argument `typo`",
@@ -154,9 +152,8 @@ func TestKeySource(t *testing.T) {
 	})
 }
 
-// TestParseAllowEntry covers the allow list's entry syntax directly: the two
-// forms an entry may take, the two ways they can be malformed, and the two
-// spellings that are refused because they would never match a real peer.
+// TestParseAllowEntry also covers two syntactically valid spellings that are
+// refused because they would never match a real peer address.
 func TestParseAllowEntry(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -207,7 +204,6 @@ func TestParseAllowEntry(t *testing.T) {
 	}
 }
 
-// TestAllowFor pins which list each family reads: its own, never the other.
 func TestAllowFor(t *testing.T) {
 	a := pluginArgs{
 		allow4: []netip.Prefix{netip.MustParsePrefix("10.0.1.1/32")},
@@ -394,8 +390,6 @@ func TestMatch(t *testing.T) {
 	}
 }
 
-// TestDropLimiter drives the limiter through an injected clock instead of
-// sleeping across logInterval.
 func TestDropLimiter(t *testing.T) {
 	var now time.Time
 	clock := func() time.Time { return now }
@@ -413,15 +407,11 @@ func TestDropLimiter(t *testing.T) {
 	assert.True(t, limiter.allow(reasonNoRequestInfo), "the interval has passed")
 }
 
-// ctxFromPeer builds the context the server hands a handler for a datagram
-// from peer.
 func ctxFromPeer(t *testing.T, peer string) context.Context {
 	t.Helper()
 	return handler.WithRequestInfo(t.Context(), handler.RequestInfo{Peer: netip.MustParseAddrPort(peer)})
 }
 
-// TestFromAllowedRelay checks the three outcomes directly against a
-// pluginState built by hand, without going through a handler.
 func TestFromAllowedRelay(t *testing.T) {
 	s := &pluginState{
 		allow:   []netip.Prefix{netip.MustParsePrefix("10.0.1.1/32")},
@@ -448,9 +438,8 @@ func TestFromAllowedRelay(t *testing.T) {
 	})
 }
 
-// TestSetupStateNoAllowEntriesForFamily pins that the allow-list check runs
-// per family: an allow list with only the other family's addresses fails
-// before the mapping file is ever opened.
+// TestSetupStateNoAllowEntriesForFamily pins that the check runs before the
+// mapping file is ever opened.
 func TestSetupStateNoAllowEntriesForFamily(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ports.txt")
 
@@ -496,17 +485,11 @@ func TestSetupStateWatcherAddError(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to watch")
 }
 
-// TestWatchLoop drives watchLoop directly through the two channels it reads,
-// with no real fsnotify backend behind them: a Watcher built by fsnotify.NewWatcher
-// starts its own platform goroutine that also writes into Events and Errors,
-// which would race with the test's own sends on the same channels. A bare
-// *fsnotify.Watcher holding only the two channel fields has no such
-// goroutine, so the test's sends and closes are the only writers, and
-// watchLoop cannot tell the difference since it only ever reads those two
-// fields.
+// TestWatchLoop uses a bare *fsnotify.Watcher rather than one from
+// fsnotify.NewWatcher: the real one starts a platform goroutine that also
+// writes into Events and Errors, racing with the test's own sends. watchLoop
+// only ever reads those two fields, so it cannot tell the difference.
 func TestWatchLoop(t *testing.T) {
-	// newState loads path once, the way setupState does before starting the
-	// watcher, so a test can then observe reloads through numRecords.
 	newState := func(t *testing.T, dir string) (*pluginState, string) {
 		t.Helper()
 		path := filepath.Join(dir, "ports.txt")
@@ -520,14 +503,10 @@ func TestWatchLoop(t *testing.T) {
 		return &fsnotify.Watcher{Events: make(chan fsnotify.Event), Errors: make(chan error)}
 	}
 
-	// startLoop runs watchLoop in its own goroutine and reaps it at the end
-	// of the test. The two returned closers each close one channel exactly
-	// once, so a subtest that wants to close a channel mid-test (to prove
-	// watchLoop returns on that one specifically) can call it early without a
-	// double-close panic when cleanup closes whatever is left. Cleanup
-	// registers the wait before the close: t.Cleanup runs LIFO, so the close
-	// still runs first, then the wait, which is what gives a test that fails
-	// to see the loop exit a real failure instead of a silent leak.
+	// Each returned closer closes its channel exactly once, so a subtest can
+	// close one early without a double-close panic from the cleanup. The wait
+	// is registered before the close, since t.Cleanup runs LIFO: a loop that
+	// never exits then fails the test instead of leaking silently.
 	startLoop := func(t *testing.T, s *pluginState, path string, watcher *fsnotify.Watcher) (done chan struct{}, closeEvents, closeErrors func()) {
 		t.Helper()
 		done = make(chan struct{})
@@ -570,11 +549,9 @@ func TestWatchLoop(t *testing.T) {
 			return err == nil && strings.Contains(string(data), "reported an error")
 		}, 5*time.Second, 20*time.Millisecond, "the error was not logged")
 
-		// Before the fix, watchLoop never read Errors at all, and fsnotify's
-		// own dispatch goroutine parks on that unbuffered send forever once
-		// nobody takes the first error, so no later event is ever delivered
-		// either. Sending one now and observing the reload is the direct
-		// check that this loop keeps going instead.
+		// Before the fix, watchLoop never read Errors, so fsnotify's dispatch
+		// goroutine parked on that unbuffered send and no later event was
+		// ever delivered either.
 		require.NoError(t, os.WriteFile(path, []byte("port-1 192.0.2.1\nport-2 192.0.2.2\n"), 0o600))
 		watcher.Events <- fsnotify.Event{Name: path, Op: fsnotify.Write}
 		require.Eventually(t, func() bool { return s.numRecords() == 2 }, 5*time.Second, 20*time.Millisecond,
@@ -590,9 +567,8 @@ func TestWatchLoop(t *testing.T) {
 
 		watcher.Events <- fsnotify.Event{Name: filepath.Join(dir, "other.txt"), Op: fsnotify.Write}
 
-		// There is no positive signal to wait for here, so give a
-		// wrongly-triggered reload a moment to happen, then prove the loop
-		// is still reading with a real event.
+		// There is no positive signal to wait for, so give a wrongly-triggered
+		// reload a moment to happen before proving the loop still reads.
 		time.Sleep(20 * time.Millisecond)
 		assert.Equal(t, 1, s.numRecords())
 
@@ -646,10 +622,9 @@ func TestWatchLoop(t *testing.T) {
 	})
 }
 
-// TestGiaddrSet pins the three spellings an unset giaddr arrives in. The
-// field reaches a handler as nil, as four zero bytes, or as 0.0.0.0 in
-// 16-byte form, and net.IP.IsUnspecified answers false for the nil case, so
-// reading the field directly would have marked an on-link request relayed.
+// TestGiaddrSet pins the three spellings an unset giaddr arrives in:
+// net.IP.IsUnspecified answers false for the nil one, so reading the field
+// directly would have marked an on-link request relayed.
 func TestGiaddrSet(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -669,9 +644,6 @@ func TestGiaddrSet(t *testing.T) {
 	}
 }
 
-// TestRelayed4 pins which DHCPv4 requests are measured against the allow
-// list: the ones presenting relay information, by either of the two marks a
-// relay leaves on a request.
 func TestRelayed4(t *testing.T) {
 	newReq := func(t *testing.T) *dhcpv4.DHCPv4 {
 		t.Helper()

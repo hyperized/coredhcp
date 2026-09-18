@@ -478,12 +478,10 @@ func TestOobIfIndex6(t *testing.T) {
 
 // --- HandleMsg4 ---
 
-// newTestListener4 builds a listener whose chain vets relays, the way
-// start4 marks one whose configuration loaded the relay plugin. That is the
-// interesting shape for everything below: a server that answers relayed
-// requests, so the tests get at what it does with them. The refusal a
-// server without the plugin applies clears the flag again and has tests of
-// its own, see TestHandleMsg4DropsRelayedWithoutRelayPlugin.
+// newTestListener4 builds a listener whose chain vets relays, as start4
+// marks one whose configuration loaded the relay plugin. The refusal that
+// applies without it has tests of its own, see
+// TestHandleMsg4DropsRelayedWithoutRelayPlugin.
 func newTestListener4(handlers []handler.Handler4, conn *fakeConn4) *listener4 {
 	return &listener4{conn4: conn, chain: chain4(handlers...), relayChecked: true}
 }
@@ -757,8 +755,6 @@ func TestHandleMsg4EthernetSendSuccessAndFailure(t *testing.T) {
 
 // --- HandleMsg6 ---
 
-// newTestListener6 is newTestListener4 for DHCPv6, relay-vetting chain and
-// all.
 func newTestListener6(handlers []handler.Handler6, conn *fakeConn6) *listener6 {
 	return &listener6{conn6: conn, chain: chain6(handlers...), relayChecked: true}
 }
@@ -1444,10 +1440,6 @@ func TestHandleMsg6ObserverSolicitAdvertise(t *testing.T) {
 
 // --- relayed requests with no relay plugin in the chain ---
 
-// The server answers a DHCPv4 request where giaddr tells it to, and the
-// sender picks giaddr. With no relay plugin to hold an allow list, a
-// relayed request is refused here instead, and the client on the same
-// segment still gets served.
 func TestHandleMsg4DropsRelayedWithoutRelayPlugin(t *testing.T) {
 	captureLog(t)
 	relayed := mustRequest4(t,
@@ -1455,8 +1447,7 @@ func TestHandleMsg4DropsRelayedWithoutRelayPlugin(t *testing.T) {
 		dhcpv4.WithGatewayIP(net.ParseIP("203.0.113.9")),
 	)
 	// Broadcast, so the reply leaves as a datagram rather than down the
-	// layer-2 path, which needs a raw socket this test has no business
-	// opening.
+	// layer-2 path, which would need a raw socket.
 	direct := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover), dhcpv4.WithBroadcast(true))
 
 	for _, tc := range []struct {
@@ -1495,7 +1486,6 @@ func TestHandleMsg4DropsRelayedWithoutRelayPlugin(t *testing.T) {
 			assert.Len(t, conn.writes, tc.wantWrites)
 			assert.Equal(t, tc.wantDrops, l.gate.drops())
 
-			// Whatever happened, the observer hears about the packet once.
 			ev := obs.only(t)
 			if tc.wantWrites == 0 {
 				assert.Equal(t, events.OutcomeDropped, ev.Outcome)
@@ -1512,8 +1502,6 @@ func TestHandleMsg4DropsRelayedWithoutRelayPlugin(t *testing.T) {
 	}
 }
 
-// The DHCPv6 half: a Relay-forward is what says a request came through a
-// relay, and it is refused until a plugin vets the relays.
 func TestHandleMsg6DropsRelayedWithoutRelayPlugin(t *testing.T) {
 	captureLog(t)
 	inner := message6(t, dhcpv6.MessageTypeRequest)
@@ -1569,8 +1557,6 @@ func TestHandleMsg6DropsRelayedWithoutRelayPlugin(t *testing.T) {
 	}
 }
 
-// A read loop whose listener arrived without a gate runs behind one with
-// the defaults, so the bound on handler goroutines holds there too.
 func TestGateForFallsBackToTheDefault(t *testing.T) {
 	g := newGate(2)
 	assert.Same(t, g, gateFor(g))
@@ -1580,9 +1566,6 @@ func TestGateForFallsBackToTheDefault(t *testing.T) {
 	assert.Equal(t, defaultMaxInFlight(), cap(made.sem))
 }
 
-// The read loop starts one goroutine per datagram, so the datagram that
-// arrives while the limit is reached is thrown away instead of queued. The
-// client retransmits; the server keeps the memory it had.
 func TestServeDropsWhenTheGateIsFull(t *testing.T) {
 	captureLog(t)
 	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
@@ -1604,8 +1587,8 @@ func TestServeDropsWhenTheGateIsFull(t *testing.T) {
 		},
 	}
 	l := newTestListener4([]handler.Handler4{slow}, conn)
-	// One slot, taken by the first datagram's handler before the loop reads
-	// the second one, so the drop is the limit rather than a race.
+	// One slot, taken by the first handler before the loop reads the second
+	// datagram, so the drop is the limit rather than a race.
 	l.gate = newGate(1)
 
 	require.NoError(t, l.Serve())
@@ -1617,8 +1600,6 @@ func TestServeDropsWhenTheGateIsFull(t *testing.T) {
 	assert.Len(t, conn.writes, 1, "only the datagram that got a slot is answered")
 }
 
-// A datagram read after the gate closed is dropped rather than handed to a
-// handler that would write to a socket about to be closed.
 func TestServeDropsWhileShuttingDown(t *testing.T) {
 	captureLog(t)
 	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
@@ -1637,8 +1618,6 @@ func TestServeDropsWhileShuttingDown(t *testing.T) {
 	assert.Empty(t, conn.writes)
 }
 
-// A peer address that is not a *net.UDPAddr has no port to answer on, so the
-// datagram is dropped and the read loop carries on with the next one.
 func TestServeDropsADatagramFromANonUDPPeer(t *testing.T) {
 	captureLog(t)
 	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))

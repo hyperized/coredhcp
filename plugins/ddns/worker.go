@@ -25,8 +25,7 @@ const dropWarnInterval = time.Minute
 // back in the same message. Splitting them into a job each would have the
 // second delete undo the first.
 //
-// dhcid is the RDATA of the DHCID record that holds name for this client.
-// It is worked out on the packet path, where the request still is, and
+// dhcid is worked out on the packet path, where the request still is, and
 // carried along because the worker needs it both as the record to write and
 // as the prerequisite to write it under.
 type job struct {
@@ -123,8 +122,7 @@ func (p *pluginState) stopWorker() {
 // address that falls inside a configured reverse: network.
 //
 // The reverse zone waits on the forward one because a PTR pointing at a name
-// the client does not hold is the same takeover by another route. There is
-// no point naming a client's address after someone else's host.
+// the client does not hold is the same takeover by another route.
 func (p *pluginState) apply(ctx context.Context, j job) {
 	if !p.sendForward(ctx, j) {
 		return
@@ -132,8 +130,7 @@ func (p *pluginState) apply(ctx context.Context, j job) {
 	p.sendReverse(ctx, j)
 }
 
-// sendForward writes, or withdraws, the address records of one job, and
-// reports whether the name server did as it was asked.
+// sendForward reports whether the name server did as it was asked.
 func (p *pluginState) sendForward(ctx context.Context, j job) bool {
 	err := p.forwardExchange(ctx, j)
 	if prereqFailed(err) {
@@ -149,19 +146,13 @@ func (p *pluginState) sendForward(ctx context.Context, j job) bool {
 	return true
 }
 
-// forwardExchange runs the one or two messages a forward change takes and
-// returns what the server said to the last of them.
+// forwardExchange is the conflict resolution of RFC 4703 section 5.3, which
+// settles a name two clients both want without letting the second overwrite
+// the first: the claim asks that nothing hold the name yet, and if something
+// does, asks again that what holds it be this client's own DHCID. A name
+// held by another client fails both and is left exactly as it was.
 //
-// This is the conflict resolution of RFC 4703 section 5.3, which settles a
-// name two clients both want without ever letting the second one overwrite
-// the first. The claim goes out asking that nothing hold the name yet; if
-// something does, it goes out again asking that what holds it be this
-// client's own DHCID. A name held by another client fails both and is left
-// exactly as it was.
-//
-// A withdrawal only ever asks the second question. The register has already
-// said this client holds the name, and the prerequisite is what makes the
-// server agree before it deletes anything.
+// A withdrawal only ever asks the second question.
 func (p *pluginState) forwardExchange(ctx context.Context, j job) error {
 	if j.remove {
 		return p.update(ctx, p.zone, ownedPrereqs(j), withdrawChanges(j))
@@ -174,8 +165,7 @@ func (p *pluginState) forwardExchange(ctx context.Context, j job) error {
 	return p.update(ctx, p.zone, ownedPrereqs(j), forwardChanges(j, p.ttl))
 }
 
-// remember keeps or drops the note that this instance holds a name, which is
-// what a later release is checked against.
+// remember keeps or drops the note a later release is checked against.
 func (p *pluginState) remember(j job) {
 	if j.remove {
 		p.owners.forget(j.name)
@@ -184,10 +174,10 @@ func (p *pluginState) remember(j job) {
 	p.owners.record(j.name, j.dhcid, j.addrs)
 }
 
-// sendReverse replaces the PTR of every address that falls inside a configured
-// reverse: network. These messages carry no prerequisites: the reverse zone
-// is named after the address, which the server handed out itself, so there
-// is nothing there for a client to claim.
+// sendReverse replaces the PTR of every address that falls inside a
+// configured reverse: network. These messages carry no prerequisites: the
+// zone is named after an address the server handed out itself, so there is
+// nothing there for a client to claim.
 func (p *pluginState) sendReverse(ctx context.Context, j job) {
 	for _, addr := range j.addrs {
 		zone, ok := p.reverseZoneFor(addr)

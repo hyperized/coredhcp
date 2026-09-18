@@ -55,17 +55,12 @@ func (m *mockFailingAllocator) Free(ip net.IPNet) error {
 	return args.Error(0)
 }
 
-// TestSetupRangeAllocatorCreationError substitutes the newIPv4Allocator seam
-// to simulate bitmap.NewIPv4Allocator failing. setupRange's own start/end
-// validation already guarantees the real allocator constructor can't fail,
-// so this is otherwise unreachable through the public API.
-// closeRegistered shuts down the instance setup registered under name when
-// the test ends.
+// closeRegistered shuts down the instance registered under name.
 //
-// Setup leaves a sweeper and a writer running and hands back only a handler,
-// so a test that wants its lease file left alone has to find the instance in
-// the registry. Without this the writer is still touching that file when the
-// framework removes the temp directory around it.
+// Setup hands back only a handler, not the instance, so a test that wants
+// its lease file left alone has to find it in the registry; otherwise the
+// writer is still touching that file when the framework removes the temp
+// directory around it.
 func closeRegistered(t *testing.T, name string) {
 	t.Helper()
 	for _, s := range leases.Sources() {
@@ -82,6 +77,10 @@ func closeRegistered(t *testing.T, name string) {
 	t.Fatalf("no source registered as %q", name)
 }
 
+// TestSetupRangeAllocatorCreationError substitutes the newIPv4Allocator seam
+// to simulate bitmap.NewIPv4Allocator failing. setupRange's own start/end
+// validation already guarantees the real allocator constructor can't fail,
+// so this is otherwise unreachable through the public API.
 func TestSetupRangeAllocatorCreationError(t *testing.T) {
 	orig := newIPv4Allocator
 	t.Cleanup(func() { newIPv4Allocator = orig })
@@ -213,9 +212,6 @@ func TestHandler4NewAllocationSaveError(t *testing.T) {
 	mockAlloc.AssertExpectations(t)
 }
 
-// TestAllocateLeaseSaveErrorFreeAlsoFails covers the corner where the address
-// cannot even be returned to the pool: the lease is still refused, and both
-// failures are logged rather than one of them hiding the other.
 func TestAllocateLeaseSaveErrorFreeAlsoFails(t *testing.T) {
 	db, err := loadDB(t.Context(), ":memory:")
 	require.NoError(t, err)
@@ -778,10 +774,6 @@ func TestSweepOnceWithNothingExpired(t *testing.T) {
 	assert.Equal(t, 1, leaseRowCount(pl.leasedb, mac))
 }
 
-// TestSweeperReclaimsInBackground drives the real ticker: without any client
-// asking for an address, an expired lease must disappear from the map, the
-// allocator and the database on its own.
-//
 // The whole instance is built inside the bubble, ticker and stop channel
 // included, which is what lets the sweep happen on bubble time instead of
 // being waited out on the wall clock.
@@ -1269,10 +1261,6 @@ func TestEvictOldestDeclinedKeepsUnfreeableAddresses(t *testing.T) {
 	mockAlloc.AssertExpectations(t)
 }
 
-// TestClientHostname pins what happens to the client-supplied name before it
-// reaches a lease record: characters outside the allow list are dropped
-// rather than escaped, and the result is bounded to maxHostnameLen regardless
-// of how long the option on the wire was.
 func TestClientHostname(t *testing.T) {
 	hwaddr, err := net.ParseMAC("02:00:00:00:00:30")
 	require.NoError(t, err)
@@ -1294,10 +1282,6 @@ func TestClientHostname(t *testing.T) {
 	}
 }
 
-// TestAllocateLeaseMaxLeases pins the lease-count bound allocateLease enforces
-// before it ever asks the allocator for an address: a table already at
-// max-leases refuses the client outright, while zero turns the bound off even
-// with entries already in the map.
 func TestAllocateLeaseMaxLeases(t *testing.T) {
 	const existing = "02:00:00:00:00:31"
 	for _, tc := range []struct {
@@ -1342,11 +1326,6 @@ func TestAllocateLeaseMaxLeases(t *testing.T) {
 	}
 }
 
-// TestAtLeaseLimit pins how the lease-table bound reports itself: a bound of
-// zero is always off, and once the table is full the refusal log is paced by
-// leaseLimitEvery rather than firing on every packet. A repeat call inside
-// the window is suppressed and counted, and the call that lands outside it
-// reports how many were skipped.
 func TestAtLeaseLimit(t *testing.T) {
 	t.Run("zero means the bound is off", func(t *testing.T) {
 		pl := &pluginState{
@@ -1389,9 +1368,6 @@ func TestAtLeaseLimit(t *testing.T) {
 	})
 }
 
-// TestSetupRangeOversizedPoolWarning covers the branch in setupRange that
-// warns when the configured pool holds more addresses than max-leases allows,
-// which otherwise silently strands the tail of the range.
 func TestSetupRangeOversizedPoolWarning(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "leases.db")
 	h4, err := setupRange(dbPath, "10.0.0.1", "10.0.255.254", "1h", "max-leases:16")

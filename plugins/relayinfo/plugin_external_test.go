@@ -26,15 +26,11 @@ import (
 
 const clientMAC = "00:11:22:33:44:55"
 
-// v4Peer and v6Peer are the relay sources handler4 and handler6 configure
-// their plugin instances to allow.
 const (
 	v4Peer = "10.0.1.1:67"
 	v6Peer = "[::1]:547"
 )
 
-// ctxFromPeer builds the context the server hands a handler for a datagram
-// from peer.
 func ctxFromPeer(t *testing.T, peer string) context.Context {
 	t.Helper()
 	return handler.WithRequestInfo(t.Context(), handler.RequestInfo{Peer: netip.MustParseAddrPort(peer)})
@@ -48,8 +44,6 @@ func writeMappings(t *testing.T, contents string) string {
 	return "file:" + path
 }
 
-// handler4 sets a plugin instance up allowing v4Peer, the source every
-// existing DHCPv4 test case sends from.
 func handler4(t *testing.T, key, contents string) handler.Handler4Ctx {
 	t.Helper()
 	h, err := relayinfo.Plugin.Setup4Ctx(writeMappings(t, contents), "key:"+key, "allow", "10.0.1.1")
@@ -57,9 +51,8 @@ func handler4(t *testing.T, key, contents string) handler.Handler4Ctx {
 	return h
 }
 
-// handler6 sets a plugin instance up allowing v6Peer. encapsulate6 below
-// builds every fixture's relay from net.IPv6loopback, which is what that
-// peer is.
+// handler6 allows v6Peer, which is the net.IPv6loopback encapsulate6 builds
+// every fixture's relay from.
 func handler6(t *testing.T, key, contents string) handler.Handler6Ctx {
 	t.Helper()
 	h, err := relayinfo.Plugin.Setup6Ctx(writeMappings(t, contents), "key:"+key, "allow", "::1")
@@ -253,10 +246,8 @@ func TestHandler4PassesThroughMessageTypes(t *testing.T) {
 	}
 }
 
-// TestHandler4DropsUnallowedSource pins that the source check runs first, for
-// every DHCPv4 message type, including the ones passthrough4 would otherwise
-// let through without a reply at all: a source outside the allow list never
-// reaches that check, or the mapping.
+// TestHandler4DropsUnallowedSource pins that the source check runs ahead of
+// passthrough4, so even a message type that would pass through is dropped.
 func TestHandler4DropsUnallowedSource(t *testing.T) {
 	h := handler4(t, "circuit-id", "rack4-sw1:eth3 192.0.2.31\n")
 
@@ -274,8 +265,6 @@ func TestHandler4DropsUnallowedSource(t *testing.T) {
 	}
 }
 
-// TestHandler4DropsWithNoRequestInfo pins that a request the server could not
-// attribute at all is dropped the same way an explicitly disallowed one is.
 func TestHandler4DropsWithNoRequestInfo(t *testing.T) {
 	h := handler4(t, "circuit-id", "rack4-sw1:eth3 192.0.2.31\n")
 	req, resp := message4(t, dhcpv4.MessageTypeDiscover, dhcpv4.OptGeneric(dhcpv4.AgentCircuitIDSubOption, []byte("rack4-sw1:eth3")))
@@ -285,8 +274,6 @@ func TestHandler4DropsWithNoRequestInfo(t *testing.T) {
 	assert.True(t, stop)
 }
 
-// TestHandler4AllowsCIDRMember pins that a CIDR allow entry admits any
-// address inside it, not only the addresses spelled out one by one.
 func TestHandler4AllowsCIDRMember(t *testing.T) {
 	h, err := relayinfo.Plugin.Setup4Ctx(writeMappings(t, "rack4-sw1:eth3 192.0.2.31\n"), "key:circuit-id", "allow", "10.0.2.0/24")
 	require.NoError(t, err)
@@ -298,12 +285,9 @@ func TestHandler4AllowsCIDRMember(t *testing.T) {
 	assert.Equal(t, "192.0.2.31", result.YourIPAddr.String())
 }
 
-// TestHandler4PassesRequestsWithoutRelayInformation pins where the allow
-// list stops applying. A client on the server's own link presents no relay
-// information and sends from its own address, or from 0.0.0.0 before it has
-// one, so gating it would stop a section serving on-link and relayed clients
-// together from answering the on-link half at all. The same client inventing
-// an option 82 is still refused, on the source address it could not fake.
+// TestHandler4PassesRequestsWithoutRelayInformation pins where the allow list
+// stops applying: gating a client that presents no relay information would
+// stop a shared section from answering on-link clients at all.
 func TestHandler4PassesRequestsWithoutRelayInformation(t *testing.T) {
 	const onLink = "10.0.9.9:68"
 
@@ -336,10 +320,8 @@ func TestHandler4PassesRequestsWithoutRelayInformation(t *testing.T) {
 	})
 }
 
-// TestHandler4GatesOnGiaddr pins that giaddr alone marks a request relayed.
-// A relay that sets giaddr but stamps no option 82 still has to be in the
-// allow list, and once it is the request carries no key to look up and goes
-// on to the next plugin.
+// TestHandler4GatesOnGiaddr pins that giaddr alone marks a request relayed:
+// a relay that sets it but stamps no option 82 still has to be in the list.
 func TestHandler4GatesOnGiaddr(t *testing.T) {
 	viaRelay := func(t *testing.T) (*dhcpv4.DHCPv4, *dhcpv4.DHCPv4) {
 		t.Helper()
@@ -534,10 +516,6 @@ func TestHandler6PassesThrough(t *testing.T) {
 		assert.Nil(t, result.GetOneOption(dhcpv6.OptionIANA))
 	})
 
-	// A message that reached the server without a relay carries no relay
-	// option to match on, so it is passed along rather than measured against
-	// the allow list. Gating it would stop a section serving on-link clients
-	// alongside relayed ones from answering the on-link ones.
 	t.Run("a non-relayed request from outside the allow list still passes", func(t *testing.T) {
 		inner := solicit6(t)
 		resp, err := dhcpv6.NewAdvertiseFromSolicit(inner)
@@ -561,9 +539,8 @@ func TestHandler6PassesThrough(t *testing.T) {
 	})
 }
 
-// TestHandler6DropsUnallowedSource pins that once a message did come through
-// a relay, the source check runs ahead of everything else: the
-// release/decline passthrough and the ordinary match path alike.
+// TestHandler6DropsUnallowedSource pins that the source check runs ahead of
+// both the release/decline passthrough and the ordinary match path.
 func TestHandler6DropsUnallowedSource(t *testing.T) {
 	h := handler6(t, "interface-id", "rack4-sw1:eth3 2001:db8::31\n")
 	iid := dhcpv6.OptInterfaceID([]byte("rack4-sw1:eth3"))
@@ -587,8 +564,6 @@ func TestHandler6DropsUnallowedSource(t *testing.T) {
 	})
 }
 
-// TestHandler6DropsWithNoRequestInfo pins that a request the server could not
-// attribute at all is dropped, DHCPv6 side.
 func TestHandler6DropsWithNoRequestInfo(t *testing.T) {
 	h := handler6(t, "interface-id", "rack4-sw1:eth3 2001:db8::31\n")
 	req, resp := relayed6(t, dhcpv6.OptInterfaceID([]byte("rack4-sw1:eth3")))
@@ -728,11 +703,9 @@ func TestAutorefresh(t *testing.T) {
 		"autorefresh did not recover after a bad reload")
 }
 
-// TestAutorefreshSurvivesRename pins the fix for the watcher watching the
-// directory instead of the file. A mapping file is usually replaced by
-// writing a new one next to it and renaming it over the old path, which
-// leaves a watch held on the file itself following the old inode into
-// nowhere. Watching the directory is what still catches this.
+// TestAutorefreshSurvivesRename pins the directory watch: replacing the file
+// by renaming a new one over it leaves a watch on the file itself following
+// the old inode into nowhere.
 func TestAutorefreshSurvivesRename(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ports.txt")

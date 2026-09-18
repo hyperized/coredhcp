@@ -64,24 +64,19 @@ const (
 	maxBodyBytes = 1 << 20
 )
 
-// The errors a NetBox response can turn into. They are sentinels, wrapped
-// into statusError's and findInterface's messages with %w, so a caller can
+// The errors a NetBox response turns into, wrapped with %w so a caller can
 // tell them apart with errors.Is instead of matching on text.
 var (
-	// ErrUnauthorized is what a request becomes on HTTP 401 or 403: the token
-	// is missing, wrong, or lacks the permission the call needed.
+	// ErrUnauthorized is returned on HTTP 401 or 403.
 	ErrUnauthorized = errors.New("not authorized")
-	// ErrNotFound is what a request becomes on HTTP 404.
+	// ErrNotFound is returned on HTTP 404.
 	ErrNotFound = errors.New("not found")
-	// ErrUnavailable is what a request becomes on HTTP 5xx: NetBox itself is
-	// failing or overloaded.
+	// ErrUnavailable is returned on HTTP 5xx.
 	ErrUnavailable = errors.New("netbox unavailable")
-	// ErrUnexpectedStatus is what a request becomes on any other non-2xx
-	// status.
+	// ErrUnexpectedStatus is returned on any other non-2xx status.
 	ErrUnexpectedStatus = errors.New("unexpected status")
-	// ErrNoInterface is what findInterface returns when NetBox has no
-	// interface carrying the looked-up MAC address. The caller sees it when
-	// a client is simply not one this plugin has an answer for.
+	// ErrNoInterface is returned when NetBox has no interface carrying the
+	// looked-up MAC address.
 	ErrNoInterface = errors.New("no interface carries this MAC address")
 )
 
@@ -101,11 +96,8 @@ func newClient(baseURL, token string, timeout time.Duration) *client {
 	return &client{
 		base: baseURL,
 		auth: authHeader(token),
-		// The caller now puts the same duration on the request context as a
-		// deadline covering both calls of a lookup, which is what actually
-		// bounds a request in normal operation. This stays set too, as a
-		// backstop for a call made through a context with no deadline of its
-		// own, such as one built by hand in a test.
+		// A backstop only: the caller puts the same duration on the request
+		// context, which is what bounds a lookup in normal operation.
 		hc: &http.Client{Timeout: timeout},
 	}
 }
@@ -273,10 +265,9 @@ type ipAddress struct {
 }
 
 // lookup resolves mac to the addresses documented on the interface carrying
-// it. mac must already be canonical lowercase. findInterface's ErrNoInterface
-// travels straight up to the caller here: whether "no interface for this MAC"
-// counts as an answer or a failure is a decision for whoever is caching the
-// result, not for this method.
+// it. mac must already be canonical lowercase. ErrNoInterface travels
+// straight up: whether that counts as an answer or a failure is a decision
+// for whoever caches the result.
 func (c *client) lookup(ctx context.Context, mac string) (lookupResult, error) {
 	ref, err := c.findInterface(ctx, mac)
 	if err != nil {
@@ -365,15 +356,12 @@ func (c *client) get(ctx context.Context, path string, q url.Values, out any) er
 	return nil
 }
 
-// statusError describes a non-2xx response, wrapping the sentinel that
-// matches it so a caller can act on the outcome with errors.Is instead of
-// parsing the message. Authentication failures name the token, since that is
-// the one thing an operator can act on and the status alone reads like a
-// routing mistake. A 404 gets its own wording too. Both paths are list
-// endpoints and answer 200 with an empty page for a filter that matches
-// nothing, so a 404 says the endpoint is not there at all: either the
-// configured URL points somewhere else, or this is a NetBox older than 4.2,
-// where MAC addresses were not yet a model of their own.
+// statusError names the token on an authentication failure, since that is the
+// one thing an operator can act on and the status alone reads like a routing
+// mistake. Both paths are list endpoints and answer 200 with an empty page for
+// a filter matching nothing, so a 404 means the endpoint is not there at all:
+// either the configured URL points elsewhere, or this is a NetBox older than
+// 4.2, where MAC addresses were not yet a model of their own.
 func statusError(path string, code int) error {
 	switch {
 	case code == http.StatusUnauthorized || code == http.StatusForbidden:

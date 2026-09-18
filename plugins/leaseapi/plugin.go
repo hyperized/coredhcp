@@ -209,12 +209,6 @@ func newServer(e endpoint.Endpoint) (*server, error) {
 	// Bind synchronously so an occupied port or an unwritable socket path
 	// fails the setup and the server refuses to start, rather than logging
 	// into the void a second later.
-	//
-	// The context is Background because there is nothing else to pass: a
-	// setup function takes its arguments and nothing more, and the
-	// context-aware form of it changes what the handler is given, not what
-	// setup is. Listen puts its own deadline on top, so a bind that cannot
-	// finish fails the startup instead of holding it.
 	ln, err := e.Listen(context.Background())
 	if err != nil {
 		return nil, err

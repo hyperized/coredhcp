@@ -244,9 +244,8 @@ func TestTCPSchemeAndBareAddressAreTheSameEndpoint(t *testing.T) {
 	_, err := metrics.Plugin.Setup4("tcp:" + addr)
 	require.NoError(t, err)
 
-	// The bare form parses to the same endpoint, so the second server
-	// section finds the listener the first one started rather than being
-	// refused as a second address.
+	// The bare form must parse to the same endpoint as the tcp: form, or
+	// this would be refused as a conflicting second address.
 	_, err = metrics.Plugin.Setup6(addr)
 	require.NoError(t, err)
 }

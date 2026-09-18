@@ -23,8 +23,6 @@ func testDUID() dhcpv6.DUID {
 	}
 }
 
-// asMessage asserts that result is the concrete *dhcpv6.Message the plugin
-// chain hands back, failing the test immediately if it isn't.
 func asMessage(t *testing.T, result dhcpv6.DHCPv6) *dhcpv6.Message {
 	t.Helper()
 	msg, ok := result.(*dhcpv6.Message)
@@ -575,12 +573,9 @@ func TestHandleReleaseCapsIAPDsAnsweredPerMessage(t *testing.T) {
 	assert.Len(t, resp.Options.IAPD(), 8, "the reply must not grow past the per-message cap")
 }
 
-// TestHandleCapsHintsPerIAPD pins the per-IA_PD hint cap: a SOLICIT with a
-// single IA_PD repeating the same hint far past the cap must not come back
-// with one IAPrefix per hint. Every repeated hint here names a prefix the
-// client already holds, which renewExactMatches renews and adds to the reply
-// on every match, so this is exactly the shape that used to make the reply
-// grow with whatever the sender put in the request.
+// TestHandleCapsHintsPerIAPD repeats a hint the client already holds, which
+// renewExactMatches renews and adds to the reply on every match: the shape
+// that used to grow the reply with whatever the sender put in the request.
 func TestHandleCapsHintsPerIAPD(t *testing.T) {
 	// 8 mirrors the plugin's unexported maxHintsPerIAPD.
 	const maxHintsPerIAPD = 8

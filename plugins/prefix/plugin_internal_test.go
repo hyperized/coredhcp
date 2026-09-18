@@ -127,8 +127,6 @@ func newTestPlugin(t *testing.T, pool string) (*pluginState, *fakeClock) {
 	}, clock
 }
 
-// asMessage asserts that result is the concrete *dhcpv6.Message the plugin
-// chain hands back, failing the test immediately if it isn't.
 func asMessage(t *testing.T, result dhcpv6.DHCPv6) *dhcpv6.Message {
 	t.Helper()
 	msg, ok := result.(*dhcpv6.Message)
@@ -288,12 +286,9 @@ func TestSweepOnceWithNothingExpired(t *testing.T) {
 	assert.Len(t, h.Records, 1, "a live delegation survives a sweep")
 }
 
-// TestSweeperReclaimsInBackground runs inside a synctest bubble: the
-// sweeper's ticker and the sleep below are fake time, advanced only once
-// every goroutine in the bubble is durably blocked, so the test does no real
-// waiting and no real I/O. With nobody asking for a prefix, a lapsed
-// delegation must go back to the pool on its own, and the goroutine must
-// stop when told to.
+// TestSweeperReclaimsInBackground runs in a synctest bubble: fake time is
+// advanced only once every goroutine in it is durably blocked, so the test
+// needs no real waiting.
 func TestSweeperReclaimsInBackground(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h, clock := newTestPlugin(t, "2001:db8::/64")
@@ -572,11 +567,6 @@ func buildHints(n int) *dhcpv6.OptIAPD {
 	return iapd
 }
 
-// TestRequestedPrefixes pins requestedPrefixes: an IA_PD with no hints
-// synthesises a single empty one, fewer hints than maxHintsPerIAPD pass
-// through unchanged, more than that are truncated to exactly the cap keeping
-// the first ones in order, and a nil Prefix inside the kept portion is still
-// normalised.
 func TestRequestedPrefixes(t *testing.T) {
 	t.Run("no hints at all synthesises one empty hint", func(t *testing.T) {
 		got := requestedPrefixes(&dhcpv6.OptIAPD{})

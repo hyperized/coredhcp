@@ -1427,10 +1427,6 @@ func TestAddrFrom(t *testing.T) {
 	})
 }
 
-// TestSelectorCloseStopsItsDelegates pins that a selector shuts down the
-// pool instances it built: they are gone from the leases registry
-// afterwards, and the goroutines and lease file each one held are released
-// with them.
 func TestSelectorCloseStopsItsDelegates(t *testing.T) {
 	leasedb := filepath.Join(t.TempDir(), "office.sqlite3")
 	path := writeYAML(t, "subnets:\n"+
@@ -1452,13 +1448,10 @@ func TestSelectorCloseStopsItsDelegates(t *testing.T) {
 	assert.Nil(t, s.subnets[0].delegate)
 	assert.Nil(t, registeredDelegate("range "+leasedb), "and it is out of the registry")
 
-	// Closing again is the case where a subnet has no delegate left, and
-	// must do nothing rather than panic.
+	// Closing again has to be a no-op, not a panic.
 	s.Close()
 }
 
-// TestRegisteredDelegateIgnoresOtherNames pins that a subnet picks up its
-// own delegate and not somebody else's instance.
 func TestRegisteredDelegateIgnoresOtherNames(t *testing.T) {
 	assert.Nil(t, registeredDelegate("range /no/such/lease/file.sqlite3"))
 }

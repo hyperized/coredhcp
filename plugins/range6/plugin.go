@@ -87,24 +87,21 @@
 //
 // # How many bindings there can be
 //
-// A binding is made for every DUID and IAID pair that asks for one, and it
-// lives in the map, in the allocator and as a database row until it expires.
-// The allocator will take a pool of up to 2^32 addresses, so a client that
+// A binding is made for every DUID and IAID pair that asks for one, and the
+// allocator will take a pool of up to 2^32 addresses, so a client that
 // rotates its DUID can fill the heap and the lease file with bindings nobody
-// will ever renew. max-leases is the bound on that: past it a new pair is
-// turned away with NoAddrsAvail, while the bindings that already exist carry
-// on renewing. The bindings loaded at startup count against it, so a lease
-// file that is already over the bound hands out nothing new until it shrinks.
+// will ever renew. Past max-leases a new pair is turned away with
+// NoAddrsAvail while the bindings that already exist carry on renewing, and
+// the bindings loaded at startup count against the bound.
 //
 // # Storage
 //
-// One writer goroutine owns the lease database and applies changes in the
-// order the packet path made them, so the plugin lock is never held across a
-// disk write. A slow disk costs queue depth instead of blocking every other
-// client, the sweeper and the lease API behind one insert. The queue is
-// bounded, and a binding that cannot be queued is refused rather than handed
-// out with no row behind it: an address nobody can see after a restart is how
-// two clients end up with the same one.
+// The reply to a client waits until its binding has reached the lease
+// database, and a binding that cannot be written is refused rather than
+// handed out: an address nobody can see after a restart is how two clients
+// end up with the same one. Writes are queued to one writer goroutine, so a
+// slow disk costs queue depth rather than blocking every other client, the
+// sweeper and the lease API behind one insert.
 package range6
 
 import (
@@ -240,11 +237,10 @@ func (r *Record) expired(t time.Time) bool {
 	return r.expires <= t.Unix()
 }
 
-// logThrottle paces a log line that one packet can trigger. It holds the
-// moment the last line went out and how many were dropped since.
+// logThrottle paces a log line that one packet can trigger.
 //
-// It is not safe for concurrent use and carries no lock of its own: each
-// instance has one owner, either the plugin lock or the writer goroutine.
+// Not safe for concurrent use and carries no lock of its own: each instance
+// has one owner, either the plugin lock or the writer goroutine.
 type logThrottle struct {
 	last    time.Time
 	skipped uint64
@@ -312,26 +308,24 @@ type pluginState struct {
 	// Guarded by the plugin lock, like the table it counts.
 	leaseLimit logThrottle
 
-	// dbCtx is the context every storage call runs under, and dbCancel ends
-	// it once the writer has drained. It is the plugin's own lifetime and
-	// not a request's: the writer outlives the packet that queued a change,
-	// and a handler may not hold on to the context it was called with.
+	// dbCtx is the plugin's own lifetime and not a request's: the writer
+	// outlives the packet that queued a change, and a handler may not hold on
+	// to the context it was called with. dbCancel ends it once the writer has
+	// drained.
 	//nolint:containedctx // the plugin instance's own lifetime, not a request's
 	dbCtx    context.Context
 	dbCancel context.CancelFunc
 
-	// writes carries binding changes to the writer goroutine, stopWrites
-	// closes to shut it down and writerDone closes once it has drained. All
-	// three are nil until startWriter runs, which is what makes a state
-	// built by hand write inline; see storage.go.
+	// writes carries binding changes to the writer goroutine. All three are
+	// nil until startWriter runs, which is what makes a state built by hand
+	// write inline; see storage.go.
 	writes     chan bindingWrite
 	stopWrites chan struct{}
 	writerDone chan struct{}
 
-	// pending holds the changes queued since the lock was taken, for the
-	// caller to wait on once it has let the lock go. Guarded by the plugin
-	// lock, and emptied by withLock before the lock is released, so it only
-	// ever holds one caller's writes.
+	// pending holds the changes queued since the lock was taken. Guarded by
+	// the plugin lock and emptied by withLock before the lock is released, so
+	// it only ever holds one caller's writes.
 	pending []pendingWrite
 
 	// now is the clock seam. It is written once during setup, before the
@@ -360,10 +354,8 @@ func (p *pluginState) timeNow() time.Time {
 // withLock runs fn under the plugin lock and hands back the binding writes
 // it queued, which the caller waits for with settle once the lock is free.
 //
-// Every path that changes binding state goes through here. Taking the queued
-// writes while the lock is still held is what makes them this caller's and
-// nobody else's, and doing it in one place is what stops a path from
-// forgetting to.
+// Taking the queued writes while the lock is still held is what makes them
+// this caller's and nobody else's.
 func (p *pluginState) withLock(fn func()) []pendingWrite {
 	p.Lock()
 	defer p.Unlock()
@@ -474,9 +466,7 @@ type ianaAnswer struct {
 //
 // The state changes happen under the plugin lock; the answers go into the
 // response afterwards, once the writes behind them are on disk. An IA whose
-// write failed is answered by refuse instead, because telling a client it
-// holds an address that no restart would know about is the one thing worth
-// avoiding here.
+// write failed is answered by refuse instead.
 func (p *pluginState) eachIANA(msg *dhcpv6.Message, resp dhcpv6.DHCPv6,
 	answer func(*dhcpv6.OptIANA, time.Time) *dhcpv6.OptIANA,
 	refuse func([4]byte) *dhcpv6.OptIANA,
@@ -503,16 +493,15 @@ func (p *pluginState) eachIANA(msg *dhcpv6.Message, resp dhcpv6.DHCPv6,
 	}
 }
 
-// noAddress is the answer for an IA whose change could not be written. A
-// client that is told nothing is available asks again, which is the right
-// thing for it to do when the server could not record what it just did.
+// noAddress is the answer for an IA whose change could not be written: a
+// client told nothing is available asks again, which is the right thing for
+// it to do when the server could not record what it just did.
 func noAddress(iaid [4]byte) *dhcpv6.OptIANA {
 	return statusIANA(iaid, dhcpIana.StatusNoAddrsAvail, "the binding could not be recorded")
 }
 
 // notDone is the answer for a RELEASE or a DECLINE whose change could not be
-// written. The client asked us to forget something and we did not manage to,
-// so saying so beats a Success it cannot rely on.
+// written, because saying so beats a Success the client cannot rely on.
 func notDone(iaid [4]byte) *dhcpv6.OptIANA {
 	return statusIANA(iaid, dhcpIana.StatusUnspecFail, "the change could not be recorded")
 }
@@ -708,9 +697,8 @@ func (p *pluginState) allocateLease(key string, duid []byte, iaid [4]byte, hint 
 		hostname: hostname,
 	}
 	// Handing out an address we could not record would put a second client
-	// on it after a restart, which is worse than one client asking again,
-	// so the address goes back whether the write is refused now or fails
-	// later.
+	// on it after a restart, so the address goes back whether the write is
+	// refused now or fails later.
 	if err := p.saveIPAddress(rec, func() { p.dropUnwritten(key, rec) }); err != nil {
 		log.Errorf("Could not persist the binding for DUID %x IAID %x: %v", duid, iaid, err)
 		p.freeUnrecorded(rec)
@@ -722,10 +710,10 @@ func (p *pluginState) allocateLease(key string, duid []byte, iaid [4]byte, hint 
 
 // dropUnwritten takes back a binding whose row did not make it to disk.
 //
-// The record goes only if it is still the one this write was for. A release,
-// or a later binding for the same client, has already dealt with the address
-// by then, and returning it a second time would take it from whoever holds
-// it now. The caller must hold p's lock.
+// Only if the record is still the one this write was for: a release, or a
+// later binding for the same client, has already dealt with the address by
+// then, and returning it a second time would take it from whoever holds it
+// now. The caller must hold p's lock.
 func (p *pluginState) dropUnwritten(key string, rec *Record) {
 	if p.Records6[key] != rec {
 		return
@@ -750,11 +738,10 @@ func (p *pluginState) atLeaseLimit(now time.Time) bool {
 	if p.maxLeases == 0 || len(p.Records6) < p.maxLeases {
 		return false
 	}
-	// A table full of bindings that have lapsed is a reason to sweep, not a
-	// reason to turn a client away: the background sweeper would return
-	// them, but not for up to half a lease time, and the client is here
-	// now. This is the bargain the allocation path already makes when the
-	// pool looks exhausted.
+	// A table full of lapsed bindings is a reason to sweep, not to turn a
+	// client away: the sweeper would return them, but not for up to half a
+	// lease time. Same bargain the allocation path makes when the pool looks
+	// exhausted.
 	p.reclaim(now)
 	if len(p.Records6) < p.maxLeases {
 		return false
@@ -814,13 +801,10 @@ func (p *pluginState) reallocateExpired(key string, record *Record, hostname str
 
 // renew extends a binding so it outlives the lifetime we are about to
 // advertise, and persists the change. A binding with enough time left is left
-// untouched.
-//
-// An extension that cannot be written is rolled back and the client is
-// answered with a status instead, the same as a fresh binding that cannot be
-// written: the lifetime in the reply would otherwise be one the lease file
-// has never heard of. It reports whether the client can be answered with
-// this binding. The caller must hold p's lock.
+// untouched. It reports whether the client can be answered with this
+// binding: an extension that cannot be written is rolled back, because the
+// lifetime in the reply would otherwise be one the lease file has never
+// heard of. The caller must hold p's lock.
 func (p *pluginState) renew(record *Record, hostname string, now time.Time) bool {
 	if !time.Unix(record.expires, 0).Before(now.Add(p.LeaseTime)) {
 		return true
@@ -1101,15 +1085,13 @@ func (p *pluginState) stopSweeper() {
 }
 
 // Close stops this instance's background goroutines and flushes the binding
-// writes it still has queued.
+// writes it still has queued. Call it once, and only on an instance setup
+// built.
 //
-// Nothing in the server calls it: plugins are set up once and live as long as
-// the process, which is why setup registers the instance and hands back only
-// a handler. It is here for a program that embeds the plugin and for the
-// black-box tests. Both hold the leases.Source the registry gave them, and
-// both would otherwise leave a sweeper and a writer running over a lease file
-// they are about to delete. Call it once, and only on an instance setup
-// built, which is the only kind a caller can get hold of.
+// Nothing in the server calls it: plugins are set up once and live as long
+// as the process. It is here for an embedding program and for the black-box
+// tests, which would otherwise leave a sweeper and a writer running over a
+// lease file they are about to delete.
 func (p *pluginState) Close() {
 	p.stopSweeper()
 	p.stopWriter()
@@ -1230,10 +1212,9 @@ func parseDeclineMax(opts *pluginOptions, raw string) error {
 	return nil
 }
 
-// parseMaxLeases reads the value of a "max-leases:" argument. Zero is allowed
-// and turns the bound off, for an operator who has weighed the pool against
-// the memory of the machine; a negative count is not, because it would read
-// as a limit and act as none at all.
+// parseMaxLeases reads the value of a "max-leases:" argument. Zero turns the
+// bound off; a negative count is refused because it would read as a limit
+// and act as none at all.
 func parseMaxLeases(opts *pluginOptions, raw string) error {
 	held, err := strconv.Atoi(raw)
 	if err != nil {
@@ -1353,8 +1334,6 @@ func newPluginState(args ...string) (*pluginState, error) {
 		stop:             make(chan struct{}),
 		done:             make(chan struct{}),
 	}
-	// Rooted at Background rather than at a request: this is how long the
-	// lease database is open for, which is the life of the process.
 	p.dbCtx, p.dbCancel = context.WithCancel(context.Background())
 	if err := p.restore(p.dbCtx, filename); err != nil {
 		return nil, err
@@ -1365,9 +1344,8 @@ func newPluginState(args ...string) (*pluginState, error) {
 // restore opens the lease database and puts every stored binding back where it
 // was, both in the map and in the allocator.
 //
-// What comes off disk counts against max-leases: a table that is already over
-// the bound keeps renewing what it holds and hands out nothing new, which is
-// the point of counting it.
+// What comes off disk counts against max-leases: a table already over the
+// bound keeps renewing what it holds and hands out nothing new.
 func (p *pluginState) restore(ctx context.Context, filename string) error {
 	if err := p.registerBackingDB(ctx, filename); err != nil {
 		return fmt.Errorf("could not setup lease storage: %w", err)

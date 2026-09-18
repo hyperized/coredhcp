@@ -135,9 +135,8 @@ func unixClient(path string) *http.Client {
 	}}
 }
 
-// response is what get() hands back: the parts of an http.Response that
-// outlive its body. Returning this rather than the *http.Response keeps a
-// caller from reading a body that get already drained and closed.
+// response holds the parts of an http.Response that outlive its body, so
+// callers can't read a body get() has already drained and closed.
 type response struct {
 	StatusCode int
 	Header     http.Header

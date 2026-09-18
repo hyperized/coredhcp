@@ -5,8 +5,8 @@ on:
     tags:
       - 'v*'
 
-# Nothing at the top level: each job asks for the one scope it needs, so a
-# compromised step in the image job cannot reach the release, or the reverse.
+# Each job asks for the one scope it needs, so a compromised step in the
+# image job cannot reach the release, or the reverse.
 permissions: {}
 
 jobs:
@@ -16,9 +16,8 @@ jobs:
     permissions:
       contents: read
       packages: write
-      # Keyless signing swaps a stored key for a short-lived OIDC token that
-      # Fulcio exchanges for a certificate. Nothing to rotate, nothing to leak,
-      # but the job has to be allowed to mint the token.
+      # Keyless signing mints a short-lived OIDC token instead of holding a
+      # key, and the job has to be allowed to mint it.
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -48,17 +47,12 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # mode=max records every build step and its inputs instead of only
-          # the final materials, and the SBOM lists what landed in the image.
+          # mode=max records every build step and its inputs, not just the
+          # final materials.
           provenance: mode=max
           sbom: true
       # Sign the digest, not a tag: a tag can be repointed at another image
-      # later, a digest cannot. The signature is pushed next to the image in
-      # ghcr and verifies against this workflow's identity, so
-      #   cosign verify ghcr.io/<repo>@<digest> \
-      #     --certificate-identity-regexp '^https://github.com/<repo>/' \
-      #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
-      # is enough to check it.
+      # later, a digest cannot.
       - name: sign the pushed image
         env:
           IMAGE: ghcr.io/${{ github.repository }}

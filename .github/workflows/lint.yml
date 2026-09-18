@@ -22,8 +22,8 @@ jobs:
       fail-fast: false
       matrix:
         # The terminal UI is a module of its own and golangci-lint only ever
-        # lints one module at a time. Its .golangci.yml is a symlink to the
-        # root one, so both runs use the same rules.
+        # lints one module at a time; its .golangci.yml is a symlink to the
+        # root one.
         module: ['.', 'cmd/coredhcp-tui']
     steps:
       - uses: actions/checkout@v7

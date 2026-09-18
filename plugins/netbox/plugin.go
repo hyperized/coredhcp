@@ -112,10 +112,8 @@ var log = logger.GetLogger("plugins/netbox")
 
 // Plugin wraps the netbox plugin information.
 //
-// Both setup functions are the context-aware form, so a lookup on the
-// request path can inherit the caller's deadline and be cancelled at
-// shutdown, instead of running to completion against a background context no
-// one can ever cut short.
+// Both setup functions are the context-aware form, so a lookup on the request
+// path inherits the caller's deadline and is cancelled at shutdown.
 var Plugin = plugins.Plugin{
 	Name:      "netbox",
 	Setup6Ctx: setup6,
@@ -275,10 +273,8 @@ func setupState(args ...string) (*pluginState, error) {
 // briefly unreachable is retried on the next packet instead of being
 // remembered as a failure for a whole TTL.
 //
-// The configured timeout is applied here, as a deadline on ctx, so it bounds
-// the miss path as a whole: both backend calls a cold lookup makes, not each
-// one separately. It is not applied around the cache read, which never
-// blocks on anything external.
+// The configured timeout bounds the miss path as a whole: both backend calls
+// a cold lookup makes, not each one separately.
 //
 // There is no single-flight around the miss path. Two packets from the same
 // client arriving while the first lookup is still out will both query NetBox,
@@ -298,8 +294,8 @@ func (p *pluginState) lookup(ctx context.Context, hwaddr net.HardwareAddr) (look
 	if err != nil && !errors.Is(err, ErrNoInterface) {
 		return lookupResult{}, err
 	}
-	// ErrNoInterface is how the client says NetBox has no interface carrying
-	// this MAC. That is an answer, and it gets cached for the negative TTL.
+	// ErrNoInterface is an answer, not a failure, and is cached for the
+	// negative TTL.
 
 	ttl := p.opts.ttl
 	if !result.found {
@@ -324,14 +320,10 @@ func skipsLookup4(msgType dhcpv4.MessageType) bool {
 	}
 }
 
-// logLookupFailure logs a failed NetBox lookup at the level its cause calls
-// for, and is shared by Handler4 and Handler6 so that choice lives in one
-// place. ErrUnauthorized and ErrNotFound are configuration faults: the token
-// is wrong or NetBox is older than this plugin needs, and every packet will
-// fail the same way until someone fixes it, so they get error level.
-// Everything else, a timeout or a 5xx included, is logged as a warning: it is
-// likely transient, and the client's own retransmission retries it. Either
-// way the request is dropped.
+// logLookupFailure logs ErrUnauthorized and ErrNotFound at error level, since
+// every packet fails the same way until an operator fixes the configuration.
+// Anything else is likely transient and the client's retransmission retries
+// it, so it gets a warning. Either way the request is dropped.
 func logLookupFailure(mac net.HardwareAddr, err error) {
 	if errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrNotFound) {
 		log.Errorf("dropping request from MAC address %s, NetBox lookup will keep failing until the configuration is fixed: %v", mac, err)
