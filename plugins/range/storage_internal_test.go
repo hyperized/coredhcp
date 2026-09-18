@@ -320,11 +320,17 @@ func (r *errRows) Next([]driver.Value) error {
 	return errors.New("simulated row iteration failure")
 }
 
-func TestLoadRecordsRowsIterationError(t *testing.T) {
-	const driverName = "rangeplugin_errrows_test"
-	sql.Register(driverName, errRowsDriver{})
+// errRowsDriverName is registered from init rather than from the test that
+// uses it: database/sql panics on a second Register under the same name, and
+// `go test -count=2` runs every test again inside one process.
+const errRowsDriverName = "rangeplugin_errrows_test"
 
-	db, err := sql.Open(driverName, "irrelevant")
+func init() {
+	sql.Register(errRowsDriverName, errRowsDriver{})
+}
+
+func TestLoadRecordsRowsIterationError(t *testing.T) {
+	db, err := sql.Open(errRowsDriverName, "irrelevant")
 	require.NoError(t, err)
 
 	_, err = loadRecords(t.Context(), db)

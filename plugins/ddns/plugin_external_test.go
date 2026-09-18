@@ -378,6 +378,10 @@ func TestPluginIsRegisterable(t *testing.T) {
 	require.NotNil(t, ddns.Plugin.Setup6)
 	assert.Nil(t, ddns.Plugin.Setup4Ctx, "this plugin reads the packet, not where it came from")
 	assert.Nil(t, ddns.Plugin.Setup6Ctx)
+	// The registry is a package global and a second registration under the
+	// same name panics, so put the entry back the way it was found. Without
+	// this, `go test -count=2` takes the whole binary down on the second run.
+	t.Cleanup(func() { delete(plugins.RegisteredPlugins, ddns.Plugin.Name) })
 	require.NoError(t, plugins.RegisterPlugin(&ddns.Plugin))
 }
 

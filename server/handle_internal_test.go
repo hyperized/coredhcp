@@ -1636,3 +1636,21 @@ func TestServeDropsWhileShuttingDown(t *testing.T) {
 	assert.Equal(t, Drops{ShuttingDown: 1}, l.gate.drops())
 	assert.Empty(t, conn.writes)
 }
+
+// A peer address that is not a *net.UDPAddr has no port to answer on, so the
+// datagram is dropped and the read loop carries on with the next one.
+func TestServeDropsADatagramFromANonUDPPeer(t *testing.T) {
+	captureLog(t)
+	req := mustRequest4(t, dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover))
+	conn := &fakeConn4{
+		reads: []fakeReadResult4{
+			{data: req.ToBytes(), peer: &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 67}},
+			{err: net.ErrClosed},
+		},
+	}
+	l := newTestListener4(nil, conn)
+
+	require.NoError(t, l.Serve())
+	assert.Empty(t, conn.writes)
+	assert.Zero(t, l.gate.drops(), "the gate never saw it, so it is not an overload drop")
+}
