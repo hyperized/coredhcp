@@ -122,6 +122,16 @@ jobs:
       - uses: actions/checkout@v7
       - name: DHCPv4 end-to-end over a bridge network
         run: make test-compose
+  all-plugins-integration:
+    runs-on: ubuntu-latest
+    # Longer than the other compose jobs: this stack builds the server image
+    # and three Go programs, starts six services and runs a scenario per
+    # plugin across both families.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: every core plugin end to end over two bridges
+        run: make test-all
   redis-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -129,6 +139,13 @@ jobs:
       - uses: actions/checkout@v7
       - name: redis plugin against a real Redis server
         run: make test-redis
+  ddns-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: ddns plugin against a real Knot DNS server
+        run: make test-ddns
   bench-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 15
