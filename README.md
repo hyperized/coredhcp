@@ -6,14 +6,13 @@ This is a maintained fork of [coredhcp/coredhcp](https://github.com/coredhcp/cor
 It diverges on purpose: standard library `log/slog` instead of logrus, a
 pure-Go sqlite driver (no cgo), per-instance plugin state instead of package
 globals, a strict golangci-lint config at zero issues, near-total test
-coverage, and a terminal UI that shows what the server is doing. Commits stay small and per-concern so changes can flow back
-upstream.
+coverage, and a terminal UI that shows what the server is doing. Commits
+stay small and per-concern so changes can flow back upstream.
 
 [![Build](https://github.com/hyperized/coredhcp/actions/workflows/build.yml/badge.svg)](https://github.com/hyperized/coredhcp/actions/workflows/build.yml)
 [![Tests](https://github.com/hyperized/coredhcp/actions/workflows/tests.yml/badge.svg)](https://github.com/hyperized/coredhcp/actions/workflows/tests.yml)
 [![Lint](https://github.com/hyperized/coredhcp/actions/workflows/lint.yml/badge.svg)](https://github.com/hyperized/coredhcp/actions/workflows/lint.yml)
 [![Fuzz](https://github.com/hyperized/coredhcp/actions/workflows/fuzz.yml/badge.svg)](https://github.com/hyperized/coredhcp/actions/workflows/fuzz.yml)
-[![Coverage](https://img.shields.io/badge/coverage-99.1%25-brightgreen)](https://github.com/hyperized/coredhcp/actions/workflows/tests.yml)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/hyperized/coredhcp)](go.mod)
 [![License](https://img.shields.io/github/license/hyperized/coredhcp)](LICENSE)
 
@@ -47,10 +46,11 @@ configure other plugins, see
 Day-to-day tasks are wrapped in the Makefile:
 
 ```
-$ make                  # build everything into bin/
+$ make                  # build everything into bin/, same as make build
 $ make generate         # re-render both main.go files from their templates
+$ make fmt              # gofmt over the whole tree
 $ make test             # unit tests with the race detector
-$ make test-linux       # the same suite on Linux, in a container
+$ make test-linux       # the same tests on Linux in a container, no -race
 $ make test-integration # DHCPv6 against a client in network namespaces
 $ make test-compose     # DHCPv4 against clients on a docker bridge
 $ make test-all         # every core plugin, both families, in compose
@@ -61,6 +61,7 @@ $ make cover            # coverage profile plus the total
 $ make bench            # benchmark suite with allocation counts
 $ make fuzz             # every fuzz target, 30s each (FUZZTIME=5m for longer)
 $ make demo             # the terminal UI against busy DHCP clients in compose
+$ make clean            # remove bin/ and the coverage profiles
 ```
 
 To run the example server, put a working configuration in `config.yml` (start
@@ -90,9 +91,10 @@ binary cannot quietly take precedence over the one an operator installed.
 
 The server shuts down cleanly on SIGINT/SIGTERM and exits 0. It exits non-zero
 when a listener dies under it or when the configuration names no address to
-bind, so a service manager sees a failure instead of a silent stop. `-h` lists
-the flags: config path, log level, log file and a `-P` that prints the built-in
-plugin list.
+bind, so a service manager sees a failure instead of a silent stop. `-h`
+lists the flags: `-c` for the config path, `-L` for the log level, `-l` for a
+log file to append to, `-N` to keep the log off stdout and stderr, and `-P`
+to print the built-in plugin list.
 
 Each datagram is handled on its own goroutine, and how many of those run at
 once is capped: eight per processor by default. A datagram that arrives while
@@ -112,6 +114,29 @@ server therefore drops relayed requests for that family, a non-zero `giaddr`
 on DHCPv4 and a Relay-forward on DHCPv6, and warns once at startup. On-link
 clients are unaffected. A deployment that has relays and no `relay` plugin has
 to add one, naming the relay addresses, before its relays work again.
+
+The test client in [cmd/client/](cmd/client) runs one solicit/advertise
+exchange against `[::1]:547` and logs the whole conversation:
+
+```
+$ cd cmd/client
+$ go build
+$ sudo ./client -interface lo0   # defaults to lo, pick your loopback
+```
+
+## Server with custom plugins
+
+To build a server with a custom set of plugins you can use the
+[coredhcp-generator](cmd/coredhcp-generator/) tool. Head there for
+documentation on how to use it. Both `cmd/coredhcp/main.go` and
+`cmd/coredhcp-tui/main.go` are rendered by it from templates in that
+directory; edit the template, run `make generate`, and commit the result. CI
+regenerates them and fails when a committed file has drifted.
+
+The [sleep](plugins/sleep/) plugin is in the tree but not in either default
+binary. It delays every response, which is a debugging aid rather than
+something a running server wants; add it to `core-plugins.txt` when you need
+it.
 
 ## Terminal UI
 
@@ -146,7 +171,7 @@ your terminal; quitting it tears the stack down. See
 The UI is a Go module of its own under `cmd/coredhcp-tui`, so the root
 `go.mod` does not carry tview and tcell, and the plain `coredhcp` binary and
 the container image do not link them. A generated server (see the generator
-below) can use it too: render `coredhcp-tui.go.template` instead of the
+above) can use it too: render `coredhcp-tui.go.template` instead of the
 default one.
 
 The hooks it runs on are exported, for anyone embedding the server:
@@ -154,16 +179,6 @@ The hooks it runs on are exported, for anyone embedding the server:
 every handled request, with its outcome and the plugin that ended the chain,
 to an [`events.Observer`](events/). With no observer attached the packet path
 pays a nil check and nothing else.
-
-Then try it with the test client in [cmd/client/](cmd/client), which runs one
-solicit/advertise exchange against `[::1]:547` and logs the whole
-conversation:
-
-```
-$ cd cmd/client
-$ go build
-$ sudo ./client -interface lo0   # defaults to lo, pick your loopback
-```
 
 ## Integration tests
 
@@ -204,6 +219,8 @@ that a lease came back, and it reads the side channels too: the records the
 ddns plugin wrote, the webhook and exec deliveries, the lease API and the
 metrics socket. Its README has the topology, the scenario table, and three
 things about plugin ordering the stack had to work around.
+`make test-all COREDHCP_LOGLEVEL=debug` turns the server's own log up for a
+run.
 
 `make test-redis` runs the redis plugin's integration tests against a real
 Redis server ([test/redis/](test/redis/)): one container for Redis with a
@@ -235,6 +252,15 @@ checked against the workflow that built it:
 $ cosign verify ghcr.io/hyperized/coredhcp@<digest> \
     --certificate-identity-regexp '^https://github.com/hyperized/coredhcp/' \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+The same build attaches max-mode provenance and an SBOM, as buildkit
+attestations rather than cosign ones, so `cosign verify-attestation` does not
+find them and they are read back off the registry instead:
+
+```
+$ docker buildx imagetools inspect ghcr.io/hyperized/coredhcp@<digest> \
+    --format '{{ json .Provenance }}'   # or '{{ json .SBOM }}'
 ```
 
 The server runs as uid 65532, not as root, so the two things it needs from the
@@ -276,15 +302,49 @@ NAT network achieves nothing. The compose stack in [test/compose/](test/compose/
 is a working example, with the server and its clients on one user-defined
 bridge.
 
-# Plugins
+## Plugins
 
 CoreDHCP is heavily based on plugins: even the core functionalities are
 implemented as plugins. Therefore, knowing how to write one is the key to add
 new features to CoreDHCP.
 
-Core plugins can be found under the [plugins](/plugins/) directory.
+The 29 core plugins live under the [plugins](plugins/) directory. Each one
+carries a `README.md` rendered from its package doc by `go generate
+./plugins/`, and that is the reference for its arguments and defaults; what
+follows is a map.
 
-This fork adds fifteen plugins upstream does not have built in:
+Fourteen come from upstream:
+
+* [autoconfigure](plugins/autoconfigure/) answers the DHCPv4 autoconfigure
+  option (RFC 2563) for clients that get no address
+* [dns](plugins/dns/) serves resolver addresses, both families
+* [file](plugins/file/) maps client identifiers to addresses from a text
+  file, both families
+* [ipv6only](plugins/ipv6only/) announces the IPv6-only preferred option
+  (RFC 8925) to DHCPv4 clients
+* [leasetime](plugins/leasetime/) sets the lease duration on DHCPv4
+  responses, written `lease_time:` in the config
+* [mtu](plugins/mtu/) serves the interface MTU option to DHCPv4 clients
+* [nbp](plugins/nbp/) points a client at a network boot program by URL,
+  both families
+* [netmask](plugins/netmask/) serves the subnet mask to DHCPv4 clients
+* [prefix](plugins/prefix/) delegates IPv6 prefixes to clients asking with
+  IA_PD
+* [range](plugins/range/) hands out DHCPv4 leases from an address range and
+  keeps them in sqlite across restarts
+* [router](plugins/router/) serves the default gateway to DHCPv4 clients
+* [searchdomains](plugins/searchdomains/) hands out the DNS search list,
+  both families
+* [serverid](plugins/serverid/) enforces the server identifier and drops a
+  message addressed to another server, written `server_id:` in the config
+* [staticroute](plugins/staticroute/) serves classless static routes
+  (option 121) to DHCPv4 clients
+
+`prefix`, `range` and `range6` share the pool arithmetic in
+[allocators](plugins/allocators/), which carves blocks of a given size out
+of a larger one.
+
+This fork adds fifteen more upstream does not have built in:
 
 * [options](plugins/options/) sets any DHCP option from config
   (`15:string:home.lan`), typed and validated, instead of one plugin per
@@ -312,9 +372,11 @@ This fork adds fifteen plugins upstream does not have built in:
   configured relay, closing the DHCPv4 giaddr reflector (the sender picks
   where the reply goes), and drops a DHCPRELEASE whose ciaddr is not the
   address it was sent from, so a neighbour's lease cannot be freed by
-  forging one; DHCPv6 matches the relay's source address instead and caps
-  relay nesting and hop count. Without it in the chain the server answers no
-  relay at all, see above
+  forging one, unless `release-check:off` says not to. `strict-giaddr` also
+  requires the datagram's source to equal giaddr, which RFC 1542 lets a
+  multi-homed relay break, so it is off by default. DHCPv6 matches the
+  relay's source address instead and caps relay nesting and hop count.
+  Without it in the chain the server answers no relay at all, see above
 * [ratelimit](plugins/ratelimit/) drops requests that arrive faster than a
   configured rate, one token bucket per client in a bounded LRU, keyed by MAC,
   source address or both, with an optional bucket shared by all traffic; the
@@ -362,14 +424,15 @@ This fork adds fifteen plugins upstream does not have built in:
   so the secrets other plugins were handed as `env:NAME` never reach it, and
   a webhook redirect is refused rather than followed
 * [leaseapi](plugins/leaseapi/) answers what the server is holding right now
-  over a read-only HTTP API on a unix socket or on loopback, which is the
+  over a read-only HTTP API on a unix socket or on loopback, answering
+  `/v1/leases`, `/v1/pools` and `/v1/health`, which is the
   most-asked-for thing in the upstream tracker (coredhcp/coredhcp#111) and what
-  a remote terminal UI needs to read; the pool and reservation plugins register
-  with the new [leases](leases/) package during setup and the API serves
-  whatever registered, so there is no lease state anywhere but in the plugin
-  that owns it
+  a remote terminal UI needs to read; `file`, `range`, `range6` and `prefix`
+  register with the new [leases](leases/) package during setup and the API
+  serves whatever registered, so there is no lease state anywhere but in
+  the plugin that owns it
 
-The last two started as the `netbox` and `redis` plugins in the
+The `netbox` and `redis` plugins started as plugins of the same names in the
 [coredhcp/plugins](https://github.com/coredhcp/plugins) repository, which has
 not moved since 2020. They are rewrites, not ports: both families are served,
 results are cached, errors are bounded, and the NetBox one speaks the current
@@ -435,6 +498,12 @@ carries the identifier as hex in its first field, upper or lower case, with an
 optional `0x` prefix and optional colons between the bytes. `redis` keys its
 hashes `duid:<hex>` or `client-id:<hex>` unless `prefix:` says otherwise.
 
+Both `file` and `relayinfo` take `autorefresh`, which rereads the mapping
+when the file changes. The watch is on the containing directory rather than
+on the file, because a watch on the file follows the inode a rename unlinked
+and would miss every update after the first, and writing a file by renaming
+another one over it is what most tools do.
+
 The `prefix` plugin got the same treatment for DHCPv6 delegations. Upstream
 wrote an expiry it never read and never called `Free`, so its pool drained
 permanently; delegations now lapse and go back to the pool, the lease time
@@ -445,21 +514,26 @@ are answered, and one client holds at most `max-prefixes` delegations (4 by
 default). Without either, a 146-byte SOLICIT carrying eight IA_PDs emptied a
 pool of four /64s, and about 4096 of them fit in one datagram.
 
-## Server with custom plugins
+### Plugin order
 
-To build a server with a custom set of plugins you can use the
-[coredhcp-generator](/cmd/coredhcp-generator/) tool. Head there for
-documentation on how to use it. Both `cmd/coredhcp/main.go` and
-`cmd/coredhcp-tui/main.go` are rendered by it from templates in that
-directory; edit the template, run `make generate`, and commit the result. CI
-regenerates them and fails when a committed file has drifted.
+The chain runs in the order the config lists it, and a plugin that ends the
+chain stops everything behind it, so the order is part of the configuration:
 
-The [sleep](plugins/sleep/) plugin is in the tree but not in either default
-binary. It delays every response, which is a debugging aid rather than
-something a running server wants; add it to `core-plugins.txt` when you need
-it.
+* `server_id` first, or a message meant for another server is served before
+  it is rejected.
+* `nbp` ends the chain from every path, so it can only be last. Ahead of
+  `prefix` or `range6` the client gets a boot URL and no address.
+* `autoconfigure` acts only on an OFFER that carries no address, so it
+  cannot fire behind an allocator such as `range`.
+* A `range` or `subnet` behind another `range` or `subnet` overwrites the
+  earlier address, since neither ends the chain when it allocates.
+* `relay` has to be in the chain for relayed requests to be answered at all;
+  `relayinfo` gates relayed messages only and lets an on-link client pass.
 
-# How to write a plugin
+[test/all/README.md](test/all/README.md) has the worked chain, every core
+plugin in it, and what the stack had to work around.
+
+## How to write a plugin
 
 The best way to learn is to read the comments and source code of the
 [example plugin](plugins/example/), which guides you through the implementation
@@ -473,7 +547,7 @@ index, the peer address and the address the listening socket is bound to out
 of it. A plugin uses one form or the other per family, never both; the example
 plugin shows both.
 
-# Authors
+## Authors
 
 * [Andrea Barberio](https://github.com/insomniacslk)
 * [Anatole Denis](https://github.com/natolumin)
