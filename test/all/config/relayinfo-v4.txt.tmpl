@@ -1,0 +1,8 @@
+# DHCPv4 relay agent information mapping: option 82 circuit-id to a fixed
+# address. The exerciser plays the relay and stamps this circuit-id onto one
+# of its relayed DISCOVERs.
+#
+# The address is on the relay-side network, because that is the link the
+# subscriber this circuit-id names would be on. It sits outside the pool the
+# subnet plugin serves for the same relay, so the two cannot be confused.
+@CIRCUIT_ID@ @RELAY@.31 2h

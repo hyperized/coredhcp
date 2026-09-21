@@ -8,11 +8,14 @@ import (
 	"database/sql"
 	"net"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/coredhcp/coredhcp/leases"
 
 	// The "sqlite" driver is registered by rangeplugin's own storage.go
 	// import, which is already pulled in below.
@@ -35,6 +38,31 @@ func seedDB(t *testing.T, path string, rows [][4]any) {
 		_, err := db.Exec("insert into leases4(mac, ip, expiry, hostname) values (?, ?, ?, ?)", r[0], r[1], r[2], r[3])
 		require.NoError(t, err)
 	}
+}
+
+// closeAfter shuts down the instance setup just registered.
+//
+// Setup leaves a sweeper and a writer running and the public API never
+// returns the instance, so this reaches it through the leases registry
+// instead; otherwise the writer is still touching the lease file when the
+// framework removes the temp directory around it.
+func closeAfter(t *testing.T, name string) {
+	t.Helper()
+	sources := leases.Sources()
+	// Newest first: two instances over one lease file report the same name.
+	for _, src := range slices.Backward(sources) {
+		if src.Name() != name {
+			continue
+		}
+		closer, ok := src.(interface{ Close() })
+		require.True(t, ok, "the registered source must be the plugin instance")
+		t.Cleanup(func() {
+			leases.Unregister(src)
+			closer.Close()
+		})
+		return
+	}
+	t.Fatalf("no source registered as %q", name)
 }
 
 func TestPluginSetupArgValidation(t *testing.T) {
@@ -78,6 +106,7 @@ func TestPluginSetupAndHandler4NewAllocationThenRenewal(t *testing.T) {
 	h4, err := rangeplugin.Plugin.Setup4(dbPath, "10.0.0.1", "10.0.0.5", "1h")
 	require.NoError(t, err)
 	require.NotNil(t, h4)
+	closeAfter(t, "range "+dbPath)
 
 	hwaddr, err := net.ParseMAC("02:00:00:00:01:00")
 	require.NoError(t, err)
@@ -103,6 +132,7 @@ func TestPluginSetupReloadsExistingLeases(t *testing.T) {
 
 	h4, err := rangeplugin.Plugin.Setup4(dbPath, "10.0.1.1", "10.0.1.2", "1h")
 	require.NoError(t, err)
+	closeAfter(t, "range "+dbPath)
 
 	// The first address was already re-allocated to the record loaded from
 	// storage, so a new client must get the second one.
@@ -121,7 +151,7 @@ func TestPluginSetupLoadRecordsFailure(t *testing.T) {
 
 	_, err := rangeplugin.Plugin.Setup4(dbPath, "10.0.0.1", "10.0.0.5", "1h")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "could not load records from file")
+	assert.Contains(t, err.Error(), "could not load the leases in")
 }
 
 func TestPluginSetupReallocationExhausted(t *testing.T) {
@@ -136,7 +166,7 @@ func TestPluginSetupReallocationExhausted(t *testing.T) {
 
 	_, err := rangeplugin.Plugin.Setup4(dbPath, "10.0.2.1", "10.0.2.1", "1h")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to re-allocate leased ip")
+	assert.Contains(t, err.Error(), "does not fit the configured pool")
 }
 
 func TestPluginSetupReallocationMismatch(t *testing.T) {
@@ -151,7 +181,7 @@ func TestPluginSetupReallocationMismatch(t *testing.T) {
 
 	_, err := rangeplugin.Plugin.Setup4(dbPath, "10.0.3.1", "10.0.3.2", "1h")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "did not re-allocate requested leased ip")
+	assert.Contains(t, err.Error(), "sits outside the configured pool")
 }
 
 // TestPluginSetupSweepArgument covers the optional fifth argument end to end.
@@ -180,6 +210,7 @@ func TestPluginSetupSweepArgument(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.NotNil(t, h4)
+			closeAfter(t, "range "+args[0])
 		})
 	}
 }
@@ -228,6 +259,7 @@ func TestPluginSetupDeclineProbationArgument(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.NotNil(t, h4)
+			closeAfter(t, "range "+args[0])
 		})
 	}
 }
@@ -257,6 +289,7 @@ func TestPluginSetupDeclineMaxArgument(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.NotNil(t, h4)
+			closeAfter(t, "range "+args[0])
 		})
 	}
 }

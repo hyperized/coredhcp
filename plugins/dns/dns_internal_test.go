@@ -35,7 +35,9 @@ func TestPluginStateHandler6(t *testing.T) {
 		require.NotNil(t, resp)
 		assert.False(t, stop)
 
-		found := resp.(*dhcpv6.Message).Options.DNS()
+		msg, ok := resp.(*dhcpv6.Message)
+		require.True(t, ok, "response must be a *dhcpv6.Message")
+		found := msg.Options.DNS()
 		assert.Equal(t, servers, found)
 	})
 

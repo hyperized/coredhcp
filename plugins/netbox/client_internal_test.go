@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -74,13 +75,13 @@ func TestParseBaseURL(t *testing.T) {
 		{name: "host with a subpath", raw: "https://netbox.example.com/netbox", want: "https://netbox.example.com/netbox"},
 		{name: "trailing slash stripped", raw: "https://netbox.example.com/", want: "https://netbox.example.com"},
 		{name: "subpath with trailing slash stripped", raw: "https://netbox.example.com/netbox/", want: "https://netbox.example.com/netbox"},
-		{name: "empty string errors", raw: "", wantErrText: "scheme must be http or https"},
-		{name: "scheme is not http or https", raw: "ftp://host", wantErrText: "scheme must be http or https"},
-		{name: "missing scheme entirely", raw: "netbox.example.com", wantErrText: "scheme must be http or https"},
-		{name: "missing host", raw: "https://", wantErrText: "missing host"},
+		{name: "empty string errors", raw: "", wantErrText: "has no http or https scheme"},
+		{name: "scheme is not http or https", raw: "ftp://host", wantErrText: "has no http or https scheme"},
+		{name: "missing scheme entirely", raw: "netbox.example.com", wantErrText: "has no http or https scheme"},
+		{name: "missing host", raw: "https://", wantErrText: "has no host"},
 		{name: "URL carrying a query", raw: "https://h/?a=b", wantErrText: "query or fragment"},
 		{name: "URL carrying a fragment", raw: "https://h/#f", wantErrText: "query or fragment"},
-		{name: "syntactically invalid URL", raw: "http://%zz", wantErrText: "invalid NetBox URL"},
+		{name: "syntactically invalid URL", raw: "http://%zz", wantErrText: "does not parse"},
 	}
 
 	for _, tc := range cases {
@@ -113,7 +114,7 @@ func TestResolveToken(t *testing.T) {
 		{
 			name:        "an empty string errors",
 			arg:         "",
-			wantErrText: "cannot be empty",
+			wantErrText: "the API token argument is empty",
 		},
 		{
 			name:        "env: with no name errors",
@@ -307,9 +308,8 @@ func TestLookupMACNotFound(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret", time.Second)
-	result, err := c.lookup(context.Background(), "aa:bb:cc:dd:ee:ff")
-	require.NoError(t, err)
-	assert.False(t, result.found)
+	_, err := c.lookup(context.Background(), "aa:bb:cc:dd:ee:ff")
+	require.ErrorIs(t, err, ErrNoInterface, "a MAC NetBox does not know is reported to the caller, not swallowed here")
 	assert.Equal(t, int32(1), calls.Load(), "a MAC NetBox does not know must not trigger the address lookup")
 }
 
@@ -378,9 +378,8 @@ func TestLookupNothingUsable(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret", time.Second)
-	result, err := c.lookup(context.Background(), "aa:bb:cc:dd:ee:ff")
-	require.NoError(t, err)
-	assert.False(t, result.found)
+	_, err := c.lookup(context.Background(), "aa:bb:cc:dd:ee:ff")
+	require.ErrorIs(t, err, ErrNoInterface)
 	assert.Equal(t, int32(1), calls.Load())
 }
 
@@ -576,7 +575,7 @@ func TestGetRequestBuildFailure(t *testing.T) {
 	var out macAddressPage
 	err := c.get(context.Background(), macAddressPath, url.Values{}, &out)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "building request")
+	assert.Contains(t, err.Error(), "building the request")
 }
 
 // errReadCloser is an io.ReadCloser whose Read always fails with something
@@ -608,7 +607,7 @@ func TestGetReadFailure(t *testing.T) {
 	var out macAddressPage
 	err := c.get(context.Background(), macAddressPath, url.Values{}, &out)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "reading response")
+	assert.Contains(t, err.Error(), "reading the response")
 }
 
 func TestInterfaceRefString(t *testing.T) {
@@ -653,7 +652,43 @@ func TestLookupBaseURLWithSubpath(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL+"/netbox", "secret", time.Second)
-	result, err := c.lookup(context.Background(), "aa:bb:cc:dd:ee:ff")
-	require.NoError(t, err)
-	assert.False(t, result.found)
+	_, err := c.lookup(context.Background(), "aa:bb:cc:dd:ee:ff")
+	require.ErrorIs(t, err, ErrNoInterface)
+}
+
+func TestFindInterfaceReturnsErrNoInterface(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(macPageBody(t))
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL, "secret", time.Second)
+	ref, err := c.findInterface(context.Background(), "aa:bb:cc:dd:ee:ff")
+	require.ErrorIs(t, err, ErrNoInterface)
+	assert.Nil(t, ref)
+	assert.Contains(t, err.Error(), "aa:bb:cc:dd:ee:ff")
+}
+
+func TestStatusError(t *testing.T) {
+	cases := []struct {
+		name       string
+		code       int
+		wantTarget error
+	}{
+		{name: "401 is unauthorized", code: http.StatusUnauthorized, wantTarget: ErrUnauthorized},
+		{name: "403 is unauthorized", code: http.StatusForbidden, wantTarget: ErrUnauthorized},
+		{name: "404 is not found", code: http.StatusNotFound, wantTarget: ErrNotFound},
+		{name: "500 is unavailable", code: http.StatusInternalServerError, wantTarget: ErrUnavailable},
+		{name: "503 is unavailable", code: http.StatusServiceUnavailable, wantTarget: ErrUnavailable},
+		{name: "429 is an unexpected status", code: http.StatusTooManyRequests, wantTarget: ErrUnexpectedStatus},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := statusError(macAddressPath, tc.code)
+			require.ErrorIs(t, err, tc.wantTarget)
+			assert.Contains(t, err.Error(), macAddressPath)
+			assert.Contains(t, err.Error(), strconv.Itoa(tc.code))
+		})
+	}
 }

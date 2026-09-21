@@ -87,7 +87,7 @@ func TestIPv4FreeOutOfRange(t *testing.T) {
 			err := alloc.Free(net.IPNet{IP: tt.ip, Mask: net.CIDRMask(32, 32)})
 			// Free always reports the same "out of range" error, even when the
 			// underlying cause was actually an invalid (non-v4) address.
-			assert.EqualError(t, err, "IPv4 address outside of allowed range")
+			assert.ErrorContains(t, err, "IPv4 address outside of allowed range")
 		})
 	}
 }
@@ -111,5 +111,5 @@ func TestNewIPv4AllocatorInvalidAddresses(t *testing.T) {
 
 func TestNewIPv4AllocatorStartAfterEnd(t *testing.T) {
 	_, err := bitmap.NewIPv4Allocator(net.IPv4(192, 0, 2, 255), net.IPv4(192, 0, 2, 0))
-	assert.EqualError(t, err, "no IPs in the given range to allocate")
+	assert.ErrorContains(t, err, "no IPs in the given range to allocate")
 }

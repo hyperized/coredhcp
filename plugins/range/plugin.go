@@ -12,7 +12,7 @@
 //	  plugins:
 //	    - range: leases.sqlite3 10.0.0.100 10.0.0.200 1h
 //
-// Three optional arguments may follow, in any order:
+// Four optional arguments may follow, in any order:
 //
 //	sweep:<duration>              how often expired leases are reclaimed in
 //	                              the background. Defaults to half the lease
@@ -26,6 +26,11 @@
 //	                              of the pool, held between 1 and 65536.
 //	                              0 disables the quarantine, the same as
 //	                              decline-probation:0 does.
+//	max-leases:<count>            how many leases this instance may hold at
+//	                              once. Defaults to 65536. A pool with room
+//	                              for more addresses than that needs this
+//	                              raised, or it stops handing out leases at
+//	                              the bound. 0 turns the bound off.
 //
 // Leases are reclaimed in two places: a background sweeper on a ticker, and
 // lazily on the allocation path when the pool looks exhausted. Without either,
@@ -56,9 +61,19 @@
 // pool, and a pool that runs dry ends the probation of whichever address has
 // been held longest. Probation says which addresses look risky, it never
 // reserves one.
+//
+// # Storage
+//
+// The reply to a client waits until its lease has reached the lease
+// database, and a lease that cannot be written is refused rather than handed
+// out: an address nobody can see after a restart is how two clients end up
+// with the same one. Writes are queued to one writer goroutine, so a slow
+// disk costs queue depth rather than blocking every other client, the
+// sweeper and the lease API behind one insert.
 package rangeplugin
 
 import (
+	"context"
 	"database/sql"
 	"encoding/binary"
 	"errors"
@@ -107,8 +122,12 @@ const (
 	// declined addresses may sit in quarantine at once, e.g. "decline-max:8".
 	declineMaxArg = "decline-max"
 
+	// maxLeasesArg names the optional argument that overrides how many
+	// leases this instance may hold at once, e.g. "max-leases:4096".
+	maxLeasesArg = "max-leases"
+
 	// optionSyntax spells the optional arguments out for error messages.
-	optionSyntax = sweepArg + ":<duration>, " + declineArg + ":<duration> or " + declineMaxArg + ":<count>"
+	optionSyntax = sweepArg + ":<duration>, " + declineArg + ":<duration>, " + declineMaxArg + ":<count> or " + maxLeasesArg + ":<count>"
 
 	// minSweepInterval floors the derived sweep interval. A short lease time
 	// (a captive portal handing out 30s leases, say) must not turn the
@@ -133,19 +152,65 @@ const (
 	// going to fix. An operator who wants more can still say so with
 	// decline-max.
 	maxDeclineQuarantine = 1 << 16
+
+	// defaultMaxLeases bounds the lease table when max-leases says nothing.
+	// Every lease is a map entry and a database row, so a pool wider than the
+	// machine has memory for needs a bound that is not the pool.
+	defaultMaxLeases = 1 << 16
+
+	// leaseLimitEvery paces the refusal log. Once the table is full every
+	// new client is turned away, and one line per packet would bury the
+	// reason among the symptoms.
+	leaseLimitEvery = time.Minute
+
+	// maxHostnameLen is the RFC 1035 section 2.3.4 limit on a domain name,
+	// and the length a client-supplied name is truncated to before it is
+	// stored.
+	maxHostnameLen = 255
+
+	// hostnameChars is the allow-list a client-supplied name is filtered
+	// through. The name is only ever shown to an operator, so anything that
+	// is not a domain character is dropped rather than escaped later.
+	hostnameChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._"
 )
 
 // Record holds an IP lease record
 type Record struct {
-	IP       net.IP
-	expires  int
+	IP net.IP
+
+	// expires is the Unix second the lease lapses at. It is int64 and not
+	// int because the 32-bit builds this runs on (a Raspberry Pi Zero is a
+	// deployment target) would wrap it negative on 2038-01-19, at which
+	// point every lease reads as expired and the pool empties itself.
+	expires  int64
 	hostname string
 }
 
 // expired reports whether the lease had already lapsed at t. Expiry is stored
 // with second granularity, so a lease expiring exactly at t counts as expired.
 func (r *Record) expired(t time.Time) bool {
-	return int64(r.expires) <= t.Unix()
+	return r.expires <= t.Unix()
+}
+
+// logThrottle paces a log line that one packet can trigger.
+//
+// Not safe for concurrent use and carries no lock of its own: each instance
+// has one owner, either the plugin lock or the writer goroutine.
+type logThrottle struct {
+	last    time.Time
+	skipped uint64
+}
+
+// ready reports whether a line may go out now, and how many were suppressed
+// since the last one that did. The first call always lets one through.
+func (t *logThrottle) ready(now time.Time, every time.Duration) (uint64, bool) {
+	if !t.last.IsZero() && now.Sub(t.last) < every {
+		t.skipped++
+		return 0, false
+	}
+	skipped := t.skipped
+	t.skipped, t.last = 0, now
+	return skipped, true
 }
 
 // pluginState is the data held by an instance of the range plugin
@@ -177,11 +242,37 @@ type pluginState struct {
 
 	// sweepInterval is how often the background sweeper reclaims expired
 	// leases, declineProbation how long a declined address is held back, and
-	// declineMax how many may be held back at once. All three are set during
-	// setup and read-only afterwards.
+	// declineMax how many may be held back at once, and maxLeases how many
+	// leases the instance may hold before it turns new clients away. All
+	// four are set during setup and read-only afterwards.
 	sweepInterval    time.Duration
 	declineProbation time.Duration
 	declineMax       int
+	maxLeases        int
+
+	// leaseLimit paces the log line saying the lease table is full. Guarded
+	// by the plugin lock, like the table it counts.
+	leaseLimit logThrottle
+
+	// dbCtx is the plugin's own lifetime and not a request's: the writer
+	// outlives the packet that queued a change, and a handler may not hold on
+	// to the context it was called with. dbCancel ends it once the writer has
+	// drained.
+	//nolint:containedctx // the plugin instance's own lifetime, not a request's
+	dbCtx    context.Context
+	dbCancel context.CancelFunc
+
+	// writes carries lease changes to the writer goroutine. All three are nil
+	// until startWriter runs, which is what makes a state built by hand write
+	// inline; see storage.go.
+	writes     chan leaseWrite
+	stopWrites chan struct{}
+	writerDone chan struct{}
+
+	// pending holds the changes queued since the lock was taken. Guarded by
+	// the plugin lock and emptied by withLock before the lock is released, so
+	// it only ever holds one caller's writes.
+	pending []pendingWrite
 
 	// now is the clock seam. It is written once during setup, before the
 	// sweeper goroutine starts, and only read afterwards. Use timeNow rather
@@ -206,6 +297,18 @@ func (p *pluginState) timeNow() time.Time {
 	return p.now()
 }
 
+// withLock runs fn under the plugin lock and hands back the lease writes it
+// queued, which the caller waits for with settle once the lock is free.
+//
+// Taking the queued writes while the lock is still held is what makes them
+// this caller's and nobody else's.
+func (p *pluginState) withLock(fn func()) []pendingWrite {
+	p.Lock()
+	defer p.Unlock()
+	fn()
+	return p.takePending()
+}
+
 // Handler4 handles DHCPv4 packets for the range plugin.
 //
 // RELEASE and DECLINE do their bookkeeping and then hand the response on
@@ -224,19 +327,51 @@ func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 		return resp, false
 	}
 
-	p.Lock()
-	defer p.Unlock()
-
 	mac := req.ClientHWAddr.String()
-	record := p.leaseFor(mac, p.Recordsv4[mac], req.HostName())
-	if record == nil {
+	hostname := clientHostname(req)
+
+	var ip net.IP
+	pending := p.withLock(func() {
+		if record := p.leaseFor(mac, p.Recordsv4[mac], hostname); record != nil {
+			// Copied out under the lock: once it is released the record
+			// belongs to whoever takes the lock next.
+			ip = record.IP
+		}
+	})
+
+	// The reply waits for the lease to reach the disk: a client told it holds
+	// an address that a crash then forgets would find it handed to the next
+	// client at the following start.
+	if err := p.settle(pending); err != nil {
+		log.Errorf("Not leasing to MAC %s, its lease could not be written: %v; the client will retry, check the lease database is writable and not held by another process", mac, err)
+		return nil, true
+	}
+	if ip == nil {
 		return nil, true
 	}
 
-	resp.YourIPAddr = record.IP
+	resp.YourIPAddr = ip
 	resp.Options.Update(dhcpv4.OptIPAddressLeaseTime(p.LeaseTime.Round(time.Second)))
-	log.Printf("found IP address %s for MAC %s", record.IP, mac)
+	log.Printf("found IP address %s for MAC %s", ip, mac)
 	return resp, false
+}
+
+// clientHostname reads the name the client asks to be known by, from option
+// 12. Nothing in the plugin acts on it; it is filtered and truncated because
+// RFC 3396 lets a client split an option across several instances that the
+// decoder joins back together, so option 12 can arrive as tens of kilobytes
+// and go straight into the lease row and back out through the lease API.
+func clientHostname(req *dhcpv4.DHCPv4) string {
+	name := strings.Map(func(r rune) rune {
+		if strings.ContainsRune(hostnameChars, r) {
+			return r
+		}
+		return -1
+	}, req.HostName())
+	if len(name) > maxHostnameLen {
+		return name[:maxHostnameLen]
+	}
+	return name
 }
 
 // leaseFor returns the lease to answer mac with, allocating or renewing as
@@ -251,8 +386,9 @@ func (p *pluginState) leaseFor(mac string, record *Record, hostname string) *Rec
 		return p.allocateLease(mac, net.IPNet{}, hostname, now)
 	case record.expired(now):
 		return p.reallocateExpired(mac, record, hostname, now)
+	case !p.renew(mac, record, hostname, now):
+		return nil
 	default:
-		p.renew(mac, record, hostname, now)
 		return record
 	}
 }
@@ -261,23 +397,77 @@ func (p *pluginState) leaseFor(mac string, record *Record, hostname string) *Rec
 // memory. hint is the zero net.IPNet for a client we've never seen, or the
 // address it held before its lease lapsed; the bitmap allocator honours a hint
 // whenever that address is still free. A nil return means the pool is
-// exhausted. The caller must hold p's lock.
+// exhausted, the lease table is at its bound, or the lease could not be
+// persisted. The caller must hold p's lock.
 func (p *pluginState) allocateLease(mac string, hint net.IPNet, hostname string, now time.Time) *Record {
+	if p.atLeaseLimit(now) {
+		return nil
+	}
 	ip, err := p.allocate(hint)
 	if err != nil {
-		log.Errorf("Could not allocate IP for MAC %s: %v", mac, err)
+		log.Errorf("Could not allocate an address for MAC %s: %v; the client will retry, widen the pool or shorten the lease time if this keeps happening", mac, err)
 		return nil
 	}
 	rec := &Record{
 		IP:       ip.IP.To4(),
-		expires:  int(now.Add(p.LeaseTime).Unix()),
+		expires:  now.Add(p.LeaseTime).Unix(),
 		hostname: hostname,
 	}
-	if err := p.saveIPAddress(mac, rec); err != nil {
-		log.Errorf("SaveIPAddress for MAC %s failed: %v", mac, err)
+	// Handing out an address we could not record would put a second client on
+	// it after a restart, so the address goes back whether the write is
+	// refused now or fails later.
+	if err := p.saveIPAddress(mac, rec, func() { p.dropUnwritten(mac, rec) }); err != nil {
+		log.Errorf("Could not write the lease for MAC %s, so it was not handed out: %v; check the lease database is writable and not held by another process", mac, err)
+		p.freeUnrecorded(rec)
+		return nil
 	}
 	p.Recordsv4[mac] = rec
 	return rec
+}
+
+// dropUnwritten takes back a lease whose row did not make it to disk.
+//
+// Only if the record is still the one this write was for: a release, or a
+// later lease for the same client, has already dealt with the address by
+// then, and returning it a second time would take it from whoever holds it
+// now. The caller must hold p's lock.
+func (p *pluginState) dropUnwritten(mac string, rec *Record) {
+	if p.Recordsv4[mac] != rec {
+		return
+	}
+	delete(p.Recordsv4, mac)
+	p.freeUnrecorded(rec)
+}
+
+// freeUnrecorded returns an address to the pool whose lease was never
+// recorded, so nothing else can be holding it. The caller must hold p's
+// lock.
+func (p *pluginState) freeUnrecorded(rec *Record) {
+	if err := p.allocator.Free(net.IPNet{IP: rec.IP}); err != nil {
+		log.Errorf("Could not return the unrecorded address %s to the pool: %v; it stays out of circulation until the server is restarted", rec.IP, err)
+	}
+}
+
+// atLeaseLimit reports whether the lease table has reached max-leases, and
+// logs the refusal at a pace an operator can read. A bound of zero means the
+// operator turned it off. The caller must hold p's lock.
+func (p *pluginState) atLeaseLimit(now time.Time) bool {
+	if p.maxLeases == 0 || len(p.Recordsv4) < p.maxLeases {
+		return false
+	}
+	// A table full of lapsed leases is a reason to sweep, not to turn a
+	// client away: the sweeper would return them, but not for up to half a
+	// lease time. Same bargain the allocation path makes when the pool looks
+	// exhausted.
+	p.reclaim(now)
+	if len(p.Recordsv4) < p.maxLeases {
+		return false
+	}
+	if skipped, ok := p.leaseLimit.ready(now, leaseLimitEvery); ok {
+		log.Warningf("Holding %d leases, the %s bound, so new clients are turned away (%d refusal(s) since the last of these); raise %s or shorten the lease time",
+			p.maxLeases, maxLeasesArg, skipped, maxLeasesArg)
+	}
+	return true
 }
 
 // allocate asks the allocator for an address, and on failure reclaims what has
@@ -326,7 +516,7 @@ func (p *pluginState) evictOldestDeclined() bool {
 		return false
 	}
 	if err := p.allocator.Free(net.IPNet{IP: net.ParseIP(oldest)}); err != nil {
-		log.Errorf("Could not return declined IP %s to the pool: %v", oldest, err)
+		log.Errorf("Could not end the probation of declined address %s: %v; it stays out of the pool until the server is restarted", oldest, err)
 		return false
 	}
 	delete(p.declined, oldest)
@@ -343,13 +533,15 @@ func (p *pluginState) reallocateExpired(mac string, record *Record, hostname str
 	log.Printf("lease on %s for MAC %s has expired, re-allocating", record.IP, mac)
 	hint := net.IPNet{IP: record.IP}
 	if err := p.releaseLease(mac, record); err != nil {
-		log.Errorf("Could not reclaim expired lease for MAC %s: %v", mac, err)
+		log.Errorf("Could not reclaim the expired lease for MAC %s: %v; the client keeps the address it has and the next sweep will try again", mac, err)
 		// The address is still spoken for somewhere (a row we failed to
 		// delete, or an allocator that would not free it), so allocating
 		// again could hand a second client the same address. Keep this client
 		// where it is and let the next sweep retry.
 		p.Recordsv4[mac] = record
-		p.renew(mac, record, hostname, now)
+		if !p.renew(mac, record, hostname, now) {
+			return nil
+		}
 		return record
 	}
 	return p.allocateLease(mac, hint, hostname, now)
@@ -357,17 +549,32 @@ func (p *pluginState) reallocateExpired(mac string, record *Record, hostname str
 
 // renew extends record's lease so it outlives the lease time we are about to
 // advertise, and persists the change. A lease with enough time left is left
-// untouched. The caller must hold p's lock.
-func (p *pluginState) renew(mac string, record *Record, hostname string, now time.Time) {
+// untouched. It reports whether the client can be answered with this lease:
+// an extension that cannot be written is rolled back, because the reply
+// would otherwise name a lease time the lease file does not know about. The
+// caller must hold p's lock.
+func (p *pluginState) renew(mac string, record *Record, hostname string, now time.Time) bool {
 	// Ensure we extend the existing lease at least past when the one we're giving expires
-	if !time.Unix(int64(record.expires), 0).Before(now.Add(p.LeaseTime)) {
-		return
+	if !time.Unix(record.expires, 0).Before(now.Add(p.LeaseTime)) {
+		return true
 	}
-	record.expires = int(now.Add(p.LeaseTime).Round(time.Second).Unix())
+	was, wasHostname := record.expires, record.hostname
+	record.expires = now.Add(p.LeaseTime).Round(time.Second).Unix()
 	record.hostname = hostname
-	if err := p.saveIPAddress(mac, record); err != nil {
-		log.Errorf("Could not persist lease for MAC %s: %v", mac, err)
+	extended := record.expires
+	undo := func() {
+		// Only if nothing has moved it on since: a renewal that landed
+		// after this one is the client's current lease, not ours to shorten.
+		if record.expires == extended {
+			record.expires, record.hostname = was, wasHostname
+		}
 	}
+	if err := p.saveIPAddress(mac, record, undo); err != nil {
+		log.Errorf("Could not write the renewed lease for MAC %s: %v; the client will retry, check the lease database is writable and not held by another process", mac, err)
+		undo()
+		return false
+	}
+	return true
 }
 
 // releaseLease returns record's address to the pool: it deletes the row from
@@ -397,9 +604,14 @@ func (p *pluginState) releaseLease(mac string, record *Record) error {
 // now change nothing. Nothing is ever sent in reply, so failures are logged
 // and dropped here.
 func (p *pluginState) handleRelease(req *dhcpv4.DHCPv4) {
-	p.Lock()
-	defer p.Unlock()
+	if err := p.settle(p.withLock(func() { p.release(req) })); err != nil {
+		log.Errorf("Could not record the release from MAC %s: %v; the lease stays until it expires, check the lease database is writable and not held by another process", req.ClientHWAddr, err)
+	}
+}
 
+// release frees the lease a DHCPRELEASE names. The caller must hold p's
+// lock; handleRelease is what waits for the row to go.
+func (p *pluginState) release(req *dhcpv4.DHCPv4) {
 	mac := req.ClientHWAddr.String()
 	record, ok := p.Recordsv4[mac]
 	if !ok {
@@ -411,7 +623,7 @@ func (p *pluginState) handleRelease(req *dhcpv4.DHCPv4) {
 		return
 	}
 	if err := p.releaseLease(mac, record); err != nil {
-		log.Errorf("Could not release lease for MAC %s: %v", mac, err)
+		log.Errorf("Could not release the lease for MAC %s: %v; it stays until it expires, check the lease database is writable and not held by another process", mac, err)
 		return
 	}
 	log.Printf("Released IP address %s for MAC %s", record.IP, mac)
@@ -424,9 +636,14 @@ func (p *pluginState) handleRelease(req *dhcpv4.DHCPv4) {
 // which is zero in a DHCPDECLINE. As with a release, only the client that
 // actually holds the address may decline it, and a decline never allocates.
 func (p *pluginState) handleDecline(req *dhcpv4.DHCPv4) {
-	p.Lock()
-	defer p.Unlock()
+	if err := p.settle(p.withLock(func() { p.decline(req) })); err != nil {
+		log.Errorf("Could not record the decline from MAC %s: %v; the address stays leased until it expires, check the lease database is writable", req.ClientHWAddr, err)
+	}
+}
 
+// decline takes the address a DHCPDECLINE names out of circulation. The
+// caller must hold p's lock; handleDecline is what waits for the row to go.
+func (p *pluginState) decline(req *dhcpv4.DHCPv4) {
 	mac := req.ClientHWAddr.String()
 	declined := req.RequestedIPAddress()
 	record, ok := p.Recordsv4[mac]
@@ -465,7 +682,7 @@ func (p *pluginState) quarantine(mac string, record *Record) {
 		return
 	}
 	if err := p.freeIPAddress(mac, record); err != nil {
-		log.Errorf("Could not remove declined lease for MAC %s from storage: %v", mac, err)
+		log.Errorf("Could not remove the declined lease for MAC %s from storage: %v; it stays until it expires, check the lease database is writable", mac, err)
 		return
 	}
 	delete(p.Recordsv4, mac)
@@ -479,7 +696,7 @@ func (p *pluginState) quarantine(mac string, record *Record) {
 // cases where no quarantine applies. The caller must hold p's lock.
 func (p *pluginState) freeDeclined(mac string, record *Record) {
 	if err := p.releaseLease(mac, record); err != nil {
-		log.Errorf("Could not free declined lease for MAC %s: %v", mac, err)
+		log.Errorf("Could not free the declined lease for MAC %s: %v; it stays until it expires, check the lease database is writable", mac, err)
 		return
 	}
 	log.Printf("Freed declined IP address %s for MAC %s", record.IP, mac)
@@ -496,7 +713,7 @@ func (p *pluginState) sweepExpired(t time.Time) int {
 			continue
 		}
 		if err := p.releaseLease(mac, record); err != nil {
-			log.Errorf("Could not reclaim expired lease for MAC %s: %v", mac, err)
+			log.Errorf("Could not reclaim the expired lease for MAC %s while sweeping: %v; check the lease database is writable and not held by another process", mac, err)
 			continue
 		}
 		freed++
@@ -518,7 +735,7 @@ func (p *pluginState) sweepDeclined(t time.Time) int {
 			continue
 		}
 		if err := p.allocator.Free(net.IPNet{IP: net.ParseIP(ip)}); err != nil {
-			log.Errorf("Could not return declined IP %s to the pool: %v", ip, err)
+			log.Errorf("Could not return the declined address %s to the pool: %v; it stays out of circulation until the server is restarted", ip, err)
 			continue
 		}
 		delete(p.declined, ip)
@@ -537,9 +754,12 @@ func (p *pluginState) reclaim(t time.Time) int {
 // sweepOnce takes the lock and reclaims every expired lease and every declined
 // address whose probation has run out.
 func (p *pluginState) sweepOnce() {
-	p.Lock()
-	defer p.Unlock()
-	if freed := p.reclaim(p.timeNow()); freed > 0 {
+	var freed int
+	pending := p.withLock(func() { freed = p.reclaim(p.timeNow()) })
+	if err := p.settle(pending); err != nil {
+		log.Errorf("Could not clear a reclaimed lease from storage: %v; check the lease database is writable and not held by another process", err)
+	}
+	if freed > 0 {
 		log.Printf("Returned %d DHCPv4 address(es) to the pool", freed)
 	}
 }
@@ -570,6 +790,19 @@ func (p *pluginState) startSweeper(interval time.Duration) {
 func (p *pluginState) stopSweeper() {
 	close(p.stop)
 	<-p.done
+}
+
+// Close stops this instance's background goroutines and flushes the lease
+// writes it still has queued. Call it once, and only on an instance setup
+// built.
+//
+// Nothing in the server calls it: plugins are set up once and live as long
+// as the process. It is here for an embedding program and for the black-box
+// tests, which would otherwise leave a sweeper and a writer running over a
+// lease file they are about to delete.
+func (p *pluginState) Close() {
+	p.stopSweeper()
+	p.stopWriter()
 }
 
 // defaultSweepInterval derives the sweep period from the lease time: half a
@@ -615,6 +848,7 @@ type pluginOptions struct {
 	sweepInterval    time.Duration
 	declineProbation time.Duration
 	declineMax       int
+	maxLeases        int
 }
 
 // optionParsers dispatches on the argument key. parseOptions handles ordering,
@@ -624,6 +858,7 @@ var optionParsers = map[string]func(*pluginOptions, string) error{
 	sweepArg:      parseSweepInterval,
 	declineArg:    parseDeclineProbation,
 	declineMaxArg: parseDeclineMax,
+	maxLeasesArg:  parseMaxLeases,
 }
 
 // parseOptions reads the optional key:value arguments, which may come in any
@@ -637,16 +872,17 @@ func parseOptions(leaseTime time.Duration, size uint64, extra []string) (pluginO
 		sweepInterval:    defaultSweepInterval(leaseTime),
 		declineProbation: defaultDeclineProbation,
 		declineMax:       defaultDeclineMax(size),
+		maxLeases:        defaultMaxLeases,
 	}
 	seen := make(map[string]bool, len(extra))
 	for _, arg := range extra {
 		key, value, hasValue := strings.Cut(arg, ":")
 		parse, known := optionParsers[key]
 		if !hasValue || !known {
-			return pluginOptions{}, fmt.Errorf("unexpected argument %q, want %s", arg, optionSyntax)
+			return pluginOptions{}, fmt.Errorf("argument %q is not one this plugin takes; use %s, or leave them out for their defaults", arg, optionSyntax)
 		}
 		if seen[key] {
-			return pluginOptions{}, fmt.Errorf("argument %s given more than once", key)
+			return pluginOptions{}, fmt.Errorf("argument %s is given more than once; keep one and remove the rest", key)
 		}
 		seen[key] = true
 		if err := parse(&opts, value); err != nil {
@@ -660,10 +896,12 @@ func parseOptions(leaseTime time.Duration, size uint64, extra []string) (pluginO
 func parseSweepInterval(opts *pluginOptions, raw string) error {
 	interval, err := time.ParseDuration(raw)
 	if err != nil {
-		return fmt.Errorf("invalid sweep interval %q: %w", raw, err)
+		return fmt.Errorf("%s:%s is not a duration: %w; use a Go duration such as 5m, or leave it out for half the lease time, floored at %s",
+			sweepArg, raw, err, minSweepInterval)
 	}
 	if interval <= 0 {
-		return fmt.Errorf("sweep interval has to be positive, got: %v", raw)
+		return fmt.Errorf("%s:%s is not above zero; use a duration such as 5m, or leave it out for half the lease time, floored at %s",
+			sweepArg, raw, minSweepInterval)
 	}
 	opts.sweepInterval = interval
 	return nil
@@ -675,10 +913,12 @@ func parseSweepInterval(opts *pluginOptions, raw string) error {
 func parseDeclineProbation(opts *pluginOptions, raw string) error {
 	probation, err := time.ParseDuration(raw)
 	if err != nil {
-		return fmt.Errorf("invalid decline probation %q: %w", raw, err)
+		return fmt.Errorf("%s:%s is not a duration: %w; use a Go duration such as 1h, or leave it out for the default of %s",
+			declineArg, raw, err, defaultDeclineProbation)
 	}
 	if probation < 0 {
-		return fmt.Errorf("decline probation cannot be negative, got: %v", raw)
+		return fmt.Errorf("%s:%s is negative; use 0 to hand a declined address straight back, or a duration such as 1h",
+			declineArg, raw)
 	}
 	opts.declineProbation = probation
 	return nil
@@ -690,12 +930,29 @@ func parseDeclineProbation(opts *pluginOptions, raw string) error {
 func parseDeclineMax(opts *pluginOptions, raw string) error {
 	count, err := strconv.Atoi(raw)
 	if err != nil {
-		return fmt.Errorf("invalid decline maximum %q: %w", raw, err)
+		return fmt.Errorf("%s:%s is not a number: %w; use a count such as 8, 0 to turn the quarantine off, or leave it out for a tenth of the pool",
+			declineMaxArg, raw, err)
 	}
 	if count < 0 {
-		return fmt.Errorf("decline maximum cannot be negative, got: %v", raw)
+		return fmt.Errorf("%s:%s is negative; use 0 to turn the quarantine off, or a count such as 8", declineMaxArg, raw)
 	}
 	opts.declineMax = count
+	return nil
+}
+
+// parseMaxLeases reads the value of a "max-leases:" argument. Zero turns the
+// bound off; a negative count is refused because it would read as a limit
+// and act as none at all.
+func parseMaxLeases(opts *pluginOptions, raw string) error {
+	count, err := strconv.Atoi(raw)
+	if err != nil {
+		return fmt.Errorf("%s:%s is not a number: %w; use a count such as 4096, 0 to turn the bound off, or leave it out for the default of %d",
+			maxLeasesArg, raw, err, defaultMaxLeases)
+	}
+	if count < 0 {
+		return fmt.Errorf("%s:%s is negative; use 0 to turn the bound off, or a count such as 4096", maxLeasesArg, raw)
+	}
+	opts.maxLeases = count
 	return nil
 }
 
@@ -705,14 +962,22 @@ func setupRange(args ...string) (handler.Handler4, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Started only once setup has fully succeeded: a failed setup must not
-	// leave a goroutine behind sweeping a half-built plugin.
+	// Both started only once setup has fully succeeded: a failed setup must
+	// not leave goroutines behind serving a half-built plugin. The writer
+	// goes first, because from here on the sweeper can queue deletes.
+	p.startWriter()
 	p.startSweeper(p.sweepInterval)
 	// Registered last, once everything that could fail has succeeded: a
 	// reader must never find a half-built instance in the registry.
 	leases.Register(p)
-	log.Printf("Serving %d addresses, reclaiming expired DHCPv4 leases every %s, declined addresses after %s, quarantining at most %d at a time",
-		p.poolSize, p.sweepInterval, p.declineProbation, p.declineMax)
+	log.Printf("Serving %d addresses, reclaiming expired DHCPv4 leases every %s, declined addresses after %s, quarantining at most %d at a time, holding at most %d leases",
+		p.poolSize, p.sweepInterval, p.declineProbation, p.declineMax, p.maxLeases)
+	// poolSizeAsInt saturates rather than wraps, which is also what makes
+	// the comparison safe on a 32-bit build.
+	if size := poolSizeAsInt(p.poolSize); p.maxLeases > 0 && size > p.maxLeases {
+		log.Warningf("The pool holds %d addresses but %s bounds the lease table at %d, so the last %d will never be handed out; raise %s or narrow the pool",
+			size, maxLeasesArg, p.maxLeases, size-p.maxLeases, maxLeasesArg)
+	}
 	return p.Handler4, nil
 }
 
@@ -728,34 +993,35 @@ func newPluginState(args ...string) (*pluginState, error) {
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 	}
+	p.dbCtx, p.dbCancel = context.WithCancel(context.Background())
 
 	if len(args) < 4 {
-		return nil, fmt.Errorf("invalid number of arguments, want: 4 (file name, start IP, end IP, lease time), got: %d", len(args))
+		return nil, fmt.Errorf("got %d arguments, want at least 4; pass <lease file> <first address> <last address> <lease time>, such as leases.sqlite3 10.0.0.100 10.0.0.200 1h", len(args))
 	}
 	filename := args[0]
 	if filename == "" {
-		return nil, errors.New("file name cannot be empty")
+		return nil, errors.New("the lease file name is empty; give a path the server's user may write, such as /var/lib/coredhcp/leases.sqlite3")
 	}
 	ipRangeStart := net.ParseIP(args[1])
 	if ipRangeStart.To4() == nil {
-		return nil, fmt.Errorf("invalid IPv4 address: %v", args[1])
+		return nil, fmt.Errorf("the first pool address %q is not IPv4; write it in dotted-quad notation, such as 10.0.0.100", args[1])
 	}
 	ipRangeEnd := net.ParseIP(args[2])
 	if ipRangeEnd.To4() == nil {
-		return nil, fmt.Errorf("invalid IPv4 address: %v", args[2])
+		return nil, fmt.Errorf("the last pool address %q is not IPv4; write it in dotted-quad notation, such as 10.0.0.200", args[2])
 	}
 	if binary.BigEndian.Uint32(ipRangeStart.To4()) > binary.BigEndian.Uint32(ipRangeEnd.To4()) {
-		return nil, errors.New("start of IP range has to be lower than or equal to the end of an IP range")
+		return nil, errors.New("the first pool address is above the last; swap the two arguments")
 	}
 
 	p.allocator, err = newIPv4Allocator(ipRangeStart, ipRangeEnd)
 	if err != nil {
-		return nil, fmt.Errorf("could not create an allocator: %w", err)
+		return nil, fmt.Errorf("could not build the address allocator: %w; check the two pool addresses", err)
 	}
 
 	p.LeaseTime, err = time.ParseDuration(args[3])
 	if err != nil {
-		return nil, fmt.Errorf("invalid lease duration: %v", args[3])
+		return nil, fmt.Errorf("lease time %q is not a duration; use a Go duration such as 1h or 30m", args[3])
 	}
 
 	p.poolSize = poolSize(ipRangeStart, ipRangeEnd)
@@ -768,13 +1034,16 @@ func newPluginState(args ...string) (*pluginState, error) {
 	p.sweepInterval = opts.sweepInterval
 	p.declineProbation = opts.declineProbation
 	p.declineMax = opts.declineMax
+	p.maxLeases = opts.maxLeases
 
-	if err := p.registerBackingDB(filename); err != nil {
+	if err = p.registerBackingDB(p.dbCtx, filename); err != nil {
 		return nil, fmt.Errorf("could not setup lease storage: %w", err)
 	}
-	p.Recordsv4, err = loadRecords(p.leasedb)
+	// The leases already on disk count against max-leases: a table over the
+	// bound at startup hands out nothing new until it shrinks.
+	p.Recordsv4, err = loadRecords(p.dbCtx, p.leasedb)
 	if err != nil {
-		return nil, fmt.Errorf("could not load records from file: %w", err)
+		return nil, fmt.Errorf("could not load the leases in %s: %w; check the server's user may read the file and that no other process holds it", filename, err)
 	}
 
 	log.Printf("Loaded %d DHCPv4 leases from %s", len(p.Recordsv4), filename)
@@ -782,10 +1051,10 @@ func newPluginState(args ...string) (*pluginState, error) {
 	for _, v := range p.Recordsv4 {
 		ip, err := p.allocator.Allocate(net.IPNet{IP: v.IP})
 		if err != nil {
-			return nil, fmt.Errorf("failed to re-allocate leased ip %v: %w", v.IP.String(), err)
+			return nil, fmt.Errorf("the stored lease on %v does not fit the configured pool: %w; widen the pool, or delete that row from %s", v.IP, err, filename)
 		}
 		if ip.IP.String() != v.IP.String() {
-			return nil, fmt.Errorf("allocator did not re-allocate requested leased ip %v: %v", v.IP.String(), ip.String())
+			return nil, fmt.Errorf("the stored lease on %v sits outside the configured pool, the allocator offered %v instead; widen the pool, or delete that row from %s", v.IP, ip.IP, filename)
 		}
 	}
 

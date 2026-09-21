@@ -170,12 +170,12 @@ func TestCacheConcurrentAccess(t *testing.T) {
 	const iterations = 100
 
 	var wg sync.WaitGroup
-	for g := 0; g < goroutines; g++ {
+	for g := range goroutines {
 		wg.Add(1)
 		go func(g int) {
 			defer wg.Done()
 			key := fmt.Sprintf("key-%d", g%4) // a handful of shared keys so puts and gets collide
-			for i := 0; i < iterations; i++ {
+			for range iterations {
 				c.put(key, lookupResult{found: true}, base.Add(time.Hour))
 				c.get(key, base)
 			}

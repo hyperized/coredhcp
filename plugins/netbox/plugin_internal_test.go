@@ -5,10 +5,13 @@
 package netbox
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"testing"
 	"time"
 
@@ -16,6 +19,8 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/coredhcp/coredhcp/logger"
 )
 
 // pluginStubBackend is a lookuper the handler and lookup tests can drive
@@ -23,13 +28,15 @@ import (
 type pluginStubBackend struct {
 	calls  int
 	gotMAC string
+	gotCtx context.Context
 	result lookupResult
 	err    error
 }
 
-func (s *pluginStubBackend) lookup(_ context.Context, mac string) (lookupResult, error) {
+func (s *pluginStubBackend) lookup(ctx context.Context, mac string) (lookupResult, error) {
 	s.calls++
 	s.gotMAC = mac
+	s.gotCtx = ctx
 	return s.result, s.err
 }
 
@@ -77,17 +84,17 @@ func TestOptionsParse(t *testing.T) {
 		{
 			name:    "bad duration",
 			args:    []string{"ttl:nope"},
-			wantErr: `invalid duration in argument "ttl:nope"`,
+			wantErr: `the duration in "ttl:nope" does not parse`,
 		},
 		{
 			name:    "zero duration",
 			args:    []string{"ttl:0s"},
-			wantErr: `duration in argument "ttl:0s" has to be positive`,
+			wantErr: `the duration in "ttl:0s" is not positive`,
 		},
 		{
 			name:    "negative duration",
 			args:    []string{"ttl:-1s"},
-			wantErr: `duration in argument "ttl:-1s" has to be positive`,
+			wantErr: `the duration in "ttl:-1s" is not positive`,
 		},
 		{
 			name:    "unknown argument",
@@ -137,17 +144,17 @@ func TestSetupStateErrors(t *testing.T) {
 		{
 			name:    "no arguments",
 			args:    nil,
-			wantErr: "need at least 2 arguments",
+			wantErr: "give the NetBox URL and the API token first",
 		},
 		{
 			name:    "one argument",
 			args:    []string{"https://netbox.example.com"},
-			wantErr: "need at least 2 arguments",
+			wantErr: "give the NetBox URL and the API token first",
 		},
 		{
 			name:    "bad URL",
 			args:    []string{"ftp://netbox.example.com", "sometoken"},
-			wantErr: "scheme must be http or https",
+			wantErr: "has no http or https scheme",
 		},
 		{
 			name: "bad token, missing environment variable",
@@ -203,9 +210,9 @@ func TestPluginStateLookup(t *testing.T) {
 		now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 		p := &pluginState{backend: stub, cache: newCache(16), opts: defaultOptions(), now: func() time.Time { return now }}
 
-		_, err := p.lookup(mac)
+		_, err := p.lookup(context.Background(), mac)
 		require.NoError(t, err)
-		_, err = p.lookup(mac)
+		_, err = p.lookup(context.Background(), mac)
 		require.NoError(t, err)
 		assert.Equal(t, 1, stub.calls)
 	})
@@ -216,10 +223,10 @@ func TestPluginStateLookup(t *testing.T) {
 		opts := defaultOptions()
 		p := &pluginState{backend: stub, cache: newCache(16), opts: opts, now: func() time.Time { return now }}
 
-		_, err := p.lookup(mac)
+		_, err := p.lookup(context.Background(), mac)
 		require.NoError(t, err)
 		now = now.Add(opts.ttl)
-		_, err = p.lookup(mac)
+		_, err = p.lookup(context.Background(), mac)
 		require.NoError(t, err)
 		assert.Equal(t, 2, stub.calls)
 	})
@@ -230,12 +237,12 @@ func TestPluginStateLookup(t *testing.T) {
 		opts := defaultOptions()
 		p := &pluginState{backend: stub, cache: newCache(16), opts: opts, now: func() time.Time { return now }}
 
-		_, err := p.lookup(mac)
+		_, err := p.lookup(context.Background(), mac)
 		require.NoError(t, err)
 		// Past the negative TTL but nowhere near the (much longer) positive
 		// one, so this only proves anything if the miss used negativeTTL.
 		now = now.Add(opts.negativeTTL)
-		_, err = p.lookup(mac)
+		_, err = p.lookup(context.Background(), mac)
 		require.NoError(t, err)
 		assert.Equal(t, 2, stub.calls)
 	})
@@ -245,10 +252,10 @@ func TestPluginStateLookup(t *testing.T) {
 		now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 		p := &pluginState{backend: stub, cache: newCache(16), opts: defaultOptions(), now: func() time.Time { return now }}
 
-		_, err := p.lookup(mac)
-		assert.Error(t, err)
-		_, err = p.lookup(mac)
-		assert.Error(t, err)
+		_, err := p.lookup(context.Background(), mac)
+		require.Error(t, err)
+		_, err = p.lookup(context.Background(), mac)
+		require.Error(t, err)
 		assert.Equal(t, 2, stub.calls)
 	})
 
@@ -257,9 +264,57 @@ func TestPluginStateLookup(t *testing.T) {
 		now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 		p := &pluginState{backend: stub, cache: newCache(16), opts: defaultOptions(), now: func() time.Time { return now }}
 
-		_, err := p.lookup(mac)
+		_, err := p.lookup(context.Background(), mac)
 		require.NoError(t, err)
 		assert.Equal(t, mac.String(), stub.gotMAC)
+	})
+
+	t.Run("ErrNoInterface is an answer, not a failure, and is cached under the negative TTL", func(t *testing.T) {
+		stub := &pluginStubBackend{err: fmt.Errorf("MAC address %s: %w", mac, ErrNoInterface)}
+		now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+		opts := defaultOptions()
+		p := &pluginState{backend: stub, cache: newCache(16), opts: opts, now: func() time.Time { return now }}
+
+		result, err := p.lookup(context.Background(), mac)
+		require.NoError(t, err)
+		assert.Equal(t, lookupResult{}, result)
+		assert.Equal(t, 1, stub.calls)
+
+		_, err = p.lookup(context.Background(), mac)
+		require.NoError(t, err)
+		assert.Equal(t, 1, stub.calls, "the cached negative result must keep the second call off the backend")
+
+		cached, ok := p.cache.get(mac.String(), now)
+		require.True(t, ok)
+		assert.Equal(t, lookupResult{}, cached)
+	})
+
+	t.Run("the timeout becomes a deadline the backend sees", func(t *testing.T) {
+		stub := &pluginStubBackend{result: lookupResult{found: true, v4: v4}}
+		now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+		opts := defaultOptions()
+		opts.timeout = 5 * time.Second
+		p := &pluginState{backend: stub, cache: newCache(16), opts: opts, now: func() time.Time { return now }}
+
+		_, err := p.lookup(context.Background(), mac)
+		require.NoError(t, err)
+		require.NotNil(t, stub.gotCtx)
+		deadline, ok := stub.gotCtx.Deadline()
+		require.True(t, ok, "the backend must see a deadline derived from the configured timeout")
+		assert.WithinDuration(t, time.Now().Add(opts.timeout), deadline, time.Second)
+	})
+
+	t.Run("a cancelled context reaches the backend", func(t *testing.T) {
+		stub := &pluginStubBackend{result: lookupResult{found: true, v4: v4}}
+		now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+		p := &pluginState{backend: stub, cache: newCache(16), opts: defaultOptions(), now: func() time.Time { return now }}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := p.lookup(ctx, mac)
+		require.NoError(t, err) // the stub itself does not look at ctx.Err
+		require.NotNil(t, stub.gotCtx)
+		assert.ErrorIs(t, stub.gotCtx.Err(), context.Canceled)
 	})
 }
 
@@ -287,7 +342,7 @@ func TestHandler4(t *testing.T) {
 		req, resp := pluginV4Exchange(t, mac)
 		req.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeInform))
 
-		gotResp, stop := p.Handler4(req, resp)
+		gotResp, stop := p.Handler4(context.Background(), req, resp)
 		assert.Same(t, resp, gotResp)
 		assert.False(t, stop)
 		assert.Equal(t, 0, stub.calls)
@@ -300,7 +355,7 @@ func TestHandler4(t *testing.T) {
 		req, resp := pluginV4Exchange(t, mac)
 		req.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeRelease))
 
-		gotResp, stop := p.Handler4(req, resp)
+		gotResp, stop := p.Handler4(context.Background(), req, resp)
 		assert.Same(t, resp, gotResp)
 		assert.False(t, stop)
 		assert.Equal(t, 0, stub.calls)
@@ -313,7 +368,7 @@ func TestHandler4(t *testing.T) {
 		req, resp := pluginV4Exchange(t, mac)
 		req.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeDecline))
 
-		gotResp, stop := p.Handler4(req, resp)
+		gotResp, stop := p.Handler4(context.Background(), req, resp)
 		assert.Same(t, resp, gotResp)
 		assert.False(t, stop)
 		assert.Equal(t, 0, stub.calls)
@@ -325,7 +380,7 @@ func TestHandler4(t *testing.T) {
 
 		req, resp := pluginV4Exchange(t, mac)
 
-		gotResp, stop := p.Handler4(req, resp)
+		gotResp, stop := p.Handler4(context.Background(), req, resp)
 		assert.Nil(t, gotResp)
 		assert.True(t, stop)
 	})
@@ -337,7 +392,7 @@ func TestHandler4(t *testing.T) {
 		req, resp := pluginV4Exchange(t, mac)
 		wantYourIP := resp.YourIPAddr // must stay whatever NewReplyFromRequest set it to
 
-		gotResp, stop := p.Handler4(req, resp)
+		gotResp, stop := p.Handler4(context.Background(), req, resp)
 		assert.Same(t, resp, gotResp)
 		assert.False(t, stop)
 		assert.Equal(t, wantYourIP, gotResp.YourIPAddr)
@@ -351,7 +406,7 @@ func TestHandler4(t *testing.T) {
 		req, resp := pluginV4Exchange(t, mac)
 		wantYourIP := resp.YourIPAddr
 
-		gotResp, stop := p.Handler4(req, resp)
+		gotResp, stop := p.Handler4(context.Background(), req, resp)
 		assert.Same(t, resp, gotResp)
 		assert.False(t, stop)
 		assert.Equal(t, wantYourIP, gotResp.YourIPAddr)
@@ -364,7 +419,7 @@ func TestHandler4(t *testing.T) {
 
 		req, resp := pluginV4Exchange(t, mac)
 
-		gotResp, stop := p.Handler4(req, resp)
+		gotResp, stop := p.Handler4(context.Background(), req, resp)
 		assert.Same(t, resp, gotResp)
 		assert.True(t, stop)
 		assert.Equal(t, net.IP(v4.Addr().AsSlice()), gotResp.YourIPAddr)
@@ -393,7 +448,7 @@ func TestHandler6(t *testing.T) {
 		resp, err := dhcpv6.NewMessage()
 		require.NoError(t, err)
 
-		gotResp, stop := p.Handler6(req, resp)
+		gotResp, stop := p.Handler6(context.Background(), req, resp)
 		assert.Nil(t, gotResp)
 		assert.True(t, stop)
 	})
@@ -407,7 +462,7 @@ func TestHandler6(t *testing.T) {
 		resp, err := dhcpv6.NewMessage()
 		require.NoError(t, err)
 
-		gotResp, stop := p.Handler6(req, resp)
+		gotResp, stop := p.Handler6(context.Background(), req, resp)
 		assert.Same(t, resp, gotResp)
 		assert.False(t, stop)
 		assert.Equal(t, 0, stub.calls)
@@ -424,7 +479,7 @@ func TestHandler6(t *testing.T) {
 		resp, err := dhcpv6.NewMessage()
 		require.NoError(t, err)
 
-		gotResp, stop := p.Handler6(req, resp)
+		gotResp, stop := p.Handler6(context.Background(), req, resp)
 		assert.Same(t, resp, gotResp)
 		assert.False(t, stop)
 		assert.Equal(t, 0, stub.calls)
@@ -443,7 +498,7 @@ func TestHandler6(t *testing.T) {
 		resp, err := dhcpv6.NewMessage()
 		require.NoError(t, err)
 
-		gotResp, stop := p.Handler6(req, resp)
+		gotResp, stop := p.Handler6(context.Background(), req, resp)
 		assert.Same(t, resp, gotResp)
 		assert.False(t, stop)
 		assert.Equal(t, 0, stub.calls)
@@ -459,7 +514,7 @@ func TestHandler6(t *testing.T) {
 		resp, err := dhcpv6.NewMessage()
 		require.NoError(t, err)
 
-		gotResp, stop := p.Handler6(req, resp)
+		gotResp, stop := p.Handler6(context.Background(), req, resp)
 		assert.Same(t, resp, gotResp)
 		assert.False(t, stop)
 		assert.Equal(t, 0, stub.calls)
@@ -481,7 +536,7 @@ func TestHandler6(t *testing.T) {
 		resp, err := dhcpv6.NewMessage()
 		require.NoError(t, err)
 
-		gotResp, stop := p.Handler6(relay, resp)
+		gotResp, stop := p.Handler6(context.Background(), relay, resp)
 		assert.Same(t, resp, gotResp)
 		assert.False(t, stop)
 		assert.Equal(t, 0, stub.calls)
@@ -496,7 +551,7 @@ func TestHandler6(t *testing.T) {
 		resp, err := dhcpv6.NewAdvertiseFromSolicit(req)
 		require.NoError(t, err)
 
-		gotResp, stop := p.Handler6(req, resp)
+		gotResp, stop := p.Handler6(context.Background(), req, resp)
 		assert.Nil(t, gotResp)
 		assert.True(t, stop)
 	})
@@ -510,10 +565,10 @@ func TestHandler6(t *testing.T) {
 		resp, err := dhcpv6.NewAdvertiseFromSolicit(req)
 		require.NoError(t, err)
 
-		gotResp, stop := p.Handler6(req, resp)
+		gotResp, stop := p.Handler6(context.Background(), req, resp)
 		assert.Same(t, resp, gotResp)
 		assert.False(t, stop)
-		assert.Equal(t, 0, len(gotResp.GetOption(dhcpv6.OptionIANA)))
+		assert.Empty(t, gotResp.GetOption(dhcpv6.OptionIANA))
 	})
 
 	t.Run("found but the interface has no IPv6 address", func(t *testing.T) {
@@ -526,10 +581,10 @@ func TestHandler6(t *testing.T) {
 		resp, err := dhcpv6.NewAdvertiseFromSolicit(req)
 		require.NoError(t, err)
 
-		gotResp, stop := p.Handler6(req, resp)
+		gotResp, stop := p.Handler6(context.Background(), req, resp)
 		assert.Same(t, resp, gotResp)
 		assert.False(t, stop)
-		assert.Equal(t, 0, len(gotResp.GetOption(dhcpv6.OptionIANA)))
+		assert.Empty(t, gotResp.GetOption(dhcpv6.OptionIANA))
 	})
 
 	t.Run("found with an IPv6 address", func(t *testing.T) {
@@ -546,7 +601,7 @@ func TestHandler6(t *testing.T) {
 		resp, err := dhcpv6.NewAdvertiseFromSolicit(req)
 		require.NoError(t, err)
 
-		gotResp, stop := p.Handler6(req, resp)
+		gotResp, stop := p.Handler6(context.Background(), req, resp)
 		assert.False(t, stop)
 
 		reqIANA := req.Options.OneIANA()
@@ -564,4 +619,54 @@ func TestHandler6(t *testing.T) {
 		assert.Equal(t, opts.lifetime, addrs[0].PreferredLifetime)
 		assert.Equal(t, opts.lifetime, addrs[0].ValidLifetime)
 	})
+}
+
+// captureLog redirects the shared logger to a buffer for the duration of the
+// test. The logger's console writer is process-wide, so a test using this
+// must not run in parallel with another one that logs.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	logger.WithConsole(&buf)
+	t.Cleanup(func() { logger.WithConsole(os.Stderr) })
+	return &buf
+}
+
+func TestLogLookupFailureLevel(t *testing.T) {
+	mac := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}
+
+	cases := []struct {
+		name      string
+		err       error
+		wantLevel string
+	}{
+		{
+			name:      "an unauthorized response is a configuration fault",
+			err:       fmt.Errorf("wrap: %w", ErrUnauthorized),
+			wantLevel: "ERROR",
+		},
+		{
+			name:      "a not-found response is a configuration fault",
+			err:       fmt.Errorf("wrap: %w", ErrNotFound),
+			wantLevel: "ERROR",
+		},
+		{
+			name:      "netbox unavailable is treated as transient",
+			err:       fmt.Errorf("wrap: %w", ErrUnavailable),
+			wantLevel: "WARN",
+		},
+		{
+			name:      "a plain transport error is treated as transient",
+			err:       errors.New("dial tcp: connection refused"),
+			wantLevel: "WARN",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := captureLog(t)
+			logLookupFailure(mac, tc.err)
+			assert.Contains(t, buf.String(), "level="+tc.wantLevel)
+		})
+	}
 }

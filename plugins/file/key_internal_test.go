@@ -28,8 +28,8 @@ func TestParseKeyMode(t *testing.T) {
 		{name: "mac", raw: "mac", want: keyMAC},
 		{name: "duid", raw: "duid", want: keyDUID},
 		{name: "client-id", raw: "client-id", want: keyClientID},
-		{name: "unknown value", raw: "bogus", wantErr: `unknown key "bogus"`},
-		{name: "empty value", raw: "", wantErr: `unknown key ""`},
+		{name: "unknown value", raw: "bogus", wantErr: `key "bogus" is not recognised`},
+		{name: "empty value", raw: "", wantErr: `key "" is not recognised`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := parseKeyMode(tc.raw)
@@ -136,7 +136,7 @@ func TestParseMACField(t *testing.T) {
 			got, err := parseMACField(tc.field)
 			if tc.wantErr {
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), "malformed hardware address")
+				assert.Contains(t, err.Error(), `"not-a-mac" is not a MAC address`)
 				return
 			}
 			require.NoError(t, err)
@@ -159,7 +159,7 @@ func TestParseDUIDField(t *testing.T) {
 		{name: "0x prefix", field: "0x00030001aabbccddeeff", want: "00030001aabbccddeeff"},
 		{name: "colon separated", field: "00:03:00:01:aa:bb:cc:dd:ee:ff", want: "00030001aabbccddeeff"},
 		{name: "uppercase no separator", field: "00030001AABBCCDDEEFF", want: "00030001aabbccddeeff"},
-		{name: "malformed hex", field: "0xzz", wantErr: true, errContains: "malformed DUID"},
+		{name: "malformed hex", field: "0xzz", wantErr: true, errContains: `"0xzz" is not a DUID`},
 		{name: "over the length cap", field: tooLong, wantErr: true, errContains: fmt.Sprintf("%d octets", maxDUIDLen+1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -187,8 +187,8 @@ func TestParseClientIDField(t *testing.T) {
 		{name: "hex colon separated", field: "01:aa:bb:cc:dd:ee:ff", want: "01aabbccddeeff"},
 		{name: "hex uppercase", field: "01AABBCCDDEEFF", want: "01aabbccddeeff"},
 		{name: "text form", field: "text:printer-2nd-floor", want: hex.EncodeToString([]byte("printer-2nd-floor"))},
-		{name: "empty text form", field: "text:", wantErr: true, errContains: "empty text: client identifier"},
-		{name: "malformed hex", field: "0xzz", wantErr: true, errContains: "malformed client identifier"},
+		{name: "empty text form", field: "text:", wantErr: true, errContains: `"text:" has nothing after text:`},
+		{name: "malformed hex", field: "0xzz", wantErr: true, errContains: `"0xzz" is not a client identifier`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := parseClientIDField(tc.field)

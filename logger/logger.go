@@ -12,7 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -172,7 +172,7 @@ func (l *Logger) Panicf(format string, args ...any) {
 func SetLevel(name string) error {
 	lvl, ok := levels[strings.ToLower(name)]
 	if !ok {
-		return fmt.Errorf("unknown log level '%s', valid levels are %v", name, Levels())
+		return fmt.Errorf("unknown log level %q; use one of %v", name, Levels())
 	}
 	level.Set(lvl)
 	return nil
@@ -184,7 +184,7 @@ func Levels() []string {
 	for name := range levels {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	return names
 }
 

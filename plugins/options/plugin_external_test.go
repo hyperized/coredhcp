@@ -61,15 +61,15 @@ func TestSetup4Errors(t *testing.T) {
 		args []string
 		want string
 	}{
-		{name: "no arguments", args: nil, want: "at least one"},
+		{name: "no arguments", args: nil, want: "no option specifications given"},
 		{name: "missing fields", args: []string{"15:string"}, want: "code:type:value"},
 		{name: "code zero", args: []string{"0:string:pad"}, want: "pad option"},
-		{name: "code beyond a byte", args: []string{"256:string:x"}, want: "want 1-255"},
-		{name: "code not a number", args: []string{"fifteen:string:x"}, want: "invalid option code"},
-		{name: "unknown type", args: []string{"15:str:home.lan"}, want: "unknown type"},
+		{name: "code beyond a byte", args: []string{"256:string:x"}, want: "option code 256 is outside the range 1 to 255"},
+		{name: "code not a number", args: []string{"fifteen:string:x"}, want: `option code "fifteen" is not a number from 1 to 255`},
+		{name: "unknown type", args: []string{"15:str:home.lan"}, want: `type "str" is not a known option type`},
 		{name: "empty value", args: []string{"15:string:"}, want: "empty option value"},
 		{name: "v6 address in v4", args: []string{"42:ip:2001:db8::1"}, want: "IPv4"},
-		{name: "odd hex", args: []string{"43:hex:abc"}, want: "invalid hex value"},
+		{name: "odd hex", args: []string{"43:hex:abc"}, want: `value "abc" is not hexadecimal`},
 		{name: "second spec invalid", args: []string{"15:string:home.lan", "42:ip:nope"}, want: `"42:ip:nope"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -87,12 +87,12 @@ func TestSetup6Errors(t *testing.T) {
 		args []string
 		want string
 	}{
-		{name: "no arguments", args: nil, want: "at least one"},
+		{name: "no arguments", args: nil, want: "no option specifications given"},
 		{name: "code zero", args: []string{"0:string:pad"}, want: "pad option"},
-		{name: "code beyond two bytes", args: []string{"65536:string:x"}, want: "invalid option code"},
+		{name: "code beyond two bytes", args: []string{"65536:string:x"}, want: `option code "65536" is not a number from 1 to 65535`},
 		{name: "v4 address in v6", args: []string{"31:ip:192.0.2.10"}, want: "IPv6"},
 		{name: "v4 address in a v6 list", args: []string{"23:iplist:2001:db8::53,192.0.2.53"}, want: "IPv6"},
-		{name: "bad bool", args: []string{"7:bool:maybe"}, want: "invalid bool value"},
+		{name: "bad bool", args: []string{"7:bool:maybe"}, want: `value "maybe" is not a boolean`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h6, err := options.Plugin.Setup6(tc.args...)

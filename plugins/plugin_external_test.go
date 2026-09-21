@@ -60,7 +60,7 @@ func nilHandlerSetup4(_ ...string) (handler.Handler4, error) {
 
 func TestLoadPluginsNoConfig(t *testing.T) {
 	_, _, err := plugins.LoadPlugins(&config.Config{})
-	assert.EqualError(t, err, "no configuration found for either DHCPv6 or DHCPv4")
+	assert.ErrorContains(t, err, "no configuration found for either DHCPv6 or DHCPv4")
 }
 
 func TestLoadPluginsUnknownPlugin(t *testing.T) {
@@ -209,7 +209,7 @@ func TestLoadPluginsSuccess(t *testing.T) {
 func TestLoadChainsNoConfig(t *testing.T) {
 	chains, err := plugins.LoadChains(&config.Config{})
 	assert.Nil(t, chains)
-	assert.EqualError(t, err, "no configuration found for either DHCPv6 or DHCPv4")
+	assert.ErrorContains(t, err, "no configuration found for either DHCPv6 or DHCPv4")
 }
 
 // The chain records the plugin each handler came from, in configuration
@@ -384,7 +384,7 @@ func TestRegisterPluginConflictingSetup(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			err := plugins.RegisterPlugin(tc.plugin)
 			require.Error(t, err)
-			assert.ErrorIs(t, err, plugins.ErrConflictingSetup)
+			require.ErrorIs(t, err, plugins.ErrConflictingSetup)
 			assert.Contains(t, err.Error(), tc.plugin.Name)
 			assert.Contains(t, err.Error(), tc.family)
 

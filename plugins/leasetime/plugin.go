@@ -8,6 +8,7 @@ package leasetime
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -26,6 +27,8 @@ var Plugin = plugins.Plugin{
 }
 
 var log = logger.GetLogger("plugins/lease_time")
+
+const msgNoLeaseTime = "no lease time given; pass a duration as the plugin argument, for example 1h"
 
 // pluginState is the per-instance data held by the lease_time plugin.
 type pluginState struct {
@@ -50,14 +53,14 @@ func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) 
 func setup4(args ...string) (handler.Handler4, error) {
 	log.Print("loading `lease_time` plugin for DHCPv4")
 	if len(args) < 1 {
-		log.Error("No default lease time provided")
-		return nil, errors.New("lease_time failed to initialize")
+		log.Error(msgNoLeaseTime)
+		return nil, errors.New(msgNoLeaseTime)
 	}
 
 	leaseTime, err := time.ParseDuration(args[0])
 	if err != nil {
-		log.Errorf("invalid duration: %v", args[0])
-		return nil, errors.New("lease_time failed to initialize")
+		log.Errorf("lease time %q is not a duration: %v; write it the Go way, such as 1h or 3600s", args[0], err)
+		return nil, fmt.Errorf("lease time %q is not a duration; write it the Go way, such as 1h or 3600s", args[0])
 	}
 
 	p := &pluginState{leaseTime: leaseTime}

@@ -79,7 +79,7 @@ func BenchmarkParallelAllocPartiallyFilled(b *testing.B) {
 
 	// Build a replacement bitmap that we'll put in the allocator, with approx. 50% of values filled
 	newbmap := make([]uint64, alloc.bitmap.Len())
-	for i := uint(0); i < alloc.bitmap.Len(); i++ {
+	for i := range alloc.bitmap.Len() {
 		newbmap[i] = rand.Uint64()
 	}
 	alloc.bitmap = bitset.From(newbmap)

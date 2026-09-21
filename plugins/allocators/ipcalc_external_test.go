@@ -6,10 +6,9 @@ package allocators_test
 
 import (
 	"fmt"
+	"math/rand"
 	"net"
 	"testing"
-
-	"math/rand"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -57,7 +56,7 @@ func ExampleAddPrefixes() {
 	// 2002:db8:: <nil>
 	// 2001:db8:0:7f:8000:: <nil>
 	// <nil> operation overflows
-	// <nil> AddPrefixes needs 128-bit IPs
+	// <nil> AddPrefixes needs 128-bit IPs; pass an IPv6 address, or an IPv4 one widened with To16
 }
 
 // Offset is used as a hash function, so it needs to be reasonably fast
@@ -70,7 +69,7 @@ func BenchmarkOffset(b *testing.B) {
 		b.Fatalf("Could not generate random addresses: %v", err)
 	}
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		// The arrays will be in cache, so this should amortize to measure mostly just the offset
 		// computation itself
 		_, _ = allocators.Offset(
@@ -100,7 +99,7 @@ func TestOffsetPrefixOutOfRange(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := allocators.Offset(net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), tt.prefixLength)
-			assert.EqualError(t, err, "prefix out of range")
+			assert.ErrorContains(t, err, "prefix out of range")
 		})
 	}
 }

@@ -92,7 +92,7 @@ func TestCompile(t *testing.T) {
 		}
 		_, err := compile(list)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "duplicate name")
+		assert.Contains(t, err.Error(), "two subnets carry this name")
 	})
 
 	t.Run("success", func(t *testing.T) {
@@ -105,10 +105,10 @@ func TestCompile(t *testing.T) {
 
 func TestSubnetError(t *testing.T) {
 	err := subnetError(0, "", errNoName)
-	assert.EqualError(t, err, `subnet #1: every subnet needs a name`)
+	require.ErrorContains(t, err, `subnet #1: every subnet needs a name`)
 
 	err = subnetError(2, "office", errNoLease)
-	assert.EqualError(t, err, `subnet "office": a subnet that hands out addresses needs a lease`)
+	assert.ErrorContains(t, err, `subnet "office": a subnet that hands out addresses needs a lease`)
 }
 
 func TestParseSubnet(t *testing.T) {
@@ -442,7 +442,7 @@ func TestParseReservations(t *testing.T) {
 			},
 		})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "duplicate")
+		assert.Contains(t, err.Error(), "repeats a MAC another reservation already has")
 	})
 
 	t.Run("unparseable address", func(t *testing.T) {
@@ -567,7 +567,7 @@ func TestCheckNames(t *testing.T) {
 	}
 	err := checkNames(scopes)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "duplicate name")
+	assert.Contains(t, err.Error(), "two subnets carry this name")
 }
 
 func TestCheckDefaults(t *testing.T) {
@@ -753,7 +753,7 @@ func TestNewSelector4(t *testing.T) {
 		path := writeYAML(t, "subnets:\n  - name: v6\n    cidr: 2001:db8::/48\n    default: true\n")
 		_, err := newSelector4("file:" + path)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "no IPv4 subnets configured")
+		assert.Contains(t, err.Error(), "lists no IPv4 subnets")
 	})
 
 	t.Run("buildDelegate error names the subnet", func(t *testing.T) {
@@ -804,7 +804,7 @@ func TestNewSelector6(t *testing.T) {
 		path := writeYAML(t, "subnets:\n  - name: v4\n    cidr: 10.0.0.0/24\n    default: true\n")
 		_, err := newSelector6("file:" + path)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "no IPv6 subnets configured")
+		assert.Contains(t, err.Error(), "lists no IPv6 subnets")
 	})
 
 	t.Run("buildDelegate error names the subnet", func(t *testing.T) {
@@ -1425,4 +1425,33 @@ func TestAddrFrom(t *testing.T) {
 		assert.True(t, addr.Is4())
 		assert.Equal(t, "10.0.0.5", addr.String())
 	})
+}
+
+func TestSelectorCloseStopsItsDelegates(t *testing.T) {
+	leasedb := filepath.Join(t.TempDir(), "office.sqlite3")
+	path := writeYAML(t, "subnets:\n"+
+		"  - name: office\n"+
+		"    cidr: 10.0.1.0/24\n"+
+		"    match:\n"+
+		"      relays: [10.0.1.1]\n"+
+		"    pool: 10.0.1.100-10.0.1.200\n"+
+		"    lease: 1h\n"+
+		"    leasedb: "+leasedb+"\n")
+
+	s, err := newSelector4("file:" + path)
+	require.NoError(t, err)
+	require.Len(t, s.subnets, 1)
+	require.NotNil(t, s.subnets[0].delegate, "the range instance has to be reachable to be closed")
+	require.NotNil(t, registeredDelegate("range "+leasedb))
+
+	s.Close()
+	assert.Nil(t, s.subnets[0].delegate)
+	assert.Nil(t, registeredDelegate("range "+leasedb), "and it is out of the registry")
+
+	// Closing again has to be a no-op, not a panic.
+	s.Close()
+}
+
+func TestRegisteredDelegateIgnoresOtherNames(t *testing.T) {
+	assert.Nil(t, registeredDelegate("range /no/such/lease/file.sqlite3"))
 }

@@ -43,7 +43,7 @@ func registerCleanup(t *testing.T, plugin *Plugin) {
 
 func TestRegisterPluginNil(t *testing.T) {
 	err := RegisterPlugin(nil)
-	assert.EqualError(t, err, "cannot register nil plugin")
+	assert.ErrorContains(t, err, "cannot register nil plugin")
 }
 
 func TestRegisterPluginSuccess(t *testing.T) {
@@ -175,7 +175,7 @@ func TestCheckSetupFuncs(t *testing.T) {
 				return
 			}
 			require.Error(t, err)
-			assert.EqualError(t, err, tc.wantErr)
+			require.ErrorContains(t, err, tc.wantErr)
 			assert.ErrorIs(t, err, ErrConflictingSetup)
 		})
 	}
@@ -230,7 +230,7 @@ func TestSetup4OfPlainFormAdapts(t *testing.T) {
 
 		setupFn, _ := setup4Of(p)
 		h, err := setupFn()
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.Nil(t, h)
 	})
 
@@ -299,7 +299,7 @@ func TestSetup6OfPlainFormAdapts(t *testing.T) {
 
 		setupFn, _ := setup6Of(p)
 		h, err := setupFn()
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.Nil(t, h)
 	})
 

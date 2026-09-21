@@ -18,5 +18,5 @@ import (
 // Everywhere else the server falls back to this stub so the package still
 // compiles; callers get an error at runtime if the Ethernet path is selected.
 func sendEthernet(_ net.Interface, _ *dhcpv4.DHCPv4) error {
-	return errors.New("raw Ethernet replies are only supported on Linux")
+	return errors.New("raw Ethernet replies are only supported on Linux; run coredhcp on Linux to answer clients that have no address yet, or put a relay in front of them")
 }

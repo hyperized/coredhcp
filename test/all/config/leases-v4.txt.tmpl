@@ -1,0 +1,7 @@
+# Static DHCPv4 leases for the all-plugins test, one "MAC IP" pair per line.
+#
+# Template: scripts/render-config.sh fills in the prefix and the MAC
+# addresses, so a scenario and its lease cannot drift apart. The addresses
+# sit below the range pool and below docker's own ip_range, so nothing on the
+# bridge can already hold them.
+@MAC_FILE@ @LAN@.11

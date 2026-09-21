@@ -43,7 +43,7 @@ func TestSetup4(t *testing.T) {
 
 	t.Run("boundaries", func(t *testing.T) {
 		_, err := mtu.Plugin.Setup4("68")
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		_, err = mtu.Plugin.Setup4("65535")
 		assert.NoError(t, err)

@@ -37,7 +37,8 @@
 //   - ttl:<duration> how long a found answer is cached, default 5m.
 //   - negative-ttl:<duration> how long "NetBox does not know this MAC" is
 //     cached, default 30s.
-//   - timeout:<duration> the HTTP timeout per NetBox request, default 5s.
+//   - timeout:<duration> how long a cache miss may take before the lookup
+//     gives up, covering both NetBox calls together, default 5s.
 //   - lifetime:<duration> the preferred and valid lifetime of the DHCPv6
 //     address, default 1h.
 //
@@ -93,6 +94,7 @@ package netbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -109,10 +111,13 @@ import (
 var log = logger.GetLogger("plugins/netbox")
 
 // Plugin wraps the netbox plugin information.
+//
+// Both setup functions are the context-aware form, so a lookup on the request
+// path inherits the caller's deadline and is cancelled at shutdown.
 var Plugin = plugins.Plugin{
-	Name:   "netbox",
-	Setup6: setup6,
-	Setup4: setup4,
+	Name:      "netbox",
+	Setup6Ctx: setup6,
+	Setup4Ctx: setup4,
 }
 
 // Defaults for the optional trailing arguments.
@@ -131,16 +136,18 @@ type options struct {
 	lifetime    time.Duration
 }
 
-// durationOptions maps each trailing argument prefix to the field it sets.
+// durationOptions maps each trailing argument prefix to its default and the
+// field it sets.
 // Adding a knob here is all it takes; parseOne stays a loop either way.
 var durationOptions = []struct {
 	prefix string
+	def    time.Duration
 	set    func(*options, time.Duration)
 }{
-	{"ttl:", func(o *options, d time.Duration) { o.ttl = d }},
-	{"negative-ttl:", func(o *options, d time.Duration) { o.negativeTTL = d }},
-	{"timeout:", func(o *options, d time.Duration) { o.timeout = d }},
-	{"lifetime:", func(o *options, d time.Duration) { o.lifetime = d }},
+	{"ttl:", defaultTTL, func(o *options, d time.Duration) { o.ttl = d }},
+	{"negative-ttl:", defaultNegativeTTL, func(o *options, d time.Duration) { o.negativeTTL = d }},
+	{"timeout:", defaultTimeout, func(o *options, d time.Duration) { o.timeout = d }},
+	{"lifetime:", defaultLifetime, func(o *options, d time.Duration) { o.lifetime = d }},
 }
 
 // defaultOptions returns the options as they stand before any argument is read.
@@ -172,15 +179,18 @@ func (o *options) parseOne(arg string) error {
 		}
 		d, err := time.ParseDuration(raw)
 		if err != nil {
-			return fmt.Errorf("invalid duration in argument %q: %w", arg, err)
+			return fmt.Errorf("the duration in %q does not parse: %w; use a Go duration such as 5m, or leave %s out for the default of %s",
+				arg, err, opt.prefix, opt.def)
 		}
 		if d <= 0 {
-			return fmt.Errorf("duration in argument %q has to be positive", arg)
+			return fmt.Errorf("the duration in %q is not positive; use a duration above zero, or leave %s out for the default of %s",
+				arg, opt.prefix, opt.def)
 		}
 		opt.set(o, d)
 		return nil
 	}
-	return fmt.Errorf("unexpected argument %q, want %s followed by a duration", arg, knownOptions())
+	return fmt.Errorf("unexpected argument %q; use one of %s each followed by a duration, and give the NetBox URL and token first",
+		arg, knownOptions())
 }
 
 // knownOptions lists the accepted trailing argument prefixes for error
@@ -214,7 +224,7 @@ type pluginState struct {
 	now     func() time.Time // clock seam, time.Now in production
 }
 
-func setup4(args ...string) (handler.Handler4, error) {
+func setup4(args ...string) (handler.Handler4Ctx, error) {
 	p, err := setupState(args...)
 	if err != nil {
 		return nil, err
@@ -222,7 +232,7 @@ func setup4(args ...string) (handler.Handler4, error) {
 	return p.Handler4, nil
 }
 
-func setup6(args ...string) (handler.Handler6, error) {
+func setup6(args ...string) (handler.Handler6Ctx, error) {
 	p, err := setupState(args...)
 	if err != nil {
 		return nil, err
@@ -237,7 +247,8 @@ func setup6(args ...string) (handler.Handler6, error) {
 // enough whether the credentials work.
 func setupState(args ...string) (*pluginState, error) {
 	if len(args) < 2 {
-		return nil, fmt.Errorf("need at least 2 arguments (NetBox URL and API token), got %d", len(args))
+		return nil, fmt.Errorf("got %d argument(s); give the NetBox URL and the API token first, as in https://netbox.example.com token:env:NETBOX_TOKEN",
+			len(args))
 	}
 	base, err := parseBaseURL(args[0])
 	if err != nil {
@@ -268,25 +279,29 @@ func setupState(args ...string) (*pluginState, error) {
 // briefly unreachable is retried on the next packet instead of being
 // remembered as a failure for a whole TTL.
 //
+// The configured timeout bounds the miss path as a whole: both backend calls
+// a cold lookup makes, not each one separately.
+//
 // There is no single-flight around the miss path. Two packets from the same
 // client arriving while the first lookup is still out will both query NetBox,
 // which is two requests for one client rather than the coordination and the
 // extra lock a de-duplicating layer costs. A boot storm is many clients, and
 // those are separate lookups either way.
-func (p *pluginState) lookup(hwaddr net.HardwareAddr) (lookupResult, error) {
+func (p *pluginState) lookup(ctx context.Context, hwaddr net.HardwareAddr) (lookupResult, error) {
 	mac := hwaddr.String()
 	now := p.now()
 	if result, ok := p.cache.get(mac, now); ok {
 		return result, nil
 	}
 
-	// The plugin handler API has no context to inherit, and the client's own
-	// timeout bounds the request, so a background context is the whole story
-	// here.
-	result, err := p.backend.lookup(context.Background(), mac)
-	if err != nil {
+	ctx, cancel := context.WithTimeout(ctx, p.opts.timeout)
+	defer cancel()
+	result, err := p.backend.lookup(ctx, mac)
+	if err != nil && !errors.Is(err, ErrNoInterface) {
 		return lookupResult{}, err
 	}
+	// ErrNoInterface is an answer, not a failure, and is cached for the
+	// negative TTL.
 
 	ttl := p.opts.ttl
 	if !result.found {
@@ -311,15 +326,27 @@ func skipsLookup4(msgType dhcpv4.MessageType) bool {
 	}
 }
 
+// logLookupFailure logs ErrUnauthorized and ErrNotFound at error level, since
+// every packet fails the same way until an operator fixes the configuration.
+// Anything else is likely transient and the client's retransmission retries
+// it, so it gets a warning. Either way the request is dropped.
+func logLookupFailure(mac net.HardwareAddr, err error) {
+	if errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrNotFound) {
+		log.Errorf("dropping the request from MAC address %s, the NetBox lookup keeps failing until the configuration is fixed: %v", mac, err)
+		return
+	}
+	log.Warningf("dropping the request from MAC address %s, the NetBox lookup failed: %v; the client retransmits and the lookup is retried then", mac, err)
+}
+
 // Handler4 handles DHCPv4 packets for the netbox plugin.
-func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+func (p *pluginState) Handler4(ctx context.Context, req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
 	if skipsLookup4(req.MessageType()) {
 		return resp, false
 	}
 
-	result, err := p.lookup(req.ClientHWAddr)
+	result, err := p.lookup(ctx, req.ClientHWAddr)
 	if err != nil {
-		log.Warningf("dropping request from MAC address %s, NetBox lookup failed: %v", req.ClientHWAddr, err)
+		logLookupFailure(req.ClientHWAddr, err)
 		return nil, true
 	}
 	if !result.found || !result.v4.IsValid() {
@@ -346,10 +373,10 @@ func skipsLookup6(msgType dhcpv6.MessageType) bool {
 }
 
 // Handler6 handles DHCPv6 packets for the netbox plugin.
-func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
+func (p *pluginState) Handler6(ctx context.Context, req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 	m, err := req.GetInnerMessage()
 	if err != nil {
-		log.Errorf("BUG: could not decapsulate: %v", err)
+		log.Errorf("BUG: could not decapsulate the DHCPv6 request, dropping it: %v; please report this with the log line", err)
 		return nil, true
 	}
 
@@ -372,9 +399,9 @@ func (p *pluginState) Handler6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, bool) {
 		return resp, false
 	}
 
-	result, err := p.lookup(mac)
+	result, err := p.lookup(ctx, mac)
 	if err != nil {
-		log.Warningf("dropping request from MAC address %s, NetBox lookup failed: %v", mac, err)
+		logLookupFailure(mac, err)
 		return nil, true
 	}
 	if !result.found || !result.v6.IsValid() {

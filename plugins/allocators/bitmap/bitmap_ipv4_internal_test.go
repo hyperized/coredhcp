@@ -30,11 +30,15 @@ func TestToOffsetSentinelErrors(t *testing.T) {
 	alloc, err := NewIPv4Allocator(net.IPv4(192, 0, 2, 0), net.IPv4(192, 0, 2, 255))
 	require.NoError(t, err)
 
-	_, err = alloc.toOffset(net.ParseIP("2001:db8::1"))
-	assert.ErrorIs(t, err, errInvalidIP)
+	t.Run("wrong IP family", func(t *testing.T) {
+		_, offsetErr := alloc.toOffset(net.ParseIP("2001:db8::1"))
+		require.ErrorIs(t, offsetErr, errInvalidIP)
+	})
 
-	_, err = alloc.toOffset(net.IPv4(198, 51, 100, 5))
-	assert.ErrorIs(t, err, errNotInRange)
+	t.Run("outside pool range", func(t *testing.T) {
+		_, offsetErr := alloc.toOffset(net.IPv4(198, 51, 100, 5))
+		require.ErrorIs(t, offsetErr, errNotInRange)
+	})
 
 	off, err := alloc.toOffset(net.IPv4(192, 0, 2, 0))
 	require.NoError(t, err)

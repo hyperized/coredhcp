@@ -22,7 +22,6 @@ import (
 // iface: the interface where the DHCP message should be sent;
 // resp: DHCPv4 struct, which should be sent;
 func sendEthernet(iface net.Interface, resp *dhcpv4.DHCPv4) error {
-
 	eth := layers.Ethernet{
 		EthernetType: layers.EthernetTypeIPv4,
 		SrcMAC:       iface.HardwareAddr,
@@ -43,7 +42,7 @@ func sendEthernet(iface net.Interface, resp *dhcpv4.DHCPv4) error {
 
 	err := udp.SetNetworkLayerForChecksum(&ip)
 	if err != nil {
-		return fmt.Errorf("send Ethernet: couldn't set network layer: %w", err)
+		return fmt.Errorf("send Ethernet: couldn't set network layer: %w; this is a defect in the server, report it", err)
 	}
 
 	buf := gopacket.NewSerializeBuffer()
@@ -59,28 +58,31 @@ func sendEthernet(iface net.Interface, resp *dhcpv4.DHCPv4) error {
 	if !ok {
 		// dhcpLayer is nil when the payload does not decode as DHCPv4;
 		// calling LayerType on it here used to panic inside the error path.
-		return errors.New("cannot re-decode DHCPv4 payload for serialization")
+		return errors.New("cannot re-decode DHCPv4 payload for serialization; the reply the plugin chain built is not valid DHCPv4, report it with the plugin list in use")
 	}
 	err = gopacket.SerializeLayers(buf, opts, &eth, &ip, &udp, dhcp)
 	if err != nil {
-		return fmt.Errorf("cannot serialize layer: %w", err)
+		return fmt.Errorf("cannot serialize layer: %w; the reply the plugin chain built cannot be framed, report it with the plugin list in use", err)
 	}
 	data := buf.Bytes()
 
+	// One socket per reply, closed again below. Caching one would need an
+	// owner to close it and nothing here outlives the reply; the descriptors
+	// in flight are bounded by the handler limit (see WithMaxInFlight).
 	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, 0)
 	if err != nil {
-		return fmt.Errorf("send Ethernet: cannot open socket: %w", err)
+		return fmt.Errorf("send Ethernet: cannot open socket: %w; give the server CAP_NET_RAW, which is what a raw reply to an addressless client needs", err)
 	}
 	defer func() {
 		err = syscall.Close(fd)
 		if err != nil {
-			log.Errorf("Send Ethernet: Cannot close socket: %v", err)
+			log.Errorf("Send Ethernet: Cannot close socket: %v; the descriptor is left to the kernel, which reclaims it when the process exits", err)
 		}
 	}()
 
 	err = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
 	if err != nil {
-		log.Errorf("Send Ethernet: Cannot set option for socket: %v", err)
+		log.Errorf("Send Ethernet: Cannot set option for socket: %v; the reply still goes out, nothing to do unless layer-2 replies start failing", err)
 	}
 
 	var hwAddr [8]byte
@@ -93,7 +95,7 @@ func sendEthernet(iface net.Interface, resp *dhcpv4.DHCPv4) error {
 	}
 	err = syscall.Sendto(fd, data, 0, &ethAddr)
 	if err != nil {
-		return fmt.Errorf("cannot send frame via socket: %w", err)
+		return fmt.Errorf("cannot send frame via socket on %s: %w; check that the interface is up and that the server has CAP_NET_RAW", iface.Name, err)
 	}
 	return nil
 }

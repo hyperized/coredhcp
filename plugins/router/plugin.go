@@ -8,6 +8,7 @@ package router
 
 import (
 	"errors"
+	"fmt"
 	"net"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -34,13 +35,13 @@ type pluginState struct {
 func setup4(args ...string) (handler.Handler4, error) {
 	log.Printf("Loaded plugin for DHCPv4.")
 	if len(args) < 1 {
-		return nil, errors.New("need at least one router IP address")
+		return nil, errors.New("no router address given; list one or more gateway addresses as arguments, for example 10.0.0.1")
 	}
 	p := pluginState{}
 	for _, arg := range args {
 		router := net.ParseIP(arg)
 		if router.To4() == nil {
-			return nil, errors.New("expected an router IP address, got: " + arg)
+			return nil, fmt.Errorf("argument %q is not an IPv4 address; give the router as a dotted address such as 10.0.0.1", arg)
 		}
 		p.routers = append(p.routers, router)
 	}

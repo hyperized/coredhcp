@@ -28,7 +28,7 @@ var sendEthernetFn = sendEthernet
 // errNoLayer2Interface is what the observer is told when a raw frame has
 // nowhere to go. There is no error from the network stack to pass on here:
 // the server never found out which interface the request arrived on.
-var errNoLayer2Interface = errors.New("no interface information for a layer-2 reply")
+var errNoLayer2Interface = errors.New("no interface information for a layer-2 reply; bind the DHCPv4 listener to an interface, for example `listen: \"%eth0\"`")
 
 // ifaceName is the interface a packet arrived on: the one the listener is
 // bound to, or the one the socket reported for this packet.
@@ -95,6 +95,32 @@ func (l *listener4) requestContext(oob *ipv4.ControlMessage, src *net.UDPAddr) c
 	})
 }
 
+// relayDropped reports whether this request came through a relay while
+// nothing in the chain vets relays, and counts the drop when it did.
+//
+// A DHCPv4 reply goes to giaddr and the sender picks giaddr, so with no
+// allow list any host that can reach the server makes it reply to any
+// address it names. The relay plugin holds that list; without it in the
+// chain the server answers no relay at all.
+func (l *listener4) relayDropped(req *dhcpv4.DHCPv4) bool {
+	if l.relayChecked || !isRelayed4(req) {
+		return false
+	}
+	l.gate.dropped(reasonRelayed)
+	return true
+}
+
+// relayDropped is the DHCPv6 half. There is no giaddr: a relay wraps the
+// client's message in a Relay-forward, so being relayed at all is what this
+// refuses while no plugin says which relays are legitimate.
+func (l *listener6) relayDropped(req dhcpv6.DHCPv6) bool {
+	if l.relayChecked || !req.IsRelay() {
+		return false
+	}
+	l.gate.dropped(reasonRelayed)
+	return true
+}
+
 // startReport begins the event for one packet, or returns nil when no
 // observer is attached. Everything it would cost, the clock read and the
 // interface lookup included, sits behind that check.
@@ -128,10 +154,14 @@ func (l *listener6) HandleMsg6(buf []byte, oob *ipv6.ControlMessage, peer *net.U
 		return
 	}
 	rep.request6(req)
+	if l.relayDropped(req) {
+		rep.emit(events.OutcomeDropped, events.PathNone, errRelayedNotAllowed)
+		return
+	}
 
 	resp, err := buildReply6(req)
 	if err != nil {
-		log.Warningf("MainHandler6: %v", err)
+		log.Warningf("DHCPv6: cannot build a reply for the request from %v: %v; the packet is dropped, check the client or the relay if this repeats", peer, err)
 		rep.emit(events.OutcomeUnsupported, events.PathNone, err)
 		return
 	}
@@ -147,7 +177,7 @@ func (l *listener6) HandleMsg6(buf []byte, oob *ipv6.ControlMessage, peer *net.U
 
 	resp, err = encapsulateRelay6(req, resp)
 	if err != nil {
-		log.Warningf("DHCPv6: cannot create relay-repl from relay-forw: %v", err)
+		log.Warningf("DHCPv6: cannot create relay-repl from relay-forw: %v; the packet is dropped, check the relay agent if this repeats", err)
 		rep.emit(events.OutcomeUnsupported, events.PathNone, err)
 		return
 	}
@@ -160,7 +190,7 @@ func (l *listener6) HandleMsg6(buf []byte, oob *ipv6.ControlMessage, peer *net.U
 		if idx := replyIfIndex(l.Index, oobIfIndex6(oob)); idx != 0 {
 			woob = &ipv6.ControlMessage{IfIndex: idx}
 		} else {
-			log.Errorf("HandleMsg6: Did not receive interface information")
+			log.Errorf("DHCPv6: no interface for the link-local reply to %v, leaving the choice to the routing table; name the interface in `listen` if the reply goes astray", peer)
 		}
 	}
 	if _, err := l.WriteTo(resp.ToBytes(), woob, peer); err != nil {
@@ -185,6 +215,10 @@ func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, src *net.UD
 		return
 	}
 	rep.request4(req)
+	if l.relayDropped(req) {
+		rep.emit(events.OutcomeDropped, events.PathNone, errRelayedNotAllowed)
+		return
+	}
 
 	resp, err := buildReply4(req)
 	if err != nil {
@@ -223,7 +257,7 @@ func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, src *net.UD
 		if idx := replyIfIndex(l.Index, oobIfIndex4(oob)); idx != 0 {
 			woob = &ipv4.ControlMessage{IfIndex: idx}
 		} else {
-			log.Errorf("HandleMsg4: Did not receive interface information")
+			log.Errorf("DHCPv4: no interface for the reply to %v, leaving the choice to the routing table; name the interface in `listen` if the reply goes astray", peer)
 		}
 	}
 
@@ -232,7 +266,7 @@ func (l *listener4) HandleMsg4(buf []byte, oob *ipv4.ControlMessage, src *net.UD
 		return
 	}
 	if _, err := l.WriteTo(resp.ToBytes(), woob, peer); err != nil {
-		log.Errorf("MainHandler4: conn.Write to %v failed: %v", peer, err)
+		log.Errorf("DHCPv4: writing the reply to %v failed: %v; the client gets nothing and will retry, check the route to it and the interface the socket is bound to", peer, err)
 		rep.emit4(events.OutcomeSendError, peer, err)
 		return
 	}
@@ -245,18 +279,18 @@ func sendLayer2(rep *requestReport, woob *ipv4.ControlMessage, resp *dhcpv4.DHCP
 	if woob == nil {
 		// Without an interface there is nothing to put the frame on;
 		// dereferencing woob here used to crash the server.
-		log.Errorf("MainHandler4: cannot send layer-2 reply without interface information")
+		log.Errorf("DHCPv4: cannot send layer-2 reply without interface information; bind the listener to an interface, for example `listen: \"%%eth0\"`")
 		rep.emit(events.OutcomeSendError, events.PathLayer2, errNoLayer2Interface)
 		return
 	}
 	intf, err := net.InterfaceByIndex(woob.IfIndex)
 	if err != nil {
-		log.Errorf("MainHandler4: Can not get Interface for index %d %v", woob.IfIndex, err)
+		log.Errorf("DHCPv4: interface index %d no longer names an interface: %v; the reply is dropped, this is what a link going down under the running server looks like", woob.IfIndex, err)
 		rep.emit(events.OutcomeSendError, events.PathLayer2, err)
 		return
 	}
 	if err := sendEthernetFn(*intf, resp); err != nil {
-		log.Errorf("MainHandler4: Cannot send Ethernet packet: %v", err)
+		log.Errorf("DHCPv4: cannot send the raw layer-2 reply: %v; the client gets nothing and will retry, check that the server has CAP_NET_RAW", err)
 		rep.emit(events.OutcomeSendError, events.PathLayer2, err)
 		return
 	}
@@ -273,12 +307,12 @@ const MaxDatagram = 1 << 16
 // XXX: investigate using RecvMsgs to batch messages and reduce syscalls
 
 // serve is the shared read loop: hand each datagram to handle on its own
-// goroutine until the connection closes.
-func serve[M any](localAddr net.Addr, readFrom func([]byte) (int, M, net.Addr, error), handle func([]byte, M, *net.UDPAddr)) error {
+// goroutine, bounded by the gate, until the connection closes.
+func serve[M any](localAddr net.Addr, g *gate, readFrom func([]byte) (int, M, net.Addr, error), handle func([]byte, M, *net.UDPAddr)) error {
 	log.Printf("Listen %s", localAddr)
 	for {
-		b := *bufpool.Get().(*[]byte)
-		b = b[:MaxDatagram] // Reslice to max capacity in case the buffer in pool was resliced smaller
+		b := *bufpool.Get().(*[]byte) //nolint:forcetypeassert // bufpool only ever holds *[]byte
+		b = b[:MaxDatagram]           // Reslice to max capacity in case the buffer in pool was resliced smaller
 
 		n, oob, peer, err := readFrom(b)
 		if errors.Is(err, net.ErrClosed) {
@@ -288,18 +322,44 @@ func serve[M any](localAddr net.Addr, readFrom func([]byte) (int, M, net.Addr, e
 			log.Printf("Error reading from connection: %v", err)
 			return err
 		}
-		go handle(b[:n], oob, peer.(*net.UDPAddr))
+		datagram := b[:n]
+		src, ok := peer.(*net.UDPAddr)
+		if !ok {
+			// readFrom is injected, so the peer is whatever the socket
+			// underneath it reports. Anything without a port to answer on is
+			// dropped rather than taking the read loop down with it.
+			log.Printf("Received datagram from a peer that is not a *net.UDPAddr (%T), dropping", peer)
+			bufpool.Put(&b)
+			continue
+		}
+		if !g.run(func() { handle(datagram, oob, src) }) {
+			// No handler ran, so nobody will hand the buffer back.
+			bufpool.Put(&b)
+		}
 	}
+}
+
+// gateFor is the listener's gate, or a fresh default one for a listener
+// built outside Start, which has none.
+//
+// It is deliberately not written back onto the listener: the handler
+// goroutines read that field while they run, so assigning it here would be
+// a race.
+func gateFor(g *gate) *gate {
+	if g == nil {
+		return newGate(0)
+	}
+	return g
 }
 
 // Serve handles datagrams received on the DHCPv6 connection and passes them
 // to the plugin chain.
 func (l *listener6) Serve() error {
-	return serve(l.LocalAddr(), l.ReadFrom, l.HandleMsg6)
+	return serve(l.LocalAddr(), gateFor(l.gate), l.ReadFrom, l.HandleMsg6)
 }
 
 // Serve handles datagrams received on the DHCPv4 connection and passes them
 // to the plugin chain.
 func (l *listener4) Serve() error {
-	return serve(l.LocalAddr(), l.ReadFrom, l.HandleMsg4)
+	return serve(l.LocalAddr(), gateFor(l.gate), l.ReadFrom, l.HandleMsg4)
 }

@@ -5,6 +5,7 @@
 package netbox_test
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,17 @@ import (
 
 	"github.com/coredhcp/coredhcp/plugins/netbox"
 )
+
+func TestPluginIsRegisteredForBothFamilies(t *testing.T) {
+	assert.Equal(t, "netbox", netbox.Plugin.Name)
+	assert.NotNil(t, netbox.Plugin.Setup4Ctx)
+	assert.NotNil(t, netbox.Plugin.Setup6Ctx)
+	// This plugin makes an HTTP call per request, which needs the caller's
+	// deadline and cancellation from the context, so only the Ctx setup
+	// functions are wired.
+	assert.Nil(t, netbox.Plugin.Setup4)
+	assert.Nil(t, netbox.Plugin.Setup6)
+}
 
 const (
 	knownMAC = "aa:bb:cc:dd:ee:ff"
@@ -81,14 +93,14 @@ func v4Request(t *testing.T, mac net.HardwareAddr) (*dhcpv4.DHCPv4, *dhcpv4.DHCP
 
 func TestSetup4KnownMAC(t *testing.T) {
 	fake := newFakeNetBox(t, "Token secret")
-	h4, err := netbox.Plugin.Setup4(fake.srv.URL, "secret")
+	h4, err := netbox.Plugin.Setup4Ctx(fake.srv.URL, "secret")
 	require.NoError(t, err)
 
 	mac, err := net.ParseMAC(knownMAC)
 	require.NoError(t, err)
 	req, resp := v4Request(t, mac)
 
-	gotResp, stop := h4(req, resp)
+	gotResp, stop := h4(context.Background(), req, resp)
 	assert.Same(t, resp, gotResp)
 	assert.True(t, stop)
 	assert.Equal(t, net.IP(netip.MustParseAddr("10.0.0.5").AsSlice()), gotResp.YourIPAddr)
@@ -100,20 +112,20 @@ func TestSetup4KnownMAC(t *testing.T) {
 
 func TestSetup4UnknownMAC(t *testing.T) {
 	fake := newFakeNetBox(t, "Token secret")
-	h4, err := netbox.Plugin.Setup4(fake.srv.URL, "secret")
+	h4, err := netbox.Plugin.Setup4Ctx(fake.srv.URL, "secret")
 	require.NoError(t, err)
 
 	mac := net.HardwareAddr{0x11, 0x22, 0x33, 0x44, 0x55, 0x66}
 	req, resp := v4Request(t, mac)
 
-	gotResp, stop := h4(req, resp)
+	gotResp, stop := h4(context.Background(), req, resp)
 	assert.Same(t, resp, gotResp)
 	assert.False(t, stop)
 }
 
 func TestSetup6KnownMAC(t *testing.T) {
 	fake := newFakeNetBox(t, "Token secret")
-	h6, err := netbox.Plugin.Setup6(fake.srv.URL, "secret")
+	h6, err := netbox.Plugin.Setup6Ctx(fake.srv.URL, "secret")
 	require.NoError(t, err)
 
 	mac, err := net.ParseMAC(knownMAC)
@@ -123,9 +135,9 @@ func TestSetup6KnownMAC(t *testing.T) {
 	resp, err := dhcpv6.NewAdvertiseFromSolicit(req)
 	require.NoError(t, err)
 
-	gotResp, stop := h6(req, resp)
+	gotResp, stop := h6(context.Background(), req, resp)
 	assert.False(t, stop)
-	require.Equal(t, 1, len(gotResp.GetOption(dhcpv6.OptionIANA)))
+	require.Len(t, gotResp.GetOption(dhcpv6.OptionIANA), 1)
 	opt := gotResp.GetOneOption(dhcpv6.OptionIANA)
 	assert.Contains(t, opt.String(), "IP=2001:db8::10:5")
 }
@@ -136,7 +148,7 @@ func TestSetup6KnownMAC(t *testing.T) {
 // retransmits the same MAC many times.
 func TestCacheKeepsNetBoxOffThePerPacketPath(t *testing.T) {
 	fake := newFakeNetBox(t, "Token secret")
-	h4, err := netbox.Plugin.Setup4(fake.srv.URL, "secret")
+	h4, err := netbox.Plugin.Setup4Ctx(fake.srv.URL, "secret")
 	require.NoError(t, err)
 
 	mac, err := net.ParseMAC(knownMAC)
@@ -144,7 +156,7 @@ func TestCacheKeepsNetBoxOffThePerPacketPath(t *testing.T) {
 
 	runOnce := func() {
 		req, resp := v4Request(t, mac)
-		_, stop := h4(req, resp)
+		_, stop := h4(context.Background(), req, resp)
 		assert.True(t, stop)
 	}
 
@@ -160,8 +172,8 @@ func TestSetupArgErrors(t *testing.T) {
 		name string
 		fn   func(args ...string) error
 	}{
-		{"Setup4", func(args ...string) error { _, err := netbox.Plugin.Setup4(args...); return err }},
-		{"Setup6", func(args ...string) error { _, err := netbox.Plugin.Setup6(args...); return err }},
+		{"Setup4", func(args ...string) error { _, err := netbox.Plugin.Setup4Ctx(args...); return err }},
+		{"Setup6", func(args ...string) error { _, err := netbox.Plugin.Setup6Ctx(args...); return err }},
 	} {
 		t.Run(setup.name, func(t *testing.T) {
 			t.Run("no arguments", func(t *testing.T) {
@@ -186,11 +198,11 @@ func TestSetupDoesNotContactNetBox(t *testing.T) {
 	}))
 	srv.Close() // closed before use, so any request would fail to even connect
 
-	h4, err := netbox.Plugin.Setup4(srv.URL, "secret")
+	h4, err := netbox.Plugin.Setup4Ctx(srv.URL, "secret")
 	require.NoError(t, err)
 	assert.NotNil(t, h4)
 
-	h6, err := netbox.Plugin.Setup6(srv.URL, "secret")
+	h6, err := netbox.Plugin.Setup6Ctx(srv.URL, "secret")
 	require.NoError(t, err)
 	assert.NotNil(t, h6)
 }
@@ -199,28 +211,28 @@ func TestTokenArgument(t *testing.T) {
 	t.Run("env: reads the token from the environment", func(t *testing.T) {
 		t.Setenv("NETBOX_TEST_TOKEN", "secret")
 		fake := newFakeNetBox(t, "Token secret")
-		h4, err := netbox.Plugin.Setup4(fake.srv.URL, "env:NETBOX_TEST_TOKEN")
+		h4, err := netbox.Plugin.Setup4Ctx(fake.srv.URL, "env:NETBOX_TEST_TOKEN")
 		require.NoError(t, err)
 
 		mac, err := net.ParseMAC(knownMAC)
 		require.NoError(t, err)
 		req, resp := v4Request(t, mac)
 
-		_, stop := h4(req, resp)
+		_, stop := h4(context.Background(), req, resp)
 		assert.True(t, stop)
-		assert.Greater(t, fake.requests.Load(), int32(0))
+		assert.Positive(t, fake.requests.Load())
 	})
 
 	t.Run("an nbt_ token authenticates as a bearer token", func(t *testing.T) {
 		fake := newFakeNetBox(t, "Bearer nbt_secret")
-		h4, err := netbox.Plugin.Setup4(fake.srv.URL, "nbt_secret")
+		h4, err := netbox.Plugin.Setup4Ctx(fake.srv.URL, "nbt_secret")
 		require.NoError(t, err)
 
 		mac, err := net.ParseMAC(knownMAC)
 		require.NoError(t, err)
 		req, resp := v4Request(t, mac)
 
-		_, stop := h4(req, resp)
+		_, stop := h4(context.Background(), req, resp)
 		assert.True(t, stop)
 	})
 }

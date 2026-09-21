@@ -80,6 +80,8 @@ server6:
         # matched; fe80::/10 is how you admit link-local relays. Chains nested
         # deeper than eight relays and an outermost relay with no link address
         # and a hop count above 32 are dropped as well. List it first.
+        # Without this plugin the server drops every relayed request for this
+        # family, so configure it if any of your clients sit behind a relay.
         # - relay: allow <address|prefix> ... [release-check:on|off]
         # - relay: allow fe80::/10 2001:db8:0:1::1
 
@@ -121,9 +123,11 @@ server6:
         # relayinfo assigns a fixed address per relay port instead of per
         # client, from a file of "<key value> <IPv6> [lease]" lines. The key
         # is the interface-id (option 18) or the remote-id (option 37) the
-        # relay stamped on the request. Put a relay allow list in front of it.
-        # - relayinfo: file:<path> key:<interface-id | remote-id> [autorefresh]
-        # - relayinfo: file:/etc/coredhcp/ports-v6.txt key:interface-id autorefresh
+        # relay stamped on the request. allow names the relays whose stamps
+        # are believed: a relayed request from any other source is dropped,
+        # while one that came straight from a client passes on untouched.
+        # - relayinfo: file:<path> key:<interface-id | remote-id> allow <addr|cidr>... [autorefresh]
+        # - relayinfo: file:/etc/coredhcp/ports-v6.txt key:interface-id allow fe80::/10 autorefresh
 
         # netbox serves the IPv6 address documented in NetBox on the interface
         # that carries the client's MAC address (NetBox 4.2 or newer). Results
@@ -270,6 +274,8 @@ server4:
         # On-link clients pass, except that release-check (on by default)
         # drops a RELEASE whose ciaddr is not the address it came from.
         # List it first, before server_id and any plugin holding lease state.
+        # Without this plugin the server drops every request carrying a
+        # giaddr, so configure it if any of your clients sit behind a relay.
         # - relay: allow <address|prefix> ... [strict-giaddr] [release-check:on|off]
         # - relay: allow 10.0.1.1 10.0.2.0/24
 
@@ -345,9 +351,12 @@ server4:
         # client, from a file of "<key value> <IPv4> [lease]" lines. The key
         # is one of the option 82 sub-options the relay stamped on the
         # request. It ends the chain on a match, like file, so list it after
-        # the option plugins. Put a relay allow list in front of it.
-        # - relayinfo: file:<path> key:<circuit-id | remote-id | subscriber-id> [autorefresh]
-        # - relayinfo: file:/etc/coredhcp/ports.txt key:circuit-id autorefresh
+        # the option plugins. allow names the relays whose stamps are
+        # believed: a request carrying an option 82 or a giaddr from any
+        # other source is dropped, while an on-link client that carries
+        # neither passes on untouched.
+        # - relayinfo: file:<path> key:<circuit-id | remote-id | subscriber-id> allow <addr|cidr>... [autorefresh]
+        # - relayinfo: file:/etc/coredhcp/ports.txt key:circuit-id allow 10.0.1.1 10.0.2.0/24 autorefresh
 
         # range allocates leases within a range of IPs
         # - range: <lease file> <start IP> <end IP> <lease duration> [sweep:<interval>] [decline-probation:<duration>] [decline-max:<count>]

@@ -196,7 +196,7 @@ func TestSetup6(t *testing.T) {
 
 	t.Run("en/uuid not supported", func(t *testing.T) {
 		_, err := serverid.Plugin.Setup6("en", "aa:bb:cc:dd:ee:ff")
-		assert.Error(t, err)
+		require.Error(t, err)
 
 		_, err = serverid.Plugin.Setup6("uuid", "aa:bb:cc:dd:ee:ff")
 		assert.Error(t, err)
@@ -240,6 +240,8 @@ func assertHandler6Works(t *testing.T, h6 func(req, resp dhcpv6.DHCPv6) (dhcpv6.
 	require.NotNil(t, resp)
 	assert.False(t, stop)
 
-	opt := resp.(*dhcpv6.Message).Options.ServerID()
+	msg, ok := resp.(*dhcpv6.Message)
+	require.True(t, ok)
+	opt := msg.Options.ServerID()
 	require.NotNil(t, opt)
 }

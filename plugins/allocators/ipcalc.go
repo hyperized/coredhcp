@@ -29,7 +29,7 @@ var ErrOverflow = errors.New("operation overflows")
 // first ip of the range
 func Offset(a, b net.IP, prefixLength int) (uint64, error) {
 	if prefixLength > 128 || prefixLength < 0 {
-		return 0, errors.New("prefix out of range")
+		return 0, errors.New("prefix out of range; pass a prefix length from 0 to 128")
 	}
 
 	reverse := bytes.Compare(a, b)
@@ -95,7 +95,7 @@ func AddPrefixes(ip net.IP, n, unit uint64) (net.IP, error) {
 	if len(ip) != 16 {
 		// We don't actually care if they're true v6 or v4-mapped,
 		// but they need to be 128-bit to handle as 64-bit ints
-		return net.IP{}, errors.New("AddPrefixes needs 128-bit IPs")
+		return net.IP{}, errors.New("AddPrefixes needs 128-bit IPs; pass an IPv6 address, or an IPv4 one widened with To16")
 	}
 
 	// Compute as pairs of uint64 for easier operations

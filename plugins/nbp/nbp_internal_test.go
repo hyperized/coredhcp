@@ -17,14 +17,12 @@ import (
 func TestParseArgs(t *testing.T) {
 	t.Run("no arguments", func(t *testing.T) {
 		_, err := parseArgs()
-		require.Error(t, err)
-		assert.Equal(t, "exactly one argument must be passed to NBP plugin, got 0", err.Error())
+		require.ErrorContains(t, err, "need exactly one argument, got 0")
 	})
 
 	t.Run("too many arguments", func(t *testing.T) {
 		_, err := parseArgs("http://a/b", "http://c/d")
-		require.Error(t, err)
-		assert.Equal(t, "exactly one argument must be passed to NBP plugin, got 2", err.Error())
+		require.ErrorContains(t, err, "need exactly one argument, got 2")
 	})
 
 	t.Run("valid URL", func(t *testing.T) {
@@ -37,7 +35,7 @@ func TestParseArgs(t *testing.T) {
 
 	t.Run("malformed URL", func(t *testing.T) {
 		_, err := parseArgs("http://[::1")
-		require.Error(t, err)
+		require.ErrorContains(t, err, `argument "http://[::1" is not a URL`)
 	})
 }
 

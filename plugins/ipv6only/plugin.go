@@ -18,7 +18,7 @@ package ipv6only
 // described in RFC8925 section 3.2.
 
 import (
-	"errors"
+	"fmt"
 	"time"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -46,13 +46,13 @@ func setup4(args ...string) (handler.Handler4, error) {
 	if len(args) > 0 {
 		dur, err := time.ParseDuration(args[0])
 		if err != nil {
-			log.Errorf("invalid duration: %v", args[0])
-			return nil, errors.New("ipv6only failed to initialize")
+			log.Errorf("v6only-wait %q is not a duration: %v; write it the Go way, such as 300s or 5m", args[0], err)
+			return nil, fmt.Errorf("v6only-wait %q is not a duration; write it the Go way, such as 300s or 5m, or leave it out for the default of 0s", args[0])
 		}
 		p.v6onlyWait = dur
 	}
 	if len(args) > 1 {
-		return nil, errors.New("too many arguments")
+		return nil, fmt.Errorf("got %d arguments, ipv6only takes at most one; keep the v6only-wait value and remove the rest", len(args))
 	}
 	return p.Handler4, nil
 }

@@ -1,0 +1,33 @@
+# Scopes for the subnet plugin. Both families are read from this one file and
+# both validate all of it, so a mistake in the DHCPv6 subnet fails the DHCPv4
+# server too.
+#
+# Neither subnet is the default and neither matches an interface, so only a
+# request that came through the relay at .3 selects one. On-link clients fall
+# past subnet to range and range6.
+
+subnets:
+  - name: relayed4
+    cidr: @RELAY@.0/24
+    match:
+      relays: [@RELAY@.3]
+    pool: @RELAY@.100-@RELAY@.120
+    lease: @LEASE_TIME@
+    leasedb: /var/lib/coredhcp/subnet-relayed4.sqlite3
+    # Set unconditionally, and different from what the dns and router plugins
+    # set above, so a reply proves which scope answered it.
+    options:
+      router: @RELAY@.1
+      dns: [@RELAY@.1]
+      domain: relayed.test
+      ntp: [@RELAY@.1]
+
+  - name: relayed6
+    cidr: @V6RELAY@::/64
+    match:
+      relays: [@V6RELAY@::3]
+    # No prefixpool: this scope carries options only and lets the chain
+    # continue, so a relayed client still gets its address from range6.
+    # options.router, .domain and .ntp are DHCPv4 only.
+    options:
+      dns: [@V6RELAY@::1]

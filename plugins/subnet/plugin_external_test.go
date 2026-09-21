@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -20,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/coredhcp/coredhcp/handler"
+	"github.com/coredhcp/coredhcp/leases"
 	"github.com/coredhcp/coredhcp/plugins/subnet"
 )
 
@@ -93,6 +95,26 @@ func withinRange(t *testing.T, ip net.IP, start, end string) {
 		"%s is not within %s-%s", ip, start, end)
 }
 
+// closeDelegates reaches the pool instances through the leases registry,
+// because Setup hands back a handler and nothing else. Each one runs a
+// sweeper and a writer over a lease file in the test's temp directory, and
+// the framework fails the test if anything is still touching that directory
+// when it removes it.
+func closeDelegates(t *testing.T, names ...string) {
+	t.Helper()
+	for _, s := range leases.Sources() {
+		if !slices.Contains(names, s.Name()) {
+			continue
+		}
+		closer, ok := s.(interface{ Close() })
+		require.True(t, ok, "the registered delegate must be the plugin instance")
+		t.Cleanup(func() {
+			leases.Unregister(s)
+			closer.Close()
+		})
+	}
+}
+
 // TestEndToEndDHCPv4TwoSubnets proves that each configured subnet gets its
 // own range instance rather than sharing one: a request relayed through each
 // subnet's gateway must be allocated from that subnet's own pool.
@@ -118,6 +140,7 @@ func TestEndToEndDHCPv4TwoSubnets(t *testing.T) {
 
 	h, err := subnet.Plugin.Setup4Ctx("file:" + path)
 	require.NoError(t, err)
+	closeDelegates(t, "range "+officeDB, "range "+guestDB)
 
 	officeMAC := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
 	req1, err := dhcpv4.NewDiscovery(officeMAC)

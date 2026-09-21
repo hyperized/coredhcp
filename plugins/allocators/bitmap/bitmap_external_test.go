@@ -47,15 +47,15 @@ func TestExhaustAndReallocateAfterFree(t *testing.T) {
 	alloc, err := bitmap.NewBitmapAllocator(*prefix, 64)
 	require.NoError(t, err)
 
-	allocd := []net.IPNet{}
+	allocd := make([]net.IPNet, 0, 4)
 	for range 4 {
-		n, err := alloc.Allocate(net.IPNet{Mask: net.CIDRMask(64, 128)})
-		require.NoError(t, err, "should not fail before exhaustion")
+		n, allocErr := alloc.Allocate(net.IPNet{Mask: net.CIDRMask(64, 128)})
+		require.NoError(t, allocErr, "should not fail before exhaustion")
 		allocd = append(allocd, n)
 	}
 
 	_, err = alloc.Allocate(net.IPNet{})
-	assert.ErrorIs(t, err, allocators.ErrNoAddrAvail)
+	require.ErrorIs(t, err, allocators.ErrNoAddrAvail)
 
 	require.NoError(t, alloc.Free(allocd[1]))
 
@@ -84,7 +84,7 @@ func TestNewBitmapAllocatorOrderNegative(t *testing.T) {
 
 	// requested size smaller than the pool it's carved from: allocOrder < 0
 	_, err = bitmap.NewBitmapAllocator(*prefix, 48)
-	assert.EqualError(t, err, "the size of allocated prefixes cannot be larger than the pool they're allocated from")
+	assert.ErrorContains(t, err, "the size of allocated prefixes cannot be larger than the pool they're allocated from")
 }
 
 func TestNewBitmapAllocatorOrderNotRepresentable(t *testing.T) {

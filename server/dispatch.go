@@ -24,7 +24,7 @@ import (
 func buildReply6(d dhcpv6.DHCPv6) (dhcpv6.DHCPv6, error) {
 	msg, err := d.GetInnerMessage()
 	if err != nil {
-		return nil, fmt.Errorf("cannot get inner message: %w", err)
+		return nil, fmt.Errorf("cannot get inner message out of the relay chain: %w; the sender wrapped a message this server cannot read, check the relay agent", err)
 	}
 	switch msg.Type() {
 	case dhcpv6.MessageTypeSolicit:
@@ -40,7 +40,7 @@ func buildReply6(d dhcpv6.DHCPv6) (dhcpv6.DHCPv6, error) {
 		// which gets nothing at all: RFC 8415 section 18.3.8.
 		return replyToDecline6(msg)
 	default:
-		return nil, fmt.Errorf("message type %d not supported", msg.Type())
+		return nil, fmt.Errorf("message type %d not supported; this server answers Solicit, Request, Confirm, Renew, Rebind, Release, Decline and Information-request", msg.Type())
 	}
 }
 
@@ -54,7 +54,7 @@ func buildReply6(d dhcpv6.DHCPv6) (dhcpv6.DHCPv6, error) {
 func replyToDecline6(msg *dhcpv6.Message) (dhcpv6.DHCPv6, error) {
 	cid := msg.GetOneOption(dhcpv6.OptionClientID)
 	if cid == nil {
-		return nil, errors.New("client ID cannot be nil when building a Reply to a Decline")
+		return nil, errors.New("client ID cannot be nil when building a Reply to a Decline; the client left out the option RFC 8415 requires, check its DHCPv6 implementation")
 	}
 	rep := &dhcpv6.Message{
 		MessageType:   dhcpv6.MessageTypeReply,
@@ -68,11 +68,11 @@ func replyToDecline6(msg *dhcpv6.Message) (dhcpv6.DHCPv6, error) {
 // plugin chain will decorate.
 func buildReply4(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 	if req.OpCode != dhcpv4.OpcodeBootRequest {
-		return nil, fmt.Errorf("unsupported opcode %d, only BootRequest (%d) is supported", req.OpCode, dhcpv4.OpcodeBootRequest)
+		return nil, fmt.Errorf("unsupported opcode %d, only BootRequest (%d) is supported; a BootReply comes from a server, so check what is sending these", req.OpCode, dhcpv4.OpcodeBootRequest)
 	}
 	resp, err := dhcpv4.NewReplyFromRequest(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build reply: %w", err)
+		return nil, fmt.Errorf("failed to build reply: %w; the request is malformed, check the client or the relay that forwarded it", err)
 	}
 	switch mt := req.MessageType(); mt {
 	case dhcpv4.MessageTypeDiscover:
@@ -85,7 +85,7 @@ func buildReply4(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 		// still exists because the chain runs: plugins free or
 		// quarantine the lease, and some carry state on the response.
 	default:
-		return nil, fmt.Errorf("unhandled message type: %v", mt)
+		return nil, fmt.Errorf("unhandled message type: %v; this server answers Discover, Request, Inform, Release and Decline", mt)
 	}
 	return resp, nil
 }
@@ -141,10 +141,24 @@ func encapsulateRelay6(req, resp dhcpv6.DHCPv6) (dhcpv6.DHCPv6, error) {
 	}
 	rmsg, ok := resp.(*dhcpv6.Message)
 	if !ok {
-		log.Warningf("DHCPv6: response is a relayed message, not reencapsulating")
+		log.Warningf("DHCPv6: response is a relayed message, not reencapsulating; it goes out as a plugin left it, check the plugin chain if the client gets no reply")
 		return resp, nil
 	}
+	//nolint:forcetypeassert // *dhcpv6.RelayMessage is the only type IsRelay accepts, checked by the caller
 	return dhcpv6.NewRelayReplFromRelayForw(req.(*dhcpv6.RelayMessage), rmsg)
+}
+
+// errRelayedNotAllowed is what the observer is told about a relayed request
+// the server refused: nothing is wrong with the packet, the configuration
+// says nothing about which relays to answer.
+var errRelayedNotAllowed = errors.New("relayed request and no relay plugin configured; add `relay: allow <address|prefix> ...` naming the relays this server answers")
+
+// isRelayed4 reports whether a DHCPv4 request came through a relay agent.
+// giaddr says so (RFC 2131 section 2): a client sends zero, the first relay
+// to forward the request writes its own address in. A request built in
+// memory may carry no giaddr bytes at all, which is not a relay either.
+func isRelayed4(req *dhcpv4.DHCPv4) bool {
+	return len(req.GatewayIPAddr) != 0 && !req.GatewayIPAddr.IsUnspecified()
 }
 
 // replyDestination4 decides where a DHCPv4 response goes. src is the address

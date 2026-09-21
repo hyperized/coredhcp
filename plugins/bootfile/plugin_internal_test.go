@@ -169,12 +169,21 @@ func TestSelectorPick(t *testing.T) {
 		wantOK bool
 	}{
 		{"ipxe beats the architecture", full, true, []iana.Arch{iana.EFI_X86_64}, "script", true},
-		{"ipxe client without an ipxe entry falls back to the architecture", noIPXE, true,
-			[]iana.Arch{iana.EFI_X86_64}, "uefi", true},
-		{"first configured architecture wins", full, false,
-			[]iana.Arch{iana.EFI_ARM64, iana.INTEL_X86PC, iana.EFI_X86_64}, "bios", true},
-		{"unmatched architecture falls back to default", full, false,
-			[]iana.Arch{iana.EFI_ARM64}, "fallback", true},
+		{
+			"ipxe client without an ipxe entry falls back to the architecture", noIPXE, true,
+			[]iana.Arch{iana.EFI_X86_64},
+			"uefi", true,
+		},
+		{
+			"first configured architecture wins", full, false,
+			[]iana.Arch{iana.EFI_ARM64, iana.INTEL_X86PC, iana.EFI_X86_64},
+			"bios", true,
+		},
+		{
+			"unmatched architecture falls back to default", full, false,
+			[]iana.Arch{iana.EFI_ARM64},
+			"fallback", true,
+		},
 		{"no architecture at all falls back to default", full, false, nil, "fallback", true},
 		{"no match and no default selects nothing", bare, true, []iana.Arch{iana.EFI_ARM64}, "", false},
 	} {

@@ -22,7 +22,6 @@ package autoconfigure
 // is DoNotAutoConfigure.
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -59,11 +58,11 @@ func setup4(args ...string) (handler.Handler4, error) {
 		var ok bool
 		p.autoconfigure, ok = argMap[args[0]]
 		if !ok {
-			return nil, fmt.Errorf("unexpected value '%v' for autoconfigure argument", args[0])
+			return nil, fmt.Errorf("argument %q is not an autoconfigure value; use DoNotAutoConfigure, AutoConfigure, 0 or 1, or leave it out for the default of DoNotAutoConfigure", args[0])
 		}
 	}
 	if len(args) > 1 {
-		return nil, errors.New("too many arguments")
+		return nil, fmt.Errorf("got %d arguments, autoconfigure takes at most one; keep the value you want and remove the rest", len(args))
 	}
 	return p.Handler4, nil
 }

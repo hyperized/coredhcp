@@ -14,7 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
-	"sort"
+	"slices"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -96,7 +96,7 @@ func algorithmNames() []string {
 	for name := range algorithms {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	return names
 }
 
@@ -118,12 +118,12 @@ type tsigKey struct {
 func newTSIGKey(name, algo string, secret []byte) (tsigKey, error) {
 	newHash, ok := algorithms[algo]
 	if !ok {
-		return tsigKey{}, fmt.Errorf("%w %q, want one of %v", ErrUnknownAlgorithm, algo, algorithmNames())
+		return tsigKey{}, fmt.Errorf("%w %q; use one of %v, whichever the name server has for this key", ErrUnknownAlgorithm, algo, algorithmNames())
 	}
 	k := tsigKey{name: dot(name), algo: dot(algo), algoWire: packLabel(algo), newHash: newHash, secret: secret}
 	var err error
 	if k.nameWire, err = packName(k.name); err != nil {
-		return tsigKey{}, fmt.Errorf("key name %q: %w", name, err)
+		return tsigKey{}, fmt.Errorf("key name %q is not a DNS name: %w; use the name the name server knows the key by, such as ddns-key", name, err)
 	}
 	return k, nil
 }
@@ -364,7 +364,7 @@ func (k tsigKey) verify(msg []byte, rec tsigRecord, requestMAC []byte) error {
 		return fmt.Errorf("%w: signed with %s, expected %s", ErrTSIGKey, rec.algo, k.algo)
 	}
 	if rec.rcode != 0 {
-		return fmt.Errorf("%w: %s", ErrTSIGError, tsigErrorName(rec.rcode))
+		return fmt.Errorf("%w: %s; check the key on both sides, and for BADTIME that the two clocks agree", ErrTSIGError, tsigErrorName(rec.rcode))
 	}
 	unsigned, err := k.stripTSIG(msg, rec.rdataLen)
 	if err != nil {

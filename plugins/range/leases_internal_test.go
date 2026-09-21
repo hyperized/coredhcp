@@ -60,10 +60,10 @@ func TestLeases(t *testing.T) {
 		{
 			name: "a live and a lapsed lease",
 			recs: map[string]*Record{
-				"02:00:00:00:00:01": {IP: net.IP{10, 0, 0, 1}, expires: int(live.Unix()), hostname: "laptop"},
+				"02:00:00:00:00:01": {IP: net.IP{10, 0, 0, 1}, expires: live.Unix(), hostname: "laptop"},
 				// Expired but not swept yet: reported all the same, with the
 				// expiry that has already passed.
-				"02:00:00:00:00:02": {IP: net.IP{10, 0, 0, 2}, expires: int(expired.Unix())},
+				"02:00:00:00:00:02": {IP: net.IP{10, 0, 0, 2}, expires: expired.Unix()},
 			},
 			want: []leases.Lease{
 				{
@@ -86,7 +86,7 @@ func TestLeases(t *testing.T) {
 		{
 			name: "a record whose address is not IPv4 is skipped",
 			recs: map[string]*Record{
-				"02:00:00:00:00:03": {IP: net.IP{1, 2, 3}, expires: int(live.Unix())},
+				"02:00:00:00:00:03": {IP: net.IP{1, 2, 3}, expires: live.Unix()},
 			},
 			want: []leases.Lease{},
 		},
@@ -163,7 +163,7 @@ func TestSetupRegistersTheInstance(t *testing.T) {
 		}
 	}
 	require.NotNil(t, found, "setupRange must register the instance it built")
-	t.Cleanup(func() { leases.Unregister(found) })
+	closeRegistered(t, "range "+dbPath)
 
 	require.Len(t, found.Pools(), 1)
 	assert.Equal(t, "10.0.0.1-10.0.0.5", found.Pools()[0].Range)

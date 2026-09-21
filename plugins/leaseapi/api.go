@@ -40,9 +40,9 @@ const (
 // what was asked for: an API that echoes its input back is one more place for
 // something downstream to render it.
 var (
-	ErrUnknownParameter = errors.New("unknown query parameter, want family or source")
-	ErrUnknownFamily    = errors.New("family must be 4 or 6")
-	ErrUnknownSource    = errors.New("no such source")
+	ErrUnknownParameter = errors.New("unknown query parameter; use family=4, family=6 or source=<name>, or send none of them for everything")
+	ErrUnknownFamily    = errors.New("family must be 4 or 6; use family=4 for DHCPv4 or family=6 for DHCPv6, or leave it out for both")
+	ErrUnknownSource    = errors.New("no lease source goes by that name; use a name from the source field of GET /v1/leases, or leave source out")
 )
 
 // streamThreshold is how many entries a response may hold before it is written
@@ -160,12 +160,10 @@ type health struct {
 
 // serveHealth answers GET /v1/health.
 func serveHealth(w http.ResponseWriter, _ *http.Request) {
-	var buf bytes.Buffer
-	// Encoding two scalars into a bytes.Buffer has nothing to fail on.
-	_ = json.NewEncoder(&buf).Encode(health{OK: true, Sources: len(leases.Sources())})
-	setJSONHeaders(w)
-	_, err := w.Write(buf.Bytes())
-	report(err)
+	body := health{OK: true, Sources: len(leases.Sources())}
+	writeJSON(w, http.StatusOK, func(out io.Writer) error {
+		return json.NewEncoder(out).Encode(body)
+	})
 }
 
 // collectLeases gathers the leases matching f from every source.
@@ -237,15 +235,33 @@ func comparePools(a, b leases.Pool) int {
 // either a whole body or none of it. A large one goes out entry by entry: see
 // streamThreshold.
 func respond[T any](w http.ResponseWriter, field string, items []T) {
-	setJSONHeaders(w)
 	if len(items) > streamThreshold {
+		setJSONHeaders(w)
 		report(encodeList(w, field, items))
 		return
 	}
+	writeJSON(w, http.StatusOK, func(out io.Writer) error {
+		return encodeList(out, field, items)
+	})
+}
+
+// writeJSON buffers first so that a failed encode can still become a 500:
+// once a byte of the body is on the wire the status line is spent, and a
+// client reading a truncated lease list cannot tell it from a short one.
+func writeJSON(w http.ResponseWriter, status int, encode func(io.Writer) error) {
 	var buf bytes.Buffer
-	// A bytes.Buffer never fails a write, and neither Lease nor Pool has a
-	// field encoding/json can refuse.
-	_ = encodeList(&buf, field, items)
+	if err := encode(&buf); err != nil {
+		// Nothing this package encodes has a field encoding/json can refuse,
+		// so reaching this is a bug rather than a bad request.
+		log.Errorf("BUG: encoding a %d response failed: %v; nothing this package encodes can do that, please report it with this log line", status, err)
+		http.Error(w, "the response could not be encoded; this is a coredhcp bug, check the server log for the line starting BUG and report it",
+			http.StatusInternalServerError)
+		return
+	}
+	setJSONHeaders(w)
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
 	_, err := w.Write(buf.Bytes())
 	report(err)
 }
@@ -286,13 +302,10 @@ func badRequest(w http.ResponseWriter, r *http.Request, err error) {
 	// sends can put a newline in a log line.
 	log.Debugf("rejecting %s from %s: %v", r.URL.RequestURI(), r.RemoteAddr, err)
 
-	var buf bytes.Buffer
-	// One string into a bytes.Buffer: nothing to fail on.
-	_ = json.NewEncoder(&buf).Encode(apiError{Error: err.Error()})
-	setJSONHeaders(w)
-	w.WriteHeader(http.StatusBadRequest)
-	_, werr := w.Write(buf.Bytes())
-	report(werr)
+	body := apiError{Error: err.Error()}
+	writeJSON(w, http.StatusBadRequest, func(out io.Writer) error {
+		return json.NewEncoder(out).Encode(body)
+	})
 }
 
 // setJSONHeaders declares the body type. Cache-Control is set for every

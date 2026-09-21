@@ -1,0 +1,7 @@
+$TTL 3600
+@       IN SOA ns.all.test. hostmaster.all.test. ( 1 3600 600 86400 3600 )
+        IN NS  ns.all.test.
+ns      IN A   @LAN@.2
+; Written by hand and listed in the plugin's protect: argument, so a client
+; calling itself "gateway" must not be able to take it.
+gateway IN A   @LAN@.1
