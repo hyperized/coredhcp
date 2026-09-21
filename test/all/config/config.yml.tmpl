@@ -1,0 +1,119 @@
+# coredhcp configuration for the all-plugins end-to-end test.
+#
+# Template: scripts/render-config.sh substitutes each @MARKER@ from the
+# environment before the server starts. Every address follows from the two
+# network prefixes, so moving the stack to another range is one variable.
+#
+# Every core plugin except sleep and example appears here, in an order each
+# plugin's own documentation asks for. The comments say what the order buys;
+# test/all/README.md says which scenario proves each one.
+
+server4:
+    # One listener per attached network. Both are bound so the chain does not
+    # care which of them docker made eth0: the client side and the relay side
+    # are told apart by address, never by interface name.
+    listen:
+        - "%eth0"
+        - "%eth1"
+
+    plugins:
+        # First, so the counters see every request including the ones the
+        # plugins below drop. Both families share this socket and therefore
+        # one set of counters.
+        - metrics: unix:/run/coredhcp/metrics.sock mode:0666
+
+        # Straight after metrics, so a client over its limit costs a map
+        # lookup and nothing else. The global bucket is what bites during the
+        # burst scenario: rotating MAC addresses each get a fresh per-client
+        # bucket, which is the hole global: exists to close.
+        - ratelimit: @RATE@ burst:@RATE_BURST@ per:mac max:65536 global:@RATE_GLOBAL@
+
+        # Before server_id and before anything holding lease state. The v4
+        # allow list is matched against giaddr, the v6 one against the
+        # datagram source.
+        - relay: allow @RELAY@.3 @LAN@.3 @V6RELAY@::3 @V6LAN@::3 release-check:on
+
+        - server_id: @LAN@.2
+        - macfilter: deny @MAC_DENIED@
+
+        # Options. Everything here has to precede the allocators, because the
+        # first allocator to match a client ends the chain.
+        - lease_time: @LEASE_TIME@
+        - dns: @LAN@.1 9.9.9.9
+        - router: @LAN@.1
+        - netmask: 255.255.255.0
+        - mtu: 1400
+        - ntp: @LAN@.1
+        - searchdomains: all.test coredhcp.test
+        - staticroute: 10.99.0.0/16,@LAN@.1
+        # Option 252, the WPAD URL: a site-local code with no plugin of its
+        # own, which is what the options plugin is for.
+        - options: 252:string:http://wpad.all.test/wpad.dat
+        # Three architectures and a fallback, so two clients on the same wire
+        # get two different files.
+        - bootfile: x86-bios=tftp://@LAN@.2/undionly.kpxe x86-64-uefi=tftp://@LAN@.2/ipxe.efi arm64-uefi=tftp://@LAN@.2/ipxe-arm64.efi default=tftp://@LAN@.2/default.kpxe
+
+        # autoconfigure only acts on an OFFER that carries no address, which
+        # is every OFFER until an allocator has run, so it has to sit here
+        # rather than after range. The price is RFC 2563 section 2.3: a
+        # DISCOVER that does not carry option 116 is dropped. Every DHCPv4
+        # client in this stack sends it. See README.md, "autoconfigure".
+        - autoconfigure: DoNotAutoConfigure
+
+        # RFC 8925: a client that asks for option 108 is told to turn IPv4
+        # off, and the plugin ends the chain, so that client gets no address.
+        - ipv6only: @V6ONLY_WAIT@
+
+        # Allocators, most specific first. Each ends the chain when it
+        # matches; relayinfo and subnet only ever match relayed requests.
+        - relayinfo: file:/etc/coredhcp/relayinfo-v4.txt key:circuit-id allow @RELAY@.3
+        - netbox: http://@HELPER_HOST@:@HELPER_PORT@ token:env:NETBOX_TOKEN ttl:5m negative-ttl:5m timeout:3s
+        - redis: @REDIS_HOST@:6379 password:env:REDIS_PASSWORD key:mac timeout:2s
+        - file: /etc/coredhcp/leases-v4.txt
+        - subnet: file:/etc/coredhcp/subnets.yml
+        - range: /var/lib/coredhcp/leases4.sqlite3 @LAN@.100 @LAN@.140 @LEASE_TIME@ decline-probation:10m decline-max:8
+
+        # Readers and reporters, after the allocators so they see the address
+        # the chain settled on. None of them ends the chain.
+        - leaseapi: unix:/run/coredhcp/leaseapi.sock mode:0666
+        - ddns: server:@KNOT_IP@ zone:all.test key:ddns-key:env:DDNS_TSIG_SECRET algo:hmac-sha256 ttl:60 reverse:@LAN@.0/24 protect:gateway timeout:2s
+        - leasehook: url:http://@HELPER_HOST@:@HELPER_PORT@/hook secret:env:LEASEHOOK_SECRET timeout:2s
+        - leasehook: exec:/opt/hooks/lease-exec timeout:5s
+
+server6:
+    # The two multicast listeners are what on-link clients reach. The two
+    # wildcard listeners take the unicast Relay-forward the exerciser sends
+    # while playing the relay; the default listen set has no unicast socket
+    # and would never see one.
+    listen:
+        - "[ff02::1:2]%eth0"
+        - "[ff02::1:2]%eth1"
+        - "[::]%eth0"
+        - "[::]%eth1"
+
+    plugins:
+        - metrics: unix:/run/coredhcp/metrics.sock mode:0666
+        - ratelimit: @RATE@ burst:@RATE_BURST@ per:mac max:65536 global:@RATE_GLOBAL@
+        - relay: allow @RELAY@.3 @LAN@.3 @V6RELAY@::3 @V6LAN@::3
+        - server_id: LL @SERVER_DUID_MAC@
+        - macfilter: deny @MAC_DENIED@
+
+        - dns: @V6LAN@::1 2620:fe::fe
+        - ntp: @V6LAN@::1
+        - searchdomains: all.test coredhcp.test
+        # nbp rather than bootfile here, so both boot plugins are exercised:
+        # bootfile serves DHCPv4 above, nbp serves option 59 down here.
+        - nbp: http://[@V6LAN@::2]/nbp?params=coredhcp
+
+        - relayinfo: file:/etc/coredhcp/relayinfo-v6.txt key:interface-id allow @V6RELAY@::3
+        - netbox: http://@HELPER_HOST@:@HELPER_PORT@ token:env:NETBOX_TOKEN ttl:5m negative-ttl:5m timeout:3s
+        - redis: @REDIS_HOST@:6379 password:env:REDIS_PASSWORD key:mac timeout:2s
+        - file: /etc/coredhcp/leases-v6.txt
+        - subnet: file:/etc/coredhcp/subnets.yml
+        - range6: /var/lib/coredhcp/leases6.sqlite3 @V6LAN@::1000 @V6LAN@::1040 @LEASE_TIME@
+        - prefix: @V6PD@ 64 @LEASE_TIME@ max-prefixes:4
+
+        - leaseapi: unix:/run/coredhcp/leaseapi.sock mode:0666
+        - ddns: server:@KNOT_IP@ zone:all.test key:ddns-key:env:DDNS_TSIG_SECRET algo:hmac-sha256 ttl:60 reverse:@V6LAN@::/64 protect:gateway timeout:2s
+        - leasehook: url:http://@HELPER_HOST@:@HELPER_PORT@/hook secret:env:LEASEHOOK_SECRET timeout:2s
+        - leasehook: exec:/opt/hooks/lease-exec timeout:5s
