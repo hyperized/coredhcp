@@ -44,6 +44,10 @@ const (
 	// readSlice bounds one blocking read, so the loops below notice the
 	// overall deadline and the context without a watchdog goroutine.
 	readSlice = 100 * time.Millisecond
+
+	// dadBudget is how long a bind against a link-local address is retried
+	// while the kernel finishes duplicate address detection on it.
+	dadBudget = 10 * time.Second
 )
 
 // errNoReply is what an exchange returns when the budget ran out. Scenarios
@@ -124,31 +128,29 @@ func isReplyTo(req *dhcpv4.DHCPv4, types ...dhcpv4.MessageType) matcher {
 	}
 }
 
-// exchange sends req and waits for the first message that matches, resending
-// at retryEvery until the budget runs out.
+// exchange4 sends req and waits for the first message that matches. The read
+// between sends is what paces the retries: it blocks until retryEvery has
+// passed or the budget is up, whichever comes first.
 func exchange4(ctx context.Context, pc net.PacketConn, dst net.Addr, req *dhcpv4.DHCPv4, match matcher, budget time.Duration) (*dhcpv4.DHCPv4, error) {
 	deadline := time.Now().Add(budget)
-	nextSend := time.Now()
-	for time.Now().Before(deadline) {
+	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
-		}
-		if !time.Now().Before(nextSend) {
-			continue
 		}
 		if _, err := pc.WriteTo(req.ToBytes(), dst); err != nil {
 			return nil, fmt.Errorf("sending %s to %s: %w", req.MessageType(), dst, err)
 		}
-		nextSend = time.Now().Add(retryEvery)
-		got, ok, err := readUntil4(ctx, pc, match, minTime(nextSend, deadline))
+		got, ok, err := readUntil4(ctx, pc, match, minTime(time.Now().Add(retryEvery), deadline))
 		if err != nil {
 			return nil, err
 		}
 		if ok {
 			return got, nil
 		}
+		if !time.Now().Before(deadline) {
+			return nil, fmt.Errorf("%s: %w after %s", req.MessageType(), errNoReply, budget)
+		}
 	}
-	return nil, fmt.Errorf("%s: %w after %s", req.MessageType(), errNoReply, budget)
 }
 
 // send4 puts one message on the wire and does not wait for anything.

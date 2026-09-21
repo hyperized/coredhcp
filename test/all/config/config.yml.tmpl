@@ -1,6 +1,6 @@
 # coredhcp configuration for the all-plugins end-to-end test.
 #
-# Template: scripts/render-config.sh substitutes each @MARKER@ from the
+# Template: scripts/render-config.sh substitutes every marker in it from the
 # environment before the server starts. Every address follows from the two
 # network prefixes, so moving the stack to another range is one variable.
 #
@@ -70,8 +70,12 @@ server4:
         - netbox: http://@HELPER_HOST@:@HELPER_PORT@ token:env:NETBOX_TOKEN ttl:5m negative-ttl:5m timeout:3s
         - redis: @REDIS_HOST@:6379 password:env:REDIS_PASSWORD key:mac timeout:2s
         - file: /etc/coredhcp/leases-v4.txt
-        - subnet: file:/etc/coredhcp/subnets.yml
         - range: /var/lib/coredhcp/leases4.sqlite3 @LAN@.100 @LAN@.140 @LEASE_TIME@ decline-probation:10m decline-max:8
+        # After range, not before it. A real deployment runs one or the
+        # other; this one runs both, and the range plugin does not end the
+        # chain when it allocates, so a subnet listed ahead of it would have
+        # its scope address overwritten by the on-link pool.
+        - subnet: file:/etc/coredhcp/subnets.yml
 
         # Readers and reporters, after the allocators so they see the address
         # the chain settled on. None of them ends the chain.
@@ -101,9 +105,6 @@ server6:
         - dns: @V6LAN@::1 2620:fe::fe
         - ntp: @V6LAN@::1
         - searchdomains: all.test coredhcp.test
-        # nbp rather than bootfile here, so both boot plugins are exercised:
-        # bootfile serves DHCPv4 above, nbp serves option 59 down here.
-        - nbp: http://[@V6LAN@::2]/nbp?params=coredhcp
 
         - relayinfo: file:/etc/coredhcp/relayinfo-v6.txt key:interface-id allow @V6RELAY@::3
         - netbox: http://@HELPER_HOST@:@HELPER_PORT@ token:env:NETBOX_TOKEN ttl:5m negative-ttl:5m timeout:3s
@@ -117,3 +118,9 @@ server6:
         - ddns: server:@KNOT_IP@ zone:all.test key:ddns-key:env:DDNS_TSIG_SECRET algo:hmac-sha256 ttl:60 reverse:@V6LAN@::/64 protect:gateway timeout:2s
         - leasehook: url:http://@HELPER_HOST@:@HELPER_PORT@/hook secret:env:LEASEHOOK_SECRET timeout:2s
         - leasehook: exec:/opt/hooks/lease-exec timeout:5s
+
+        # Last, and it has to be: nbp returns "chain ended" from every path,
+        # including the one where it did nothing, so any plugin behind it
+        # never runs. bootfile, which documents that it does not end the
+        # chain, serves the same purpose for DHCPv4 above.
+        - nbp: http://[@V6LAN@::2]/nbp?params=coredhcp

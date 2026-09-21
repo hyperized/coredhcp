@@ -78,7 +78,13 @@ func (w *world) leaseFor(ctx context.Context, mac net.HardwareAddr, mods ...dhcp
 	if err != nil {
 		return nil, err
 	}
-	req, err := dhcpv4.NewRequestFromOffer(offer, append([]dhcpv4.Modifier{dhcpv4.WithBroadcast(true)}, mods...)...)
+	// The library gives a REQUEST a parameter request list of four codes,
+	// so the full one has to be put back: every plugin that honours the list
+	// would otherwise leave its option out of the ACK.
+	req, err := dhcpv4.NewRequestFromOffer(offer, append([]dhcpv4.Modifier{
+		dhcpv4.WithBroadcast(true),
+		dhcpv4.WithRequestedOptions(defaultPRL...),
+	}, mods...)...)
 	if err != nil {
 		return nil, fmt.Errorf("building a REQUEST from the offer for %s: %w", mac, err)
 	}
@@ -541,7 +547,13 @@ func runReleaseDecline(ctx context.Context, w *world) error {
 		return fmt.Errorf("taking the lease to release: %w", err)
 	}
 	relAddr := toAddr(relAck.YourIPAddr)
-	release, err := dhcpv4.NewReleaseFromACK(relAck)
+	// A parameter request list on a RELEASE is unusual, and it is here on
+	// purpose: dhcpv4.IsOptionRequested reads an absent list as "everything
+	// is requested", so a bare release looks to the ipv6only plugin like a
+	// client asking for option 108, and that plugin ends the chain before
+	// the allocator can free anything. See README.md, "ipv6only and a
+	// release".
+	release, err := dhcpv4.NewReleaseFromACK(relAck, dhcpv4.WithRequestedOptions(dhcpv4.OptionSubnetMask))
 	if err != nil {
 		return fmt.Errorf("building the RELEASE: %w", err)
 	}

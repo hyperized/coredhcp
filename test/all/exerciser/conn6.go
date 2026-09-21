@@ -18,11 +18,13 @@ import (
 
 // dhcp6 carries the two DHCPv6 sockets.
 //
-// client is bound to the link-local address of the client-side interface at
-// port 546, which is where a DHCPv6 client speaks from, and sends to
-// ff02::1:2 with that interface's zone. The zone is not optional: the
-// destination is link-local multicast and a host with two bridges has no
-// default for it.
+// client is bound to the wildcard at port 546, where a DHCPv6 client speaks
+// from, and sends to ff02::1:2 with the client-side interface's zone. The
+// zone is not optional: the destination is link-local multicast and a host
+// with two bridges has no default for it. Binding the wildcard rather than
+// the interface's own link-local is what keeps startup from racing duplicate
+// address detection, which leaves a fresh link-local unbindable for the
+// first second or so of a container's life.
 //
 // relay is an ordinary socket on port 547. A DHCPv6 relay speaks from its
 // own address and the server answers the datagram source, so the relay role
@@ -46,13 +48,9 @@ func newDHCP6(lan, serverLAN, serverRelay netip.Addr) (*dhcp6, error) {
 	if err != nil {
 		return nil, fmt.Errorf("finding the client-side interface: %w", err)
 	}
-	ll, err := dhcpv6.GetLinkLocalAddr(iface.Name)
+	client, err := net.ListenUDP("udp6", &net.UDPAddr{Port: dhcpv6.DefaultClientPort})
 	if err != nil {
-		return nil, fmt.Errorf("no link-local address on %s: %w; IPv6 has to be enabled on the bridge", iface.Name, err)
-	}
-	client, err := net.ListenUDP("udp6", &net.UDPAddr{IP: ll, Port: dhcpv6.DefaultClientPort, Zone: iface.Name})
-	if err != nil {
-		return nil, fmt.Errorf("binding [%s%%%s]:%d: %w", ll, iface.Name, dhcpv6.DefaultClientPort, err)
+		return nil, fmt.Errorf("binding [::]:%d for the client role: %w; the container needs NET_BIND_SERVICE", dhcpv6.DefaultClientPort, err)
 	}
 	relay, err := net.ListenUDP("udp6", &net.UDPAddr{Port: dhcpv6.DefaultServerPort})
 	if err != nil {
@@ -108,31 +106,28 @@ func isReplyTo6(req *dhcpv6.Message, types ...dhcpv6.MessageType) matcher6 {
 	}
 }
 
-// exchange6 sends msg and waits for the first matching answer, resending at
-// retryEvery until the budget runs out.
+// exchange6 sends msg and waits for the first matching answer. The read
+// between sends is what paces the retries, the way exchange4 does it.
 func exchange6(ctx context.Context, pc *net.UDPConn, dst *net.UDPAddr, msg dhcpv6.DHCPv6, match matcher6, budget time.Duration) (dhcpv6.DHCPv6, error) {
 	deadline := time.Now().Add(budget)
-	nextSend := time.Now()
-	for time.Now().Before(deadline) {
+	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
-		}
-		if !time.Now().Before(nextSend) {
-			continue
 		}
 		if _, err := pc.WriteTo(msg.ToBytes(), dst); err != nil {
 			return nil, fmt.Errorf("sending %s to %s: %w", msg.Type(), dst, err)
 		}
-		nextSend = time.Now().Add(retryEvery)
-		got, ok, err := readUntil6(ctx, pc, match, minTime(nextSend, deadline))
+		got, ok, err := readUntil6(ctx, pc, match, minTime(time.Now().Add(retryEvery), deadline))
 		if err != nil {
 			return nil, err
 		}
 		if ok {
 			return got, nil
 		}
+		if !time.Now().Before(deadline) {
+			return nil, fmt.Errorf("%s: %w after %s", msg.Type(), errNoReply, budget)
+		}
 	}
-	return nil, fmt.Errorf("%s: %w after %s", msg.Type(), errNoReply, budget)
 }
 
 // silence6 sends msg and fails if anything answers it inside silenceWindow.
@@ -199,4 +194,40 @@ func wrapRelay6(msg *dhcpv6.Message, link, peer netip.Addr, ifaceID string) (*dh
 		return nil, fmt.Errorf("building the Relay-forward: %w", err)
 	}
 	return rm, nil
+}
+
+// bindLinkLocal binds a socket to the link-local address of the interface
+// that carries global.
+//
+// It retries, because a link-local address is tentative while the kernel
+// runs duplicate address detection on it and a bind against a tentative
+// address is refused. A container that has just started is exactly that
+// case.
+func bindLinkLocal(ctx context.Context, global netip.Addr) (*net.UDPConn, error) {
+	iface, err := interfaceFor(global)
+	if err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(dadBudget)
+	var last error
+	for {
+		ll, err := dhcpv6.GetLinkLocalAddr(iface.Name)
+		if err != nil {
+			last = err
+		} else {
+			conn, berr := net.ListenUDP("udp6", &net.UDPAddr{IP: ll, Port: 0, Zone: iface.Name})
+			if berr == nil {
+				return conn, nil
+			}
+			last = berr
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("binding a link-local source on %s: %w; the address may still be tentative, which duplicate address detection clears within a second", iface.Name, last)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }

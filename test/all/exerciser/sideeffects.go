@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -248,10 +249,19 @@ func runNetboxRecorded(ctx context.Context, w *world) error {
 			sawUnauthorized = true
 			continue
 		}
+		// The recorded query is the raw, percent-encoded one, where a MAC
+		// address has its colons escaped. Decode it rather than comparing
+		// against the escaped spelling.
+		q, err := url.ParseQuery(r.Query)
+		if err != nil {
+			p := problems{}
+			p.addf("the mock recorded a query that does not parse: %v", err)
+			return p.err()
+		}
 		switch {
-		case strings.Contains(r.Path, "mac-addresses") && strings.Contains(strings.ToLower(r.Query), strings.ToLower(w.s.macNetbox.String())):
+		case strings.Contains(r.Path, "mac-addresses") && strings.EqualFold(q.Get("mac_address"), w.s.macNetbox.String()):
 			sawMAC = true
-		case strings.Contains(r.Path, "ip-addresses") && strings.Contains(r.Query, "status=active"):
+		case strings.Contains(r.Path, "ip-addresses") && q.Get("status") == "active":
 			sawIP = true
 		}
 	}

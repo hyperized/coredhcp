@@ -100,7 +100,10 @@ services:
   builder:
     image: golang:${GO_TAG:-1.27}
     init: true
-    network_mode: none
+    # On a network of its own rather than none, because the first run has to
+    # reach the module proxy, and rather than on lan, because a compiler does
+    # not belong on the broadcast domain the DHCP scenarios measure.
+    networks: [build]
     working_dir: /src
     command: ["/bin/sh", "-c", "/src/test/all/scripts/build.sh; trap 'exit 0' TERM INT; sleep ${SERVICE_LINGER:-3600} & wait $$!"]
     healthcheck:
@@ -187,7 +190,10 @@ services:
       retries: 60
     environment:
       <<: [*net, *macs, *secrets]
-    networks: [lan]
+    networks:
+      lan:
+        ipv4_address: ${ALL_LAN_PREFIX:-172.31.246}.7
+        ipv6_address: ${ALL_V6_LAN:-fd00:c0de:246}::7
 
   # Stands in for NetBox and for the leasehook webhook endpoint, and records
   # every request so the exerciser can assert the plugins really called out.
@@ -347,10 +353,15 @@ services:
         priority: 50
 
 networks:
+  # Only the builder is on this one, and only to fetch modules. Docker picks
+  # the subnet, since nothing here cares what it is.
+  build:
+    driver: bridge
+
   # Docker's IPAM only allocates out of ip_range, which leaves the static
-  # leases, the pools and the pinned service addresses free of any accidental
-  # collision. Every container on these bridges has a pinned address anyway,
-  # so the IPv6 side needs no equivalent.
+  # leases, the DHCP pools and the pinned service addresses free of any
+  # accidental collision. Both families need one: without an IPv6 ip_range
+  # docker starts allocating at ::2 and hands out the server's own address.
   lan:
     driver: bridge
     enable_ipv6: true
@@ -361,6 +372,7 @@ networks:
           ip_range: ${ALL_LAN_PREFIX:-172.31.246}.192/26
           gateway: ${ALL_LAN_PREFIX:-172.31.246}.1
         - subnet: ${ALL_V6_LAN:-fd00:c0de:246}::/64
+          ip_range: ${ALL_V6_LAN:-fd00:c0de:246}::f000/116
           gateway: ${ALL_V6_LAN:-fd00:c0de:246}::1
 
   relay:
@@ -373,6 +385,7 @@ networks:
           ip_range: ${ALL_RELAY_PREFIX:-172.31.247}.192/26
           gateway: ${ALL_RELAY_PREFIX:-172.31.247}.1
         - subnet: ${ALL_V6_RELAY:-fd00:c0de:247}::/64
+          ip_range: ${ALL_V6_RELAY:-fd00:c0de:247}::f000/116
           gateway: ${ALL_V6_RELAY:-fd00:c0de:247}::1
 
 volumes:

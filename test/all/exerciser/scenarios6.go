@@ -408,15 +408,12 @@ func runRelayRefused6(ctx context.Context, w *world) error {
 	if err != nil {
 		return err
 	}
-	ll, err := linkLocalOn(w.s.selfRLY6)
+	// Binding a source explicitly is what makes this a different peer from
+	// the socket the other relay scenarios use, and a link-local one is a
+	// source the relay plugin's allow list does not name.
+	conn, err := bindLinkLocal(ctx, w.s.selfRLY6)
 	if err != nil {
 		return err
-	}
-	// Binding a source explicitly is what makes this a different peer than
-	// the socket the other relay scenarios use.
-	conn, err := net.ListenUDP("udp6", &net.UDPAddr{IP: ll.AsSlice(), Port: 0, Zone: zoneOf(w.s.selfRLY6)})
-	if err != nil {
-		return fmt.Errorf("binding a link-local source: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -495,28 +492,4 @@ func runRelayInfoRefused6(ctx context.Context, w *world) error {
 		return err
 	}
 	return silence6(ctx, w.v6.relay, w.v6.serverLAN, rm, isReplyTo6(inner))
-}
-
-// linkLocalOn returns the link-local address of the interface that carries
-// global.
-func linkLocalOn(global netip.Addr) (netip.Addr, error) {
-	iface, err := interfaceFor(global)
-	if err != nil {
-		return netip.Addr{}, err
-	}
-	ip, err := dhcpv6.GetLinkLocalAddr(iface.Name)
-	if err != nil {
-		return netip.Addr{}, fmt.Errorf("no link-local address on %s: %w", iface.Name, err)
-	}
-	return toAddr(ip), nil
-}
-
-// zoneOf returns the interface name a link-local socket on the same link as
-// global has to be scoped to.
-func zoneOf(global netip.Addr) string {
-	iface, err := interfaceFor(global)
-	if err != nil {
-		return ""
-	}
-	return iface.Name
 }
