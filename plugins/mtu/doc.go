@@ -1,0 +1,36 @@
+// Copyright 2018-present the CoreDHCP Authors. All rights reserved
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
+// Package mtu tells DHCPv4 clients what MTU to use on the interface they
+// are configuring (option 26, RFC 2132 section 5.1). DHCPv4 only: DHCPv6
+// has no MTU option, and on that side the number comes from a router
+// advertisement instead.
+//
+//	server4:
+//	  plugins:
+//	    - mtu: 1500
+//
+// # Argument
+//
+// Exactly one: the MTU in bytes, as a decimal number, from 68 to 65535.
+// There is no default. No argument, more than one, something that is not a
+// number, and a number outside the range all fail setup, each with an error
+// saying what was wanted. The lower bound is the smallest MTU RFC 2132
+// allows; the upper one is as much as the two-byte option can carry.
+//
+// # Behaviour
+//
+// The option goes out only when the client asked for it. A request with no
+// parameter request list at all counts as asking for everything, which is
+// how dhcpv4.IsOptionRequested reads RFC 2131 section 3.5, so that client
+// gets the MTU too. The plugin does not look at the message type and does
+// not end the chain.
+//
+// # Placement
+//
+// Anywhere ahead of a plugin that ends the chain. It overwrites an MTU
+// already on the response and is overwritten by a later plugin that sets
+// one, so whichever runs last wins. List mtu first when a plugin that can
+// set option 26 per client, such as options, should be able to override it.
+package mtu

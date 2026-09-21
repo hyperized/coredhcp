@@ -2,20 +2,7 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// Package ipv6only implements a plugin that announces the IPv6-only
-// preferred option (RFC 8925) to DHCPv4 clients.
 package ipv6only
-
-// This plugin implements RFC8925: if the client has requested the
-// IPv6-Only Preferred option, then add the option response and then
-// terminate processing immediately.
-//
-// This module should be invoked *before* any IP address
-// allocation has been done, so that the yiaddr is 0.0.0.0 and
-// no pool addresses are consumed for compatible clients.
-//
-// The optional argument is the V6ONLY_WAIT configuration variable,
-// described in RFC8925 section 3.2.
 
 import (
 	"fmt"
@@ -57,8 +44,21 @@ func setup4(args ...string) (handler.Handler4, error) {
 	return p.Handler4, nil
 }
 
+// takesNoReply4 reports whether message type t is one the server never
+// answers (RFC 2131 section 4.4). Both types carry no parameter request
+// list, and dhcpv4.IsOptionRequested reads an absent list as every option
+// being requested, so without this check the plugin would take a release for
+// a client asking about option 108 and end the chain before the allocator
+// could free the lease.
+func takesNoReply4(t dhcpv4.MessageType) bool {
+	return t == dhcpv4.MessageTypeRelease || t == dhcpv4.MessageTypeDecline
+}
+
 // Handler4 handles DHCPv4 packets for the ipv6only plugin.
 func (p *pluginState) Handler4(req, resp *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, bool) {
+	if takesNoReply4(req.MessageType()) {
+		return resp, false
+	}
 	v6pref := req.IsOptionRequested(dhcpv4.OptionIPv6OnlyPreferred)
 	log.With(
 		"mac", req.ClientHWAddr.String(),

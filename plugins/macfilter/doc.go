@@ -1,0 +1,63 @@
+// Copyright 2018-present the CoreDHCP Authors. All rights reserved
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
+// Package macfilter implements a plugin that drops DHCP requests based on
+// the client's hardware (MAC) address, before any other plugin acts on the
+// request.
+//
+// The plugin takes one mode argument followed by one or more MAC sources:
+//
+//	server4/server6:
+//	  plugins:
+//	    - macfilter: allow 00:11:22:33:44:55 file:/etc/coredhcp/allowed-macs.txt
+//
+// The first argument selects the mode:
+//
+//   - allow: only requests from a listed MAC address are passed on; every
+//     other request is dropped.
+//   - deny: requests from a listed MAC address are dropped; every other
+//     request is passed on.
+//
+// Every remaining argument is either a MAC address, in any format accepted
+// by net.ParseMAC, or a file:/path/to/list entry naming a text file with one
+// MAC address per line. Blank lines and lines starting with '#' (after
+// leading whitespace) are ignored. Files are read once, at setup time; they
+// are not watched for changes. At least one MAC address must result from
+// the combined arguments, or setup fails; setup errors name the offending
+// argument or file line.
+//
+// Matching is exact and case-insensitive: addresses are canonicalized with
+// net.HardwareAddr.String() before comparison.
+//
+// # What a MAC filter is worth
+//
+// A MAC address is not a credential. On DHCPv4 the filter matches chaddr, a
+// field the client fills in itself; on DHCPv6 the address is derived from a
+// DUID or a relay option that the client or the relay chose. Anyone who can
+// put a frame on the segment can put any address in it. Allow mode keeps
+// honest clients off a network they do not belong on and keeps the lease pool
+// tidy. It is not authentication, and nothing here should be load-bearing
+// against someone who is trying: that is what 802.1X or a separate VLAN is
+// for.
+//
+// # Placement
+//
+// macfilter should be listed before any plugin that allocates or reserves a
+// lease (e.g. range, file, prefix), so that a dropped client never touches
+// lease state.
+//
+// # DHCPv6 and MAC-less requests
+//
+// DHCPv6 has no equivalent of DHCPv4's ClientHWAddr field: the MAC is
+// derived with dhcpv6.ExtractMAC, which looks at the relay's link-layer
+// option or the client's DUID-LL/DUID-LLT, and can fail to find one at all
+// (for example a DUID-EN client behind a relay that omits the link-layer
+// option). When no MAC can be derived, the two modes disagree on purpose:
+//
+//   - allow mode drops the request: an allow list can only pass what it
+//     recognizes, so a client it cannot identify fails closed.
+//   - deny mode passes the request: a deny list condemns specific
+//     addresses, and a client that matches none of them - because it has
+//     none to compare against - cannot be on the list.
+package macfilter

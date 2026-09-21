@@ -2,8 +2,6 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// Package dns implements a plugin that serves DNS server addresses to
-// DHCPv4 and DHCPv6 clients.
 package dns
 
 import (

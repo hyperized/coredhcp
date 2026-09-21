@@ -2,11 +2,6 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// Package serverid implements a plugin that enforces the server identifier
-// on DHCPv4 and DHCPv6 messages: a request explicitly addressed to a
-// different server (DHCPv4 option 54, DHCPv6 the ServerID option) is
-// dropped rather than answered, and so is a DHCPv4 RELEASE or DECLINE that
-// carries no server identifier at all, since RFC 2131 requires one on both.
 package serverid
 
 import (

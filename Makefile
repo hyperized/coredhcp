@@ -57,11 +57,13 @@ build:
 	go build -o bin/coredhcp-generator ./cmd/coredhcp-generator
 	cd $(TUI_DIR) && go build -o ../../bin/coredhcp-tui .
 
-# Both mains are rendered from templates in cmd/coredhcp-generator; edit the
-# template, then regenerate. CI fails when a committed main.go drifts.
+# Both mains are rendered from templates in cmd/coredhcp-generator, and every
+# plugin's README.md from its package doc; edit the template or the doc.go,
+# then regenerate. CI fails when a committed file drifts.
 generate:
 	cd cmd/coredhcp-generator && go run . -f core-plugins.txt -o ../coredhcp/main.go
 	cd cmd/coredhcp-generator && go run . -t coredhcp-tui.go.template -f core-plugins.txt -o ../coredhcp-tui/main.go
+	go generate ./plugins/
 
 test:
 	go test -count=1 -race ./...

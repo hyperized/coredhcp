@@ -1,0 +1,37 @@
+// Copyright 2018-present the CoreDHCP Authors. All rights reserved
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
+// Package netmask tells DHCPv4 clients the subnet mask of the network they
+// are on (option 1, RFC 2132 section 3.3). DHCPv4 only: a DHCPv6 client
+// takes its prefix length from a router advertisement, not from the server.
+//
+//	server4:
+//	  plugins:
+//	    - netmask: 255.255.255.0
+//
+// # Argument
+//
+// Exactly one: the mask in dotted form. There is no default. Setup fails,
+// with an error naming what is wrong, when the argument is missing or
+// repeated, when it is not four dotted octets, when it is all zeroes, and
+// when its one bits are not all leading. The last check is what rules out
+// 255.0.255.0 and its relatives: a mask has to be contiguous, and one that
+// is not is a typo rather than a subnet.
+//
+// # Behaviour
+//
+// The mask is written on every response the plugin sees, whatever the
+// client asked for and whatever it sent. Option 1 is not one a client has
+// to request: RFC 2131 section 4.3.1 has the server include a parameter it
+// was explicitly configured with whether or not the client listed it, and a
+// client holding an address with no mask is worse off than one holding a
+// mask it never asked about. The plugin does not end the chain.
+//
+// # Placement
+//
+// Anywhere ahead of a plugin that ends the chain, and ahead of any plugin
+// that works a mask out per client or per scope, subnet and redis among
+// them. Whichever runs last wins, and theirs is the one that knows which
+// network the client is actually on.
+package netmask

@@ -24,7 +24,9 @@ func TestSetup4ArgValidation(t *testing.T) {
 		{name: "no args", args: nil, wantErr: "no static route given"},
 		{name: "invalid pair", args: []string{"foo"}, wantErr: `route "foo" is not a destination and gateway pair`},
 		{name: "invalid destination", args: []string{"foo,"}, wantErr: `destination "foo" is not a CIDR subnet`},
-		{name: "invalid gateway", args: []string{"10.0.0.0/8,foo"}, wantErr: `gateway "foo" is not an IP address`},
+		{name: "invalid gateway", args: []string{"10.0.0.0/8,foo"}, wantErr: `gateway "foo" is not an IPv4 address`},
+		{name: "IPv6 destination", args: []string{"2001:db8::/32,192.168.1.1"}, wantErr: `destination "2001:db8::/32" is not an IPv4 subnet`},
+		{name: "IPv6 gateway", args: []string{"10.0.0.0/8,2001:db8::1"}, wantErr: `gateway "2001:db8::1" is not an IPv4 address`},
 	}
 
 	for _, tc := range cases {

@@ -152,10 +152,6 @@ server6:
         # - dns: <resolver IP> <... resolver IPs>
         - dns: 2001:4860:4860::8888 2001:4860:4860::8844
 
-        # nbp can add information about the location of a network boot program
-        # - nbp: <NBP URL>
-        - nbp: "http://[2001:db8:a::1]/nbp"
-
         # bootfile is nbp per architecture: it picks the boot program from the
         # architecture the client reports in option 61 instead of serving one
         # URL to everyone. Keys are architecture names, arch:<n> for any other
@@ -217,9 +213,17 @@ server6:
         # object per lease event to a URL, or runs a local program with that
         # object on stdin. DHCPv6 events are reply, release and decline.
         # Delivery is queued and never blocks the packet path, and there are
-        # no retries. List it last, after every allocator.
+        # no retries. List it after every allocator.
         # - leasehook: <url:<http(s) URL> | exec:<absolute path>> [secret:<value | env:NAME>] [timeout:2s] [queue:1000] [events:reply,release]
         # - leasehook: url:https://ipam.example/hook secret:env:HOOK_SECRET
+
+        # nbp adds the location of a network boot program. It ends the chain
+        # on every path, whether it wrote option 59, wrote nothing because
+        # the client did not ask, or was given no URL at all, so nothing
+        # listed after it ever runs. Keep it the last entry in the section:
+        # ahead of prefix or range6 it leaves the client with no address.
+        # - nbp: <NBP URL>
+        - nbp: "http://[2001:db8:a::1]/nbp"
 
 # DHCPv4 configuration
 server4:

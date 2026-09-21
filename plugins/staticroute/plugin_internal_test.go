@@ -29,7 +29,13 @@ func TestSetup4(t *testing.T) {
 
 	// invalid gateway
 	_, err = setup4("10.0.0.0/8,foo")
-	require.ErrorContains(t, err, `gateway "foo" is not an IP address`)
+	require.ErrorContains(t, err, `gateway "foo" is not an IPv4 address`)
+
+	// IPv6 in either half
+	_, err = setup4("2001:db8::/32,192.168.1.1")
+	require.ErrorContains(t, err, `destination "2001:db8::/32" is not an IPv4 subnet`)
+	_, err = setup4("10.0.0.0/8,2001:db8::1")
+	require.ErrorContains(t, err, `gateway "2001:db8::1" is not an IPv4 address`)
 
 	// valid route
 	h, err := setup4("10.0.0.0/8,192.168.1.1")

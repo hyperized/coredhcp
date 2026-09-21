@@ -1,0 +1,123 @@
+// Copyright 2018-present the CoreDHCP Authors. All rights reserved
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
+// Package subnet implements a plugin that serves more than one scope from a
+// single server, choosing the scope per request from the relay the request
+// came through, the interface it arrived on, or the address the client
+// already holds.
+//
+// # Configuration
+//
+//	server4:
+//	  plugins:
+//	    - subnet: file:/etc/coredhcp/subnets.yml
+//
+// The one argument names a YAML file listing the subnets, in the order they
+// are matched:
+//
+//	subnets:
+//	  - name: office
+//	    cidr: 10.0.1.0/24
+//	    match:
+//	      interfaces: [eth1]
+//	      relays: [10.0.1.1, 10.0.9.0/24]
+//	    pool: 10.0.1.100-10.0.1.200
+//	    lease: 12h
+//	    leasedb: /var/lib/coredhcp/office.sqlite3
+//	    reservations:
+//	      "aa:bb:cc:dd:ee:01": 10.0.1.5
+//	    options:
+//	      router: 10.0.1.1
+//	      dns: [10.0.1.53, 10.0.1.54]
+//	      domain: office.example
+//	      ntp: [10.0.1.123]
+//	  - name: guests
+//	    cidr: 2001:db8:2::/48
+//	    match:
+//	      interfaces: [eth2]
+//	    prefixpool: 2001:db8:2::/48
+//	    prefixsize: 64
+//	    lease: 1h
+//	    options:
+//	      dns: [2001:db8:2::53]
+//	  - name: fallback
+//	    cidr: 10.0.0.0/24
+//	    default: true
+//	    pool: 10.0.0.100-10.0.0.200
+//	    lease: 1h
+//	    leasedb: /var/lib/coredhcp/fallback.sqlite3
+//	    options: {router: 10.0.0.1}
+//
+// A subnet's cidr fixes its family, and the server4 and server6 sections each
+// only see the subnets of their own. Both families are read from the same
+// file, and both validate all of it, so a mistake in a DHCPv6 subnet fails a
+// DHCPv4 server too. A section whose family has no subnets in the file fails
+// setup rather than loading a plugin that could never match.
+//
+// Decoding is strict: a key that is not one of these fails setup by name. The
+// file is read once, during setup. Editing it has no effect until the server
+// is restarted.
+//
+// # Selection
+//
+// For DHCPv4, the first subnet that matches one of these wins:
+//
+//  1. giaddr is set, and the subnet lists the address in match.relays, or
+//     lists no relays at all and has it inside its cidr.
+//  2. giaddr is unset, and the subnet lists the receiving interface in
+//     match.interfaces. The interface comes from the request context, so it
+//     is only known for a plugin the server dispatches with one.
+//  3. ciaddr, or the requested address in option 50, is inside the subnet's
+//     cidr. This is what catches a client renewing or rebinding from an
+//     address it already has.
+//  4. The subnet marked default: true.
+//
+// DHCPv6 is the same list without rule 3, which has no DHCPv6 equivalent, and
+// with the outermost relay's link-address in place of giaddr. A relayed
+// request is never matched on its interface: it arrives on the interface
+// facing the relay, which says nothing about the link the client is on.
+//
+// A request that matches nothing passes through untouched, with a line in the
+// debug log, so a later plugin can still serve it.
+//
+// # What a subnet answers with
+//
+// A selected DHCPv4 subnet sets the subnet mask from its cidr, and the
+// router, DNS, domain name and NTP options it configures. They are set
+// unconditionally rather than only when the client asks for them, as the
+// options plugin does, because a client that leaves a parameter out of its
+// request list still has to be told which router and mask its link uses.
+//
+// The address then comes from one of two places. A client whose MAC is in
+// reservations gets that address and ends the chain. Every other client is
+// handed to a range plugin instance built for this subnet's pool, and
+// whatever it answers is what this plugin answers. RELEASE and DECLINE go
+// straight to that same instance, which owns the lease record; the server
+// sends no reply to either. INFORM gets the options and nothing else.
+//
+// A selected DHCPv6 subnet sets its resolvers and then delegates to a prefix
+// plugin instance for its prefixpool. A subnet without a prefixpool, or a
+// DHCPv4 subnet without a pool, sets its options and lets the chain continue,
+// which is how a scope that only carries options is written.
+//
+// Each subnet gets a range or prefix instance of its own, with a separate
+// allocator and lease database. Two subnets may not share a leasedb
+// path or overlap pools: separate allocators over shared addresses hand the
+// same address to two clients.
+//
+// # Placement
+//
+// subnet replaces the per-scope option plugins and the pool plugin, so list
+// it instead of router, netmask, dns and range, after server_id and any
+// filtering plugin. Options set by a plugin listed after it still win, since
+// handlers run in configuration order and each overwrites what came before.
+// A range or subnet listed after this one overwrites the address it handed
+// out, because a client served from a pool does not end the chain.
+//
+// # Concurrency
+//
+// Everything is built during setup and only read afterwards, so one loaded
+// plugin serves every listener goroutine. The lease state behind it lives in
+// the delegate range and prefix instances, which do their own locking.
+package subnet

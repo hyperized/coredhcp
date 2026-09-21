@@ -2,8 +2,6 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// Package router implements a plugin that serves the default gateway
-// option to DHCPv4 clients.
 package router
 
 import (

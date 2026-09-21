@@ -113,3 +113,13 @@ jobs:
             echo "::error::a committed main.go no longer matches its template, run 'make generate'"
             exit 1
           fi
+      - name: committed plugin READMEs match their package docs
+        run: |
+          set -exu
+          cd "${GITHUB_WORKSPACE}"
+          # -check reads what is in the checkout, so a README that was never
+          # committed counts as a difference rather than passing unnoticed.
+          if ! go run ./cmd/coredhcp-docgen -check; then
+            echo "::error::a plugin README no longer matches its package doc, run 'make generate'"
+            exit 1
+          fi

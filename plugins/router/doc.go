@@ -1,0 +1,40 @@
+// Copyright 2018-present the CoreDHCP Authors. All rights reserved
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
+// Package router serves the default gateway to DHCPv4 clients, as option 3.
+//
+//	server4:
+//	  plugins:
+//	    - router: 10.0.0.1
+//
+// Every argument is one gateway address and at least one is required; there
+// is no default. Each has to be IPv4 in dotted form: an argument that does
+// not parse, or an IPv6 address, fails setup with the argument quoted, and
+// the server does not start. RFC 2132 section 3.5 has the list in order of
+// preference, so write the gateway clients should use first.
+//
+// # DHCPv4 only
+//
+// There is no DHCPv6 half. DHCPv6 has no router option at all: a host
+// learns its gateway from the router advertisements on the link, which is
+// why RFC 8415 never defined one. Listing router under server6 is not a
+// startup error, but the loader warns that the plugin has no setup function
+// for that family and skips it, so the rest of the chain runs without it.
+//
+// # Placement
+//
+// This is an option plugin. It never ends the chain and it never drops a
+// request, so it belongs with the other option plugins: after server_id and
+// any filtering plugin, and before the plugin that hands out an address,
+// because the first allocator to answer a client ends the chain. A plugin
+// listed after this one that writes option 3 wins, since each handler
+// overwrites what the one before it left on the response.
+//
+// # Behaviour
+//
+// The option goes on every response the chain builds. That includes the
+// ACK for a DHCPINFORM, which is the exchange a client uses to ask for
+// options without taking a lease, and the response built for a RELEASE or
+// DECLINE, which the server throws away without sending.
+package router
