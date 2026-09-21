@@ -341,8 +341,9 @@ Fourteen come from upstream:
   (option 121) to DHCPv4 clients
 
 `prefix`, `range` and `range6` share the pool arithmetic in
-[allocators](plugins/allocators/), which carves blocks of a given size out
-of a larger one.
+[allocators](plugins/allocators/), an interface that carves blocks of a
+given size out of a larger one; the IPv4 and IPv6 bitmap implementations
+behind it live in [allocators/bitmap](plugins/allocators/bitmap/).
 
 This fork adds fifteen more upstream does not have built in:
 
