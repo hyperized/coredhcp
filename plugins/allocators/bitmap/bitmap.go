@@ -2,14 +2,6 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// This allocator only returns prefixes of a single size
-// This is much simpler to implement (reduces the problem to an equivalent of
-// single ip allocations), probably makes sense in cases where the available
-// range is much larger than the expected number of clients. Also is what KEA
-// does so at least it's not worse than that
-
-// Package bitmap provides bitmap-backed allocators for IPv4 addresses and
-// IPv6 prefixes.
 package bitmap
 
 import (

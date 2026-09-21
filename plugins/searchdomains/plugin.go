@@ -2,11 +2,7 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// Package searchdomains implements a plugin that hands out the DNS search
-// list to DHCPv4 and DHCPv6 clients.
 package searchdomains
-
-// This is an searchdomains plugin that adds default DNS search domains.
 
 import (
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -21,16 +17,6 @@ import (
 var log = logger.GetLogger("plugins/searchdomains")
 
 // Plugin wraps the default DNS search domain options.
-// Note that importing the plugin is not enough to use it: you have to
-// explicitly specify the intention to use it in the `config.yml` file, in the
-// plugins section. For searchdomains:
-//
-// server6:
-//
-//	listen: '[::]547'
-//	- searchdomains: domain.a domain.b
-//	- server_id: LL aa:bb:cc:dd:ee:ff
-//	- file: "leases.txt"
 var Plugin = plugins.Plugin{
 	Name:   "searchdomains",
 	Setup6: setup6,

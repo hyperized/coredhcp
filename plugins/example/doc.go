@@ -1,0 +1,54 @@
+// Copyright 2018-present the CoreDHCP Authors. All rights reserved
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
+// Package example is a working plugin that does nothing useful, written to
+// be read. It is the starting point for writing your own: the source is
+// commented from registration through setup to the handler, for DHCPv4 and
+// DHCPv6 both.
+//
+// It ships in neither binary. core-plugins.txt, the list coredhcp-generator
+// builds cmd/coredhcp and cmd/coredhcp-tui from, does not name it, so the
+// configuration below only does anything in a build of your own that does.
+//
+//	server4:
+//	  plugins:
+//	    - example:
+//	server6:
+//	  plugins:
+//	    - example:
+//
+// # Arguments
+//
+// None. Whatever is written after the colon is accepted and ignored: the
+// setup functions do not look at their arguments.
+//
+// # Behaviour
+//
+// It logs a one-line summary of every request it sees and hands the response
+// on untouched, for every message type, in both families. It never ends the
+// chain and never changes a reply, so it goes anywhere. First is the useful
+// place, since that way it logs requests a later plugin would have dropped.
+//
+// # Two plugins, one package
+//
+// The package declares two. Plugin is named example and uses the plain
+// Setup4 and Setup6. PluginContext is named example_context and uses
+// Setup4Ctx. Nothing ties a plugin to a package one to one; what the
+// registry holds is a name. Nothing registers PluginContext either, so
+// example_context is there to be copied rather than configured.
+//
+// What separates the two forms is what the handler is given. A context-aware
+// handler receives the context the server dispatched the request with, and
+// handler.RequestInfoFrom reads out of it which interface the request
+// arrived on and which address it came from. Neither is anywhere in the DHCP
+// payload, so a plugin that picks a subnet per interface, or rate limits per
+// source, has to have this form. A plugin uses one form or the other per
+// family; registration refuses one that declares both, since only one of
+// them could ever be called.
+//
+// The request information can be absent, for a handler called from a test or
+// through the older LoadPlugins API, so read it with the two-value form and
+// cope with false. And the context belongs to the call: nothing taken out of
+// it may outlive the handler.
+package example

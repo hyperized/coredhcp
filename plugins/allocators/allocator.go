@@ -2,9 +2,6 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// Package allocators provides the interface and the algorithm(s) for allocation of ipv6
-// prefixes of various sizes within a larger prefix.
-// There are many many parallels with memory allocation.
 package allocators
 
 import (

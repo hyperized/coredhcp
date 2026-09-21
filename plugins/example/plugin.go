@@ -2,14 +2,7 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// Package example implements a documented no-op plugin that serves as a
-// starting point for writing new plugins.
 package example
-
-// This is an example plugin that inspects a packet and prints it out. The code
-// is commented in a way that should walk you through the implementation of your
-// own plugins.
-// Feedback is welcome!
 
 import (
 	"context"

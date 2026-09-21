@@ -1,0 +1,55 @@
+// Copyright 2018-present the CoreDHCP Authors. All rights reserved
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
+// Package autoconfigure answers the DHCPv4 client that asked for an address,
+// got none, and said in its request that it wanted to be told so (option
+// 116, RFC 2563). DHCPv4 only: the option has no DHCPv6 counterpart.
+//
+//	server4:
+//	  plugins:
+//	    - autoconfigure: DoNotAutoConfigure
+//
+// # Argument
+//
+// One optional argument, the value the plugin puts in option 116:
+//
+//   - DoNotAutoConfigure, or 0: the client should not configure an address of
+//     its own. This is what you get when the argument is left out.
+//   - AutoConfigure, or 1: the client may pick a 169.254.0.0/16 link-local
+//     address for itself.
+//
+// Any other value fails setup, and the error lists the four spellings. So
+// does a second argument: the plugin takes at most one.
+//
+// # Behaviour
+//
+// The plugin reads the response the chain has built so far and leaves it
+// alone unless it is an OFFER whose yiaddr is still 0.0.0.0, which is to say
+// a DISCOVER that nothing before it could answer with an address. For such a
+// request there are two cases:
+//
+//   - the DISCOVER carries option 116: the configured value goes into the
+//     OFFER and the chain carries on, so the client learns both that it got
+//     no address and what it is meant to do about that.
+//   - the DISCOVER does not carry option 116: the request is dropped and the
+//     chain ends. RFC 2563 section 2.3 says a DISCOVER without the option is
+//     not answered when no address is chosen for the host, and this is where
+//     that happens.
+//
+// Every other message type passes through untouched, since the response for
+// a REQUEST, INFORM, RELEASE or DECLINE is never an OFFER.
+//
+// # Placement
+//
+// Last, after every plugin that might hand out an address.
+//
+// Which plugins those are matters more than the position. An allocator that
+// drops the request when it has nothing left to give never lets a DISCOVER
+// reach the end of the chain with an empty yiaddr, and range is one of
+// those: an exhausted pool means the client hears nothing at all rather than
+// being told to configure itself, and autoconfigure behind it is dead
+// weight. It earns its place in a chain whose address plugins pass an
+// unrecognised client on instead, file, redis and netbox among them, where a
+// client with no reservation does reach the end with yiaddr still zero.
+package autoconfigure

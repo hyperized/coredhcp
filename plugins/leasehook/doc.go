@@ -1,0 +1,143 @@
+// Copyright 2018-present the CoreDHCP Authors. All rights reserved
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
+// Package leasehook implements a plugin that tells other systems what this
+// server just handed out, over a webhook or a local program. Same idea as
+// Kea's run_script hook and dnsmasq's dhcp-script: a way to feed an IPAM, an
+// inventory or a monitoring pipeline without teaching it to read lease
+// files.
+//
+// # Configuration
+//
+//	server4:
+//	  plugins:
+//	    - leasehook: url:https://ipam.example/hook secret:env:HOOK_SECRET timeout:2s queue:1000
+//
+//	server6:
+//	  plugins:
+//	    - leasehook: exec:/usr/local/bin/lease-event timeout:5s events:reply,release
+//
+// Exactly one of url: and exec: is required and says where events go. A URL
+// has to be http or https. An exec path has to be absolute, so what runs does
+// not depend on the server's working directory or on PATH.
+//
+// The rest is optional, may be given in any order, and each key may appear
+// once. An argument that is not one of these fails setup by name rather than
+// being ignored:
+//
+//   - secret:<value> or secret:env:<NAME> signs the webhook body. The env:
+//     form reads the variable once, during setup, and fails when it is unset
+//     or empty. It is the better form: the config loader prints every plugin's
+//     arguments at startup, and while it replaces the value of a secret:
+//     argument with ***, a secret that never enters the config file cannot
+//     leak from it either. The key has no meaning in exec mode and is refused
+//     there.
+//   - timeout:<duration> bounds one delivery, default 2s.
+//   - queue:<n> is the length of the event queue, default 1000.
+//   - events:<name>,<name> restricts what is delivered to the named events.
+//     The default is all of them.
+//
+// # Events
+//
+// An event is built from what the plugin can see at its position in the chain,
+// which is why placement matters (see below). DHCPv4:
+//
+//   - offer, ack: the chain produced an OFFER or an ACK carrying an address.
+//   - nak: the chain produced a NAK.
+//   - release, decline: the client sent a RELEASE (the address is ciaddr) or a
+//     DECLINE (the address is the one in option 50). The server answers
+//     neither, but the chain still runs for both.
+//
+// DHCPv6:
+//
+//   - reply: the Reply carries at least one IA_NA address or IA_PD prefix.
+//   - release, decline: the client is giving up or refusing what its own
+//     message names.
+//
+// # Payload
+//
+// One JSON object per event, with the empty fields left out:
+//
+//	{
+//	  "family": 4,
+//	  "event": "ack",
+//	  "time": "2026-09-05T12:00:00Z",
+//	  "mac": "aa:bb:cc:dd:ee:ff",
+//	  "duid": "00030001aabbccddeeff",
+//	  "hostname": "laptop",
+//	  "addresses": ["10.0.0.5/32"],
+//	  "prefixes": ["2001:db8:1::/64"],
+//	  "lease_seconds": 3600,
+//	  "relay": "10.0.1.1",
+//	  "transaction_id": "11223344"
+//	}
+//
+// duid and prefixes only ever appear on DHCPv6 events. Addresses are written
+// as host routes, /32 and /128, because a lease is one address: the subnet
+// mask a DHCPv4 client is told to use is a separate option that any plugin in
+// the chain may have set, and reporting it here would suggest the lease covers
+// the whole subnet. relay carries giaddr on DHCPv4 and the link address of the
+// relay closest to the client on DHCPv6.
+//
+// The hostname is whatever the client put in option 12, or in the DHCPv6 FQDN
+// option, cut to 255 bytes. It is a JSON string like any other, so the encoder
+// escapes it; a consumer still has to treat it as text a stranger chose.
+//
+// # Delivery
+//
+// The handler serialises the event, puts it on a buffered channel and returns.
+// A single worker goroutine drains that channel in order. Nothing on the
+// packet path ever waits for an HTTP round trip or a fork: a hook endpoint
+// that has stopped answering slows down deliveries, not DHCP.
+//
+// When the queue is full the event is dropped and counted, and a line goes to
+// the log at most once a minute. A server whose endpoint has stalled drops
+// events by the thousand, and one line each would bury everything else.
+//
+// A webhook delivery is a POST with Content-Type: application/json, the
+// signature header when a secret is configured, and no retries. A DHCP client
+// that gets no answer retransmits and produces a fresh event; a redelivery
+// queue would either grow without bound or reorder events, and an endpoint
+// that has to see every one should acknowledge quickly and queue on its own
+// side. A non-2xx answer, a redirect included, is logged with its status: the
+// client does not follow a redirect, so an endpoint that has moved has to be
+// pointed at directly.
+//
+// With a secret configured, every POST carries
+//
+//	X-Coredhcp-Signature: sha256=<hex HMAC-SHA256 of the exact request body>
+//
+// Verify it against the raw bytes with a constant-time comparison before
+// parsing them.
+//
+// An exec delivery runs the program with no arguments, the JSON body on
+// stdin, and an environment built from scratch rather than handed the
+// server's own: PATH, HOME, TMPDIR, LANG and any LC_* locale variable,
+// whichever of those the server itself has, plus LEASEHOOK_EVENT,
+// LEASEHOOK_FAMILY, LEASEHOOK_MAC, LEASEHOOK_ADDRESSES (space separated) and
+// LEASEHOOK_HOSTNAME. Nothing else the server carries, including a secret
+// another plugin was given with env:NAME, ever reaches the program.
+// Delegated prefixes are on stdin only. A non-zero exit is logged with the
+// first kilobyte of stderr.
+//
+// # Security
+//
+// Every field of a DHCP packet is chosen by whoever sent it. Nothing from a
+// packet is ever put on a command line: the program is executed directly, with
+// no arguments and no shell, so a hostname full of metacharacters is only ever
+// data. Control characters are replaced in the environment variables, because
+// a NUL would stop the program from starting at all and an escape sequence
+// would be acted on by whatever reads the script's output.
+//
+// # Placement
+//
+// List leasehook last, after every allocator. It reports what the response
+// carries at the moment it runs, so a plugin further down that assigns the
+// address, or changes the lease time, does so after the event was built. A
+// plugin ahead of it that stops the chain hides those requests entirely.
+//
+// setup4 and setup6 build one instance each, so a server running both families
+// has two queues and two workers. A DHCPv6 burst then cannot push DHCPv4
+// events out of a shared queue.
+package leasehook

@@ -2,22 +2,6 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// Package metrics implements a plugin that counts DHCP traffic and serves the
-// counters over HTTP in the Prometheus text exposition format.
-//
-// The exposition is written by hand rather than through the Prometheus client
-// library: two monotonic counters and one static gauge are a handful of
-// Fprintf calls, against a dependency subtree in a fork that keeps its go.mod
-// deliberately short.
-//
-// # Where it may listen
-//
-// A unix socket or a loopback port, and nothing else. The rules are shared
-// with the leaseapi plugin through the endpoint package: an exposition says
-// how much traffic the server sees and of what kind, and there is no
-// authentication to put in front of it. An operator who wants the endpoint
-// reachable from elsewhere puts a reverse proxy in front of it and
-// authenticates there, or lets the scraper read the unix socket.
 package metrics
 
 import (

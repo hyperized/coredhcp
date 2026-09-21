@@ -2,24 +2,7 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// Package autoconfigure implements a plugin that answers the DHCPv4
-// autoconfigure option (RFC 2563) for clients that get no address.
 package autoconfigure
-
-// This plugin implements RFC2563:
-// 1. If the client has been allocated an IP address, do nothing
-// 2. If the client has not been allocated an IP address
-//    (yiaddr=0.0.0.0), then:
-//    2a. If the client has requested the "AutoConfigure" option,
-//        then add the defined value to the response
-//    2b. Otherwise, terminate processing and send no reply
-//
-// This plugin should be used at the end of the plugin chain,
-// after any IP address allocation has taken place.
-//
-// The optional argument is the string "DoNotAutoConfigure" or
-// "AutoConfigure" (or "0" or "1" respectively).  The default
-// is DoNotAutoConfigure.
 
 import (
 	"fmt"

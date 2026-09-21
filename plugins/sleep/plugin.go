@@ -2,11 +2,7 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// Package sleep implements a plugin that delays responses by a fixed
-// duration, useful for testing timeout behaviour.
 package sleep
-
-// This plugin introduces a delay in the DHCP response.
 
 import (
 	"fmt"
@@ -24,21 +20,6 @@ var (
 	pluginName = "sleep"
 	log        = logger.GetLogger("plugins/" + pluginName)
 )
-
-// Example configuration of the `sleep` plugin:
-//
-// server4:
-//   plugins:
-//     - sleep 300ms
-//     - file: "leases4.txt"
-//
-// server6:
-//   plugins:
-//     - sleep 1s
-//     - file: "leases6.txt"
-//
-// For the duration format, see the documentation of `time.ParseDuration`,
-// https://golang.org/pkg/time/#ParseDuration .
 
 // Plugin contains the `sleep` plugin data.
 var Plugin = plugins.Plugin{
