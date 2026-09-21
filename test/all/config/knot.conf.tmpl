@@ -1,0 +1,51 @@
+# Knot DNS for the all-plugins test, shaped like test/ddns/knot.conf: the
+# ddns plugin's TSIG key, one forward zone and the two reverse zones that
+# cover the networks the server leases from.
+#
+# The rendered zone files land in /zones, which Knot never writes back to:
+# zonefile-sync is off, so accepted updates only ever reach the journal under
+# /storage.
+#
+# The ACL is as wide as the plugin's own key, one key for every name in the
+# zone. What stops one client taking another's name is the DHCID
+# prerequisites the plugin sends, and testing those means letting Knot be the
+# one that refuses them.
+server:
+    rundir: "/rundir"
+    user: knot:knot
+    listen: [ 0.0.0.0@53, ::@53 ]
+
+log:
+  - target: stdout
+    any: info
+
+database:
+    storage: "/storage"
+
+key:
+  - id: ddns-key
+    algorithm: hmac-sha256
+    secret: @DDNS_TSIG_SECRET@
+
+acl:
+  - id: ddns-acl
+    key: ddns-key
+    action: update
+
+template:
+  - id: default
+    storage: "/zones"
+    zonefile-sync: -1
+    zonefile-load: difference-no-serial
+    journal-content: all
+    acl: ddns-acl
+
+zone:
+  - domain: all.test
+    file: "all.test.zone"
+
+  - domain: @REV4_ZONE@
+    file: "rev4.zone"
+
+  - domain: @REV6_ZONE@
+    file: "rev6.zone"

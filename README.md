@@ -53,6 +53,7 @@ $ make test             # unit tests with the race detector
 $ make test-linux       # the same suite on Linux, in a container
 $ make test-integration # DHCPv6 against a client in network namespaces
 $ make test-compose     # DHCPv4 against clients on a docker bridge
+$ make test-all         # every core plugin, both families, in compose
 $ make test-redis       # the redis plugin against a real Redis, in compose
 $ make test-ddns        # the ddns plugin against a real Knot DNS, in compose
 $ make lint             # golangci-lint, pinned version, in a container
@@ -193,6 +194,16 @@ run several copies on one host, as parallel CI jobs do:
 ```
 $ make test-compose COMPOSE_PROJECT=coredhcp-mr123 DHCP_NET_PREFIX=172.31.241
 ```
+
+`make test-all` runs every core plugin in one chain
+([test/all/](test/all/)): the server built from the Dockerfile with all 29 of
+them configured across `server4` and `server6`, Knot, Redis and a mock NetBox
+behind it, and a Go exerciser that plays both the client and the relay from
+two bridges at once. It asserts each plugin's own effect rather than only
+that a lease came back, and it reads the side channels too: the records the
+ddns plugin wrote, the webhook and exec deliveries, the lease API and the
+metrics socket. Its README has the topology, the scenario table, and three
+things about plugin ordering the stack had to work around.
 
 `make test-redis` runs the redis plugin's integration tests against a real
 Redis server ([test/redis/](test/redis/)): one container for Redis with a

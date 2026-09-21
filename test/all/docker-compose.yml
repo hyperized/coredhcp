@@ -1,0 +1,401 @@
+# End-to-end test stack exercising every core plugin of coredhcp.
+#
+# Drive it with `make test-all` from the repo root, which sets the project
+# name and tears the stack down afterwards. README.md in this directory has
+# the topology, the scenario table and how to read a failure.
+#
+# Two bridges. `lan` is the client side: the server, the exerciser and the
+# three backends (Knot, Redis, the NetBox and webhook mock) sit on it.
+# `relay` is a second link that only the server and the exerciser reach; the
+# exerciser uses its address there as giaddr and as the DHCPv6 relay source,
+# which is what lets one container play both the client and the relay.
+#
+# Only the exerciser ever exits: `up --exit-code-from exerciser` stops
+# honouring the exit code as soon as some other container has exited first,
+# so everything else idles until teardown.
+#
+# Knobs, all with defaults: COMPOSE_PROJECT_NAME, ALL_LAN_PREFIX,
+# ALL_RELAY_PREFIX, ALL_V6_LAN, ALL_V6_RELAY, ALL_LEASE_TIME, GO_TAG,
+# KNOT_TAG, REDIS_TAG, BUSYBOX_TAG, COREDHCP_LOGLEVEL (worth setting to debug
+# when a run fails) and EXERCISER_TIMEOUT.
+
+name: ${COMPOSE_PROJECT_NAME:-coredhcp-all-itest}
+
+# One place for the addresses that appear in more than one service, so the
+# rendered configuration and the exerciser's expectations cannot drift.
+x-net: &net
+  LAN: ${ALL_LAN_PREFIX:-172.31.246}
+  RELAY: ${ALL_RELAY_PREFIX:-172.31.247}
+  V6LAN: ${ALL_V6_LAN:-fd00:c0de:246}
+  V6RELAY: ${ALL_V6_RELAY:-fd00:c0de:247}
+
+# The MAC addresses each scenario is keyed on. They are locally administered
+# (the 02: prefix) and never collide with what docker hands the containers.
+x-macs: &macs
+  MAC_FILE: "02:00:00:a1:10:11"
+  MAC_FILE6: "02:00:00:a1:10:16"
+  MAC_DENIED: "02:00:00:a1:10:ff"
+  MAC_NETBOX: "02:00:00:a1:10:20"
+  MAC_NETBOX_NOTFOUND: "02:00:00:a1:10:21"
+  MAC_REDIS: "02:00:00:a1:10:22"
+
+x-secrets: &secrets
+  NETBOX_TOKEN: ${ALL_NETBOX_TOKEN:-nbt_coredhcp_all_plugins_itest_token}
+  LEASEHOOK_SECRET: ${ALL_LEASEHOOK_SECRET:-coredhcp-all-plugins-hook-secret}
+  REDIS_PASSWORD: ${ALL_REDIS_PASSWORD:-coredhcp-itest}
+  DDNS_TSIG_SECRET: ${ALL_DDNS_TSIG_SECRET:-Y29yZWRoY3AtZGRucy1nb2xkZW4tdGVzdC1rZXkhISE=}
+
+x-gocache: &gocache
+  GOFLAGS: -buildvcs=false
+  GOMODCACHE: /go/pkg/mod
+  GOCACHE: /root/.cache/go-build
+
+services:
+  # Renders every configuration file from config/ into the volumes the
+  # server and Knot read, and opens up the two volumes a non-root process
+  # writes into. It idles afterwards instead of exiting, and its dependents
+  # wait on the healthcheck: if rendering fails the config never appears,
+  # this service stays unhealthy, and compose fails the run on the
+  # dependency rather than hanging.
+  config-render:
+    image: busybox:${BUSYBOX_TAG:-1.37.0}
+    init: true
+    # No network at all: it only writes files.
+    network_mode: none
+    # `;` not `&&`, so a failed render also idles (unhealthy) instead of
+    # exiting and disarming --exit-code-from for the whole run.
+    command: ["/bin/sh", "-c", "/src/scripts/render-config.sh; trap 'exit 0' TERM INT; sleep ${SERVICE_LINGER:-3600} & wait $$!"]
+    healthcheck:
+      test: ["CMD", "test", "-f", "/etc/coredhcp/config.yaml"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+    environment:
+      <<: [*net, *macs, *secrets]
+      V6PD: ${ALL_V6_PD:-fd00:c0de:2460::/48}
+      LEASE_TIME: ${ALL_LEASE_TIME:-5m}
+      RATE: ${ALL_RATE:-100/s}
+      RATE_BURST: ${ALL_RATE_BURST:-200}
+      RATE_GLOBAL: ${ALL_RATE_GLOBAL:-100/s}
+      V6ONLY_WAIT: ${ALL_V6ONLY_WAIT:-300s}
+      CIRCUIT_ID: rack4-sw1:eth3
+      INTERFACE_ID: rack4-sw1:eth7
+      HELPER_HOST: helper
+      HELPER_PORT: "8080"
+      REDIS_HOST: redis
+      KNOT_IP: ${ALL_LAN_PREFIX:-172.31.246}.5
+      SERVER_DUID_MAC: "02:00:00:a1:10:02"
+    volumes:
+      - ./:/src:ro
+      - coredhcp-conf:/etc/coredhcp
+      - coredhcp-run:/run/coredhcp
+      - knot-conf:/etc/knot
+      - knot-zones:/zones
+      - results:/results
+
+  # Compiles the helper, the exerciser and the leasehook exec target into a
+  # volume the other services run them from. One build rather than three:
+  # the exec target has to be a static binary because it runs inside the
+  # distroless server image, which has no toolchain and no shell.
+  builder:
+    image: golang:${GO_TAG:-1.27}
+    init: true
+    # On a network of its own rather than none, because the first run has to
+    # reach the module proxy, and rather than on lan, because a compiler does
+    # not belong on the broadcast domain the DHCP scenarios measure.
+    networks: [build]
+    working_dir: /src
+    command: ["/bin/sh", "-c", "/src/test/all/scripts/build.sh; trap 'exit 0' TERM INT; sleep ${SERVICE_LINGER:-3600} & wait $$!"]
+    healthcheck:
+      test: ["CMD", "test", "-x", "/out/exerciser"]
+      interval: 2s
+      timeout: 2s
+      retries: 150
+    environment:
+      <<: *gocache
+    volumes:
+      - ../..:/src:ro
+      - hookbin:/out
+      # Module and build caches persist between runs so a rerun does not
+      # compile the world again.
+      - gomodcache:/go/pkg/mod
+      - gobuildcache:/root/.cache/go-build
+
+  # Takes the ddns plugin's TSIG-signed RFC 2136 updates. Same shape as
+  # test/ddns: zone files mounted read only, accepted updates in the journal.
+  knot:
+    image: docker.io/cznic/knot:${KNOT_TAG:-v3.5.8}
+    init: true
+    depends_on:
+      config-render:
+        condition: service_healthy
+    command: ["knotd", "-c", "/etc/knot/knot.conf"]
+    # kdig against the forward zone's own SOA is both the liveness and the
+    # readiness check: Knot only answers once the zone is loaded.
+    healthcheck:
+      test: ["CMD-SHELL", "kdig @127.0.0.1 all.test SOA +short | grep -q ns.all.test"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+    volumes:
+      - knot-conf:/etc/knot:ro
+      - knot-zones:/zones:ro
+      - knot-storage:/storage
+    networks:
+      lan:
+        ipv4_address: ${ALL_LAN_PREFIX:-172.31.246}.5
+        ipv6_address: ${ALL_V6_LAN:-fd00:c0de:246}::5
+
+  redis:
+    image: redis:${REDIS_TAG:-8.10.0-alpine}
+    init: true
+    # A password is set on purpose so the plugin's AUTH path gets exercised.
+    command: ["redis-server", "--requirepass", "${ALL_REDIS_PASSWORD:-coredhcp-itest}", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${ALL_REDIS_PASSWORD:-coredhcp-itest}", "--no-auth-warning", "ping"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+    networks:
+      lan:
+        ipv4_address: ${ALL_LAN_PREFIX:-172.31.246}.6
+        ipv6_address: ${ALL_V6_LAN:-fd00:c0de:246}::6
+
+  # Writes the one client hash the redis plugin is expected to answer from,
+  # then idles. Seeding from a container rather than from the exerciser keeps
+  # a RESP client out of the test program.
+  redis-seed:
+    image: redis:${REDIS_TAG:-8.10.0-alpine}
+    init: true
+    depends_on:
+      redis:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        redis-cli -h redis -a "$$REDIS_PASSWORD" --no-auth-warning HSET "mac:$$MAC_REDIS" \
+          ipv4 "$$LAN.22/24" \
+          ipv6 "$$V6LAN::22" \
+          router "$$LAN.9" \
+          dns "$$LAN.8,$$V6LAN::8" \
+          leaseTime 90m
+        trap 'exit 0' TERM INT
+        sleep ${SERVICE_LINGER:-3600} & wait $$!
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -h redis -a \"$$REDIS_PASSWORD\" --no-auth-warning HEXISTS \"mac:$$MAC_REDIS\" ipv4 | grep -q 1"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+    environment:
+      <<: [*net, *macs, *secrets]
+    networks:
+      lan:
+        ipv4_address: ${ALL_LAN_PREFIX:-172.31.246}.7
+        ipv6_address: ${ALL_V6_LAN:-fd00:c0de:246}::7
+
+  # Stands in for NetBox and for the leasehook webhook endpoint, and records
+  # every request so the exerciser can assert the plugins really called out.
+  helper:
+    image: golang:${GO_TAG:-1.27}
+    init: true
+    depends_on:
+      builder:
+        condition: service_healthy
+      config-render:
+        condition: service_healthy
+    command: ["/out/helper"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+    environment:
+      <<: *secrets
+      HELPER_ADDR: ":8080"
+      HELPER_RESULTS: /results
+      NETBOX_MAC: "02:00:00:a1:10:20"
+      NETBOX_MAC_NOTFOUND: "02:00:00:a1:10:21"
+      NETBOX_ADDR4: ${ALL_LAN_PREFIX:-172.31.246}.20/24
+      NETBOX_ADDR6: ${ALL_V6_LAN:-fd00:c0de:246}::20/64
+    volumes:
+      - hookbin:/out:ro
+      - results:/results
+    networks:
+      lan:
+        ipv4_address: ${ALL_LAN_PREFIX:-172.31.246}.4
+        ipv6_address: ${ALL_V6_LAN:-fd00:c0de:246}::4
+
+  server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    depends_on:
+      config-render:
+        condition: service_healthy
+      builder:
+        condition: service_healthy
+      knot:
+        condition: service_healthy
+      redis-seed:
+        condition: service_healthy
+      helper:
+        condition: service_healthy
+    command: ["--conf", "/etc/coredhcp/config.yaml", "--loglevel", "${COREDHCP_LOGLEVEL:-info}"]
+    # No privileged mode. NET_BIND_SERVICE covers udp/67 and udp/547,
+    # NET_RAW covers SO_BINDTODEVICE on the interface-bound listeners and the
+    # AF_PACKET socket used to answer clients that have no address yet.
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE, NET_RAW]
+    environment:
+      <<: *secrets
+    volumes:
+      - coredhcp-conf:/etc/coredhcp:ro
+      # The range, range6, prefix and subnet plugins write lease databases,
+      # so they get a writable volume rather than a loosened config mount.
+      - coredhcp-leasedb:/var/lib/coredhcp
+      # The leaseapi and metrics unix sockets.
+      - coredhcp-run:/run/coredhcp
+      # The leasehook exec target, and the file it appends to.
+      - hookbin:/opt/hooks:ro
+      - results:/results
+    networks:
+      lan:
+        # Fixed, because the configured server identifier names it.
+        ipv4_address: ${ALL_LAN_PREFIX:-172.31.246}.2
+        ipv6_address: ${ALL_V6_LAN:-fd00:c0de:246}::2
+        priority: 100
+      relay:
+        ipv4_address: ${ALL_RELAY_PREFIX:-172.31.247}.2
+        ipv6_address: ${ALL_V6_RELAY:-fd00:c0de:247}::2
+        priority: 50
+
+  # Says when the server has bound both families, so the exerciser does not
+  # race the listeners. It is a service of its own because the check needs a
+  # shell and the server image is distroless; sharing the server's network
+  # namespace puts it in front of the same /proc/net files, where 0043 is
+  # port 67 and 0223 is port 547 in the hex notation those files use.
+  server-ready:
+    image: busybox:${BUSYBOX_TAG:-1.37.0}
+    init: true
+    depends_on: [server]
+    network_mode: "service:server"
+    cap_drop: [ALL]
+    command: ["/bin/sh", "-c", "trap 'exit 0' TERM INT; sleep ${SERVICE_LINGER:-3600} & wait $$!"]
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q ':0043 ' /proc/net/udp && grep -q ':0223 ' /proc/net/udp6"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+
+  # Exits last and decides the outcome of the run: `up --exit-code-from
+  # exerciser` returns this container's exit code.
+  exerciser:
+    image: golang:${GO_TAG:-1.27}
+    init: true
+    depends_on:
+      server-ready:
+        condition: service_healthy
+    command: ["/out/exerciser"]
+    # NET_RAW for the AF_PACKET socket the on-link DHCPv4 client needs,
+    # NET_BIND_SERVICE for udp/67 and udp/547 in the relay role.
+    cap_drop: [ALL]
+    cap_add: [NET_RAW, NET_BIND_SERVICE]
+    environment:
+      <<: [*net, *macs, *secrets]
+      SERVER_LAN4: ${ALL_LAN_PREFIX:-172.31.246}.2
+      SERVER_RELAY4: ${ALL_RELAY_PREFIX:-172.31.247}.2
+      SERVER_LAN6: ${ALL_V6_LAN:-fd00:c0de:246}::2
+      SERVER_RELAY6: ${ALL_V6_RELAY:-fd00:c0de:247}::2
+      SELF_LAN4: ${ALL_LAN_PREFIX:-172.31.246}.3
+      SELF_RELAY4: ${ALL_RELAY_PREFIX:-172.31.247}.3
+      SELF_LAN6: ${ALL_V6_LAN:-fd00:c0de:246}::3
+      SELF_RELAY6: ${ALL_V6_RELAY:-fd00:c0de:247}::3
+      # An address on neither bridge: a giaddr the relay plugin's allow list
+      # does not name, which is the reflection the plugin exists to refuse.
+      FOREIGN_RELAY4: 192.0.2.77
+      CONFIG_PATH: /etc/coredhcp/config.yaml
+      LEASEAPI_SOCKET: /run/coredhcp/leaseapi.sock
+      METRICS_SOCKET: /run/coredhcp/metrics.sock
+      HELPER_URL: http://helper:8080
+      KNOT_ADDR: ${ALL_LAN_PREFIX:-172.31.246}.5:53
+      DNS_ZONE: all.test
+      CIRCUIT_ID: rack4-sw1:eth3
+      INTERFACE_ID: rack4-sw1:eth7
+      RELAYINFO_ADDR4: ${ALL_RELAY_PREFIX:-172.31.247}.31
+      RELAYINFO_ADDR6: ${ALL_V6_RELAY:-fd00:c0de:247}::31
+      FILE_ADDR4: ${ALL_LAN_PREFIX:-172.31.246}.11
+      FILE_ADDR6: ${ALL_V6_LAN:-fd00:c0de:246}::11
+      NETBOX_ADDR4: ${ALL_LAN_PREFIX:-172.31.246}.20
+      NETBOX_ADDR6: ${ALL_V6_LAN:-fd00:c0de:246}::20
+      REDIS_ADDR4: ${ALL_LAN_PREFIX:-172.31.246}.22
+      REDIS_ADDR6: ${ALL_V6_LAN:-fd00:c0de:246}::22
+      SUBNET_POOL4: ${ALL_RELAY_PREFIX:-172.31.247}.100-${ALL_RELAY_PREFIX:-172.31.247}.120
+      SUBNET_ROUTER4: ${ALL_RELAY_PREFIX:-172.31.247}.1
+      SUBNET_DNS6: ${ALL_V6_RELAY:-fd00:c0de:247}::1
+      RESULTS_DIR: /results
+      EXERCISER_TIMEOUT: ${EXERCISER_TIMEOUT:-420s}
+      BURST_REQUESTS: ${ALL_BURST_REQUESTS:-1200}
+    volumes:
+      - hookbin:/out:ro
+      - coredhcp-conf:/etc/coredhcp:ro
+      - coredhcp-run:/run/coredhcp
+      - results:/results
+    networks:
+      lan:
+        ipv4_address: ${ALL_LAN_PREFIX:-172.31.246}.3
+        ipv6_address: ${ALL_V6_LAN:-fd00:c0de:246}::3
+        priority: 100
+      relay:
+        ipv4_address: ${ALL_RELAY_PREFIX:-172.31.247}.3
+        ipv6_address: ${ALL_V6_RELAY:-fd00:c0de:247}::3
+        priority: 50
+
+networks:
+  # Only the builder is on this one, and only to fetch modules. Docker picks
+  # the subnet, since nothing here cares what it is.
+  build:
+    driver: bridge
+
+  # Docker's IPAM only allocates out of ip_range, which leaves the static
+  # leases, the DHCP pools and the pinned service addresses free of any
+  # accidental collision. Both families need one: without an IPv6 ip_range
+  # docker starts allocating at ::2 and hands out the server's own address.
+  lan:
+    driver: bridge
+    enable_ipv6: true
+    ipam:
+      driver: default
+      config:
+        - subnet: ${ALL_LAN_PREFIX:-172.31.246}.0/24
+          ip_range: ${ALL_LAN_PREFIX:-172.31.246}.192/26
+          gateway: ${ALL_LAN_PREFIX:-172.31.246}.1
+        - subnet: ${ALL_V6_LAN:-fd00:c0de:246}::/64
+          ip_range: ${ALL_V6_LAN:-fd00:c0de:246}::f000/116
+          gateway: ${ALL_V6_LAN:-fd00:c0de:246}::1
+
+  relay:
+    driver: bridge
+    enable_ipv6: true
+    ipam:
+      driver: default
+      config:
+        - subnet: ${ALL_RELAY_PREFIX:-172.31.247}.0/24
+          ip_range: ${ALL_RELAY_PREFIX:-172.31.247}.192/26
+          gateway: ${ALL_RELAY_PREFIX:-172.31.247}.1
+        - subnet: ${ALL_V6_RELAY:-fd00:c0de:247}::/64
+          ip_range: ${ALL_V6_RELAY:-fd00:c0de:247}::f000/116
+          gateway: ${ALL_V6_RELAY:-fd00:c0de:247}::1
+
+volumes:
+  coredhcp-conf:
+  coredhcp-leasedb:
+  coredhcp-run:
+  knot-conf:
+  knot-zones:
+  knot-storage:
+  hookbin:
+  results:
+  gomodcache:
+  gobuildcache:

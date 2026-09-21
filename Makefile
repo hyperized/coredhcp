@@ -11,6 +11,17 @@ DHCP_NET_PREFIX  ?= 172.31.240
 export DHCP_NET_PREFIX
 COMPOSE_TEST = docker compose -p $(COMPOSE_PROJECT) -f test/compose/docker-compose.yml
 
+# The all-plugins stack under test/all/: every core plugin in one chain, two
+# bridges so one container can be both the client and the relay, and a Go
+# exerciser that runs a scenario per plugin. Its own project name and network
+# prefixes, so it can run next to the stacks above.
+ALL_PROJECT      ?= coredhcp-all-itest
+ALL_LAN_PREFIX   ?= 172.31.246
+ALL_RELAY_PREFIX ?= 172.31.247
+export ALL_LAN_PREFIX
+export ALL_RELAY_PREFIX
+COMPOSE_ALL = docker compose -p $(ALL_PROJECT) -f test/all/docker-compose.yml
+
 # The redis plugin's integration tests under test/redis/: a real Redis and a Go
 # container running the tagged tests against it.
 REDIS_PROJECT ?= coredhcp-redis-itest
@@ -35,7 +46,7 @@ COMPOSE_DEMO = docker compose -p $(DEMO_PROJECT) -f test/demo/docker-compose.yml
 # see it; the targets below run each step in both modules.
 TUI_DIR = cmd/coredhcp-tui
 
-.PHONY: all build generate test test-linux test-integration test-compose test-redis test-ddns demo lint cover bench fuzz fmt clean docker-image
+.PHONY: all build generate test test-linux test-integration test-compose test-all test-redis test-ddns demo lint cover bench fuzz fmt clean docker-image
 
 all: build
 
@@ -78,6 +89,17 @@ test-compose:
 	trap teardown EXIT INT TERM; \
 	teardown; \
 	$(COMPOSE_TEST) up --build --exit-code-from checker
+
+# Every core plugin end to end: the server built from the Dockerfile with all
+# 29 of them in one chain, Knot, Redis and a mock NetBox behind it, and an
+# exerciser that asserts each plugin's own effect and exits with the result.
+# The stack is torn down whether it passes or not.
+test-all:
+	@set -eu; \
+	teardown() { $(COMPOSE_ALL) down --volumes --remove-orphans >/dev/null 2>&1 || true; }; \
+	trap teardown EXIT INT TERM; \
+	teardown; \
+	$(COMPOSE_ALL) up --build --exit-code-from exerciser
 
 # Integration tests for the redis plugin against a real Redis server, in
 # compose. The netbox plugin's integration tests have no stack here: they run
