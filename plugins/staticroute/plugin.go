@@ -2,8 +2,6 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-// Package staticroute implements a plugin that serves classless static
-// routes (option 121) to DHCPv4 clients.
 package staticroute
 
 import (
@@ -53,10 +51,14 @@ func setup4(args ...string) (handler.Handler4, error) {
 		if err != nil {
 			return p.Handler4, fmt.Errorf("destination %q is not a CIDR subnet; write it as <address>/<prefix length>, for example 10.0.0.0/8", fields[0])
 		}
+		// Option 121 holds IPv4 only, and the encoder panics on anything else.
+		if route.Dest.IP.To4() == nil {
+			return p.Handler4, fmt.Errorf("destination %q is not an IPv4 subnet; option 121 carries IPv4 routes only, for example 10.0.0.0/8", fields[0])
+		}
 
-		route.Router = net.ParseIP(fields[1])
+		route.Router = net.ParseIP(fields[1]).To4()
 		if route.Router == nil {
-			return p.Handler4, fmt.Errorf("gateway %q is not an IP address; give it as a dotted address, for example 192.0.2.1", fields[1])
+			return p.Handler4, fmt.Errorf("gateway %q is not an IPv4 address; give it as a dotted address, for example 192.0.2.1", fields[1])
 		}
 
 		p.routes = append(p.routes, route)

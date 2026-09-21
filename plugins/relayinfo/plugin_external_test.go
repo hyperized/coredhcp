@@ -391,12 +391,13 @@ func TestHandler6InterfaceID(t *testing.T) {
 			req, resp := relayed6(t, tc.opts...)
 			result, stop := h(ctxFromPeer(t, v6Peer), req, resp)
 			require.NotNil(t, result)
-			assert.False(t, stop, "the DHCPv6 chain always continues")
 
 			if tc.wantAddr == "" {
+				assert.False(t, stop, "an unmatched request continues the chain")
 				assert.Nil(t, result.GetOneOption(dhcpv6.OptionIANA))
 				return
 			}
+			assert.True(t, stop, "a matched key ends the DHCPv6 chain")
 			addr := requireIAAddr(t, result)
 			assert.Equal(t, tc.wantAddr, addr.IPv6Addr.String())
 			assert.Equal(t, tc.wantLease, addr.PreferredLifetime)
@@ -441,7 +442,7 @@ func TestHandler6RemoteID(t *testing.T) {
 			req, resp := relayed6(t, tc.opts...)
 			result, stop := h(ctxFromPeer(t, v6Peer), req, resp)
 			require.NotNil(t, result)
-			assert.False(t, stop)
+			assert.Equal(t, tc.wantAddr != "", stop, "only a matched key ends the DHCPv6 chain")
 
 			if tc.wantAddr == "" {
 				assert.Nil(t, result.GetOneOption(dhcpv6.OptionIANA))
@@ -467,8 +468,45 @@ func TestHandler6NestedRelays(t *testing.T) {
 
 	result, stop := h(ctxFromPeer(t, v6Peer), aggregation, resp)
 	require.NotNil(t, result)
-	assert.False(t, stop)
+	assert.True(t, stop)
 	assert.Equal(t, "2001:db8::52", requireIAAddr(t, result).IPv6Addr.String())
+}
+
+// TestHandler6OneIANAPerIAID pins the reply down to a single IA_NA. A
+// matched mapping is a fixed assignment, so relayinfo replaces an IA_NA a
+// plugin ahead of it left in the reply and ends the chain, which is what
+// stops a range6 behind it from adding a second one for the same IAID. Two
+// IA_NA options with one IAID is not a reply RFC 8415 section 21.4 allows,
+// and the compose stack produced exactly that before the fix.
+func TestHandler6OneIANAPerIAID(t *testing.T) {
+	h := handler6(t, "interface-id", "rack4-sw1:eth3 2001:db8::31\n")
+	req, resp := relayed6(t, dhcpv6.OptInterfaceID([]byte("rack4-sw1:eth3")))
+
+	inner, err := req.GetInnerMessage()
+	require.NoError(t, err)
+	iaid := inner.Options.OneIANA().IaId
+	resp.AddOption(&dhcpv6.OptIANA{
+		IaId: iaid,
+		Options: dhcpv6.IdentityOptions{Options: []dhcpv6.Option{
+			&dhcpv6.OptIAAddress{
+				IPv6Addr:          net.ParseIP("2001:db8::ff"),
+				PreferredLifetime: time.Hour,
+				ValidLifetime:     time.Hour,
+			},
+		}},
+	})
+
+	result, stop := h(ctxFromPeer(t, v6Peer), req, resp)
+	require.NotNil(t, result)
+	assert.True(t, stop, "a matched key ends the chain, so nothing behind relayinfo adds another IA_NA")
+	require.Len(t, result.GetOption(dhcpv6.OptionIANA), 1, "the mapping replaces the IA_NA already in the reply")
+
+	addr := requireIAAddr(t, result)
+	assert.Equal(t, "2001:db8::31", addr.IPv6Addr.String())
+
+	iana, ok := result.GetOneOption(dhcpv6.OptionIANA).(*dhcpv6.OptIANA)
+	require.True(t, ok)
+	assert.Equal(t, iaid, iana.IaId)
 }
 
 func TestHandler6PassesThrough(t *testing.T) {

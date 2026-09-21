@@ -7,6 +7,7 @@ package ipv6only
 import (
 	"testing"
 
+	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -41,4 +42,23 @@ func TestSetup4(t *testing.T) {
 		assert.Nil(t, h)
 		assert.ErrorContains(t, err, `"not-a-duration" is not a duration`)
 	})
+}
+
+func TestTakesNoReply4(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   dhcpv4.MessageType
+		want bool
+	}{
+		{"RELEASE", dhcpv4.MessageTypeRelease, true},
+		{"DECLINE", dhcpv4.MessageTypeDecline, true},
+		{"DISCOVER", dhcpv4.MessageTypeDiscover, false},
+		{"REQUEST", dhcpv4.MessageTypeRequest, false},
+		{"INFORM", dhcpv4.MessageTypeInform, false},
+		{"none", dhcpv4.MessageTypeNone, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, takesNoReply4(tc.in))
+		})
+	}
 }
